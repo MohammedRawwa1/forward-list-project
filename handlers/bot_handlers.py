@@ -5,15 +5,13 @@ from telegram.ext import (
     CallbackContext,
 )
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from conversation_states import DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE
 import logging
 from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 
 # Logger setup
 logger = logging.getLogger(__name__)
-
-# Conversation states for deleting all data
-DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE = range(3, 6)
 
 # Helper function to generate pagination keyboard
 async def generate_pagination_keyboard(items_list, page, page_size, callback_pattern):
