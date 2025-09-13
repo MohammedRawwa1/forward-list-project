@@ -223,11 +223,11 @@ async def delete_category_start(update: Update, context: CallbackContext):
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
-    """Show inline buttons with *all* courses that exist in DB."""
+    """Show every course in the DB as inline buttons."""
     db = await get_db()
-    courses = await db.courses.find().distinct("name")                # ← real list
+    courses = await db.courses.find().distinct("name")      # real global list
     if not courses:
-        await update.message.reply_text("You have no courses to delete.")
+        await update.message.reply_text("No courses to delete.")
         return
 
     keyboard = [
@@ -236,7 +236,7 @@ async def delete_item_start(update: Update, context: CallbackContext):
     ]
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
     await update.message.reply_text(
-        "Choose the course you want to delete:", 
+        "Choose the course you want to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
         
