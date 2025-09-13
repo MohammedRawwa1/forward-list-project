@@ -73,7 +73,8 @@ async def send_message_with_backoff(application: Application, chat_id: int, text
 
 # 1.  define the callback
 async def global_error_handler(update: object, context: object) -> None:
-    logger.error("Update '%s' caused error:\n%s", update, traceback.format_exc())
+    logger.error("Update '%s' caused error:\n%s", update,
+                 "".join(traceback.format_exception(None, context.error, context.error.__traceback__)))
 
 # 2.  inside startup_event, AFTER application exists
 @app.on_event("startup")
