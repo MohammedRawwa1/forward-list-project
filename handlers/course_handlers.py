@@ -41,32 +41,6 @@ async def add_course_name(update: Update, context: CallbackContext):
     # Ask for the course link
     await update.message.reply_text("Please enter the link for the course:")
     return LINK
-
-async def add_course_link(update: Update, context: CallbackContext):
-    course_link = update.message.text
-    context.user_data['course_link'] = course_link
-
-    # Save the course to the database
-    try:
-        db = await MongoDB.get_db()
-        collection = db['courses']
-
-        # Insert the new course
-        result = await collection.insert_one({
-            "name": context.user_data['course_name'],
-            "link": course_link,
-            "category": context.user_data['category_name'],
-            "created_by": update.effective_user.id
-        })
-        logger.info(f"Course '{context.user_data['course_name']}' created with ID: {result.inserted_id}")
-
-        await update.message.reply_text(f"Course '{context.user_data['course_name']}' added successfully!")
-    except Exception as e:
-        logger.error(f"Error creating course: {e}")
-        await update.message.reply_text("Failed to add the course. Please try again.")
-    finally:
-        # End the conversation
-        return ConversationHandler.END
     
 async def add_course_link(update: Update, context: CallbackContext):
     """Save the course URL and prompt for the category."""
