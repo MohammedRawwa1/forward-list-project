@@ -43,26 +43,29 @@ async def add_course_name(update: Update, context: CallbackContext):
     if not name:
         await update.message.reply_text("Name can’t be empty – try again.")
         return NAME
+
     context.user_data['course_name'] = name
     await update.message.reply_text("Please enter the course link (must start with http/https):")
     return LINK
 
 
-# ----------  add_course_link  ----------
 async def add_course_link(update: Update, context: CallbackContext):
-    """Validate link, store it, then show category picker."""
     link = update.message.text.strip()
 
-    # basic URL check
     if not re.match(r'^https?://', link):
         await update.message.reply_text("❗️ Invalid URL. Please provide a valid link.")
-        return LINK          # stay in the same state, user can retry
+        return LINK
 
     context.user_data['course_link'] = link
 
-    # fetch categories
-    db = await get_db()
-    cats = await db.categories.find().to_list(length=None)
+    try:
+        db = await get_db()
+        cats = await db.categories.find().to_list(length=None)
+    except Exception as e:
+        logger.error("DB error in add_course_link: %s", e)
+        await update.message.reply_text("❗️ Could not connect to the database. Try again later.")
+        return ConversationHandler.END
+
     if not cats:
         await update.message.reply_text("No categories available. Create one first with /create_category")
         return ConversationHandler.END
