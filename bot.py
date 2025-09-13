@@ -1,4 +1,4 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, error as telegram_error
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -54,7 +54,6 @@ from conversation_states import (
 )
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 from database.mongo_handler import MongoDB
-from handlers.db_connection import get_db
 from dotenv import load_dotenv
 import logging
 import os
