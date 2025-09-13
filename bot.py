@@ -45,7 +45,8 @@ from handlers.bot_handlers import (
     delete_category_start,
     confirm_delete_all,
     cancel_delete_all_data,
-    initiate_delete_item
+    initiate_delete_item,
+    delete_course_menu
 )
 from conversation_states import (
     NAME, LINK, CATEGORY, CATEGORY_NAME,
