@@ -38,6 +38,7 @@ async def add_course_start(update: Update, context: CallbackContext):
 
 # ----------  add_course_name  ----------
 async def add_course_name(update: Update, context: CallbackContext):
+    logger.info("[ADD] add_course_name called by %s", update.effective_user.id)
     name = update.message.text.strip()
     logger.info("[ADD] name received: %r", name)
     if not name:
