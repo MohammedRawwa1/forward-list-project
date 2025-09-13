@@ -65,6 +65,7 @@ from dotenv import load_dotenv
 import logging
 import os
 import asyncio
+import traceback
 import re
 
 load_dotenv()
@@ -80,6 +81,11 @@ logger = logging.getLogger(__name__)
 def is_valid_category_name(category_name: str):
     return bool(re.match(r"^[a-zA-Z0-9\s\-]+$", category_name))
 
+async def global_error_handler(update: object, context: object) -> None:
+    logger.error("Update '%s' caused error:\n%s", update, traceback.format_exc())
+
+# register it **after** you build the application
+application.add_error_handler(global_error_handler)
 
 # ----------  application factory  ----------
 async def create_application():
