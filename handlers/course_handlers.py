@@ -36,10 +36,15 @@ async def add_course_start(update: Update, context: CallbackContext):
     return NAME
 
 async def add_course_name(update: Update, context: CallbackContext):
-    course_name = update.message.text
+    """Save the course name and ask for the link."""
+    course_name = update.message.text.strip()
+    if not course_name:
+        await update.message.reply_text("Name can’t be empty – try again.")
+        return NAME                     # stay in the same state
+
     context.user_data['course_name'] = course_name
 
-    # Ask for the course link
+    # ⬇️  await the prompt so it is actually delivered
     await update.message.reply_text("Please enter the link for the course:")
     return LINK
     
