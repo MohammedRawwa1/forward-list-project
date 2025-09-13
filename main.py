@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from bot import create_application, setup_handlers
 from telegram import Update, error as telegram_error  # Import telegram_error
-from telegram.ext import Application, filters, TypeHandler, CallbackContext
+from telegram.ext import Application
 from dotenv import load_dotenv
 from database.mongo_handler import MongoDB
 from loguru import logger
@@ -93,7 +93,8 @@ async def startup_event():
     await set_webhook_with_backoff(application, webhook_url)
     # 3.  register it here
     application.add_error_handler(global_error_handler)
-
+    
+from telegram.ext import TypeHandler, CallbackContext
 async def echo_update(update: Update, context: CallbackContext):
     logger.info("RAW update %s | user=%s chat=%s",
                 update.update_id,
