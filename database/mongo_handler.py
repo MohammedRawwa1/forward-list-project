@@ -97,25 +97,24 @@ class MongoDB:
             logger.error(f"Error occurred while retrieving categories: {e}")
             raise MongoConnectionError(f"Failed to retrieve categories: {e}")
 
+    # mongo_handler.py  (add inside ensure_indexes)
+# ------------------------------------------------------------------
     @classmethod
     async def ensure_indexes(cls, collection_name='categories', indexes=None):
-        """Ensure necessary indexes are created in the database."""
-        indexes = indexes or [('name', 1)]  # Default index to ensure
-        try:
-            db = await cls.get_db()
-            collection = db[collection_name]
-            existing_indexes = await collection.index_information()
+        indexes = indexes or [('name', 1)]
+        db = await cls.get_db()
+        coll = db[collection_name]
 
-            for index in indexes:
-                index_name = f"{index[0]}_{index[1]}"
-                if index_name not in existing_indexes:
-                    await collection.create_index([index])
-                    logger.info(f"Index on '{index[0]}' field created successfully.")
-                else:
-                    logger.info(f"Index on '{index[0]}' field already exists.")
+        # --- categories ---
+        if 'name_1' not in await coll.index_information():
+            await coll.create_index('name', unique=True)
+            logger.info("Unique index on categories.name created")
 
-        except Exception as e:
-            logger.error(f"Error creating index: {e}")
+        # --- courses ---
+        coll = db['courses']
+        if 'name_1' not in await coll.index_information():
+            await coll.create_index('name', unique=True)
+            logger.info("Unique index on courses.name created")
 
     @classmethod
     async def delete_all_categories(cls):
