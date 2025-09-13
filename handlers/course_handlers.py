@@ -48,47 +48,35 @@ async def add_course_name(update: Update, context: CallbackContext):
     await update.message.reply_text("Please enter the link for the course:")
     return LINK
     
+# course_handlers.py  (replace the whole add_course_link function)
+# ------------------------------------------------------------------
 async def add_course_link(update: Update, context: CallbackContext):
     """Save the course URL and prompt for the category."""
-    course_name = context.user_data.get('course_name')
-    course_link = update.message.text
+    course_link = update.message.text.strip()
 
-    if not course_name or not course_link:
-        await update.message.reply_text("Invalid input. Please try again.")
-        return ConversationHandler.END
-
-    # Validate URL
-    if not re.match(r'^(http|https)://', course_link):
-        await update.message.reply_text("Invalid URL. Please provide a valid URL.")
-        return
+    # basic URL check
+    if not re.match(r'^https?://', course_link):
+        await update.message.reply_text("❗️ Invalid URL. Please provide a valid link.")
+        return LINK          # stay in the same state, user can retry
 
     context.user_data['course_link'] = course_link
 
-    # Fetch available categories
+    # fetch categories
     db = await get_db()
-    if db is None:
-        await update.message.reply_text("Error: Unable to connect to the database.")
+    cats = await db.categories.find().to_list(length=None)
+    if not cats:
+        await update.message.reply_text("No categories available. Create one first with /create_category")
         return ConversationHandler.END
 
-    try:
-        collection = db['categories']
-        categories = await collection.find().to_list(length=20)
-        if not categories:
-            await update.message.reply_text("No categories available. Please create a category first.")
-            return ConversationHandler.END
-
-        # Create a keyboard for category selection
-        keyboard = [
-            [InlineKeyboardButton(category['name'], callback_data=f"category_{category['name']}")]
-            for category in categories
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text("Select a category for the course:", reply_markup=reply_markup)
-        return CATEGORY
-    except Exception as e:
-        logger.error(f"Error fetching categories: {e}")
-        await update.message.reply_text("An error occurred while fetching categories. Please try again later.")
-        return ConversationHandler.END
+    keyboard = [
+        [InlineKeyboardButton(c['name'], callback_data=f"category_{c['name']}")]
+        for c in cats
+    ]
+    await update.message.reply_text(
+        "Pick a category for the course:", 
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return CATEGORY
         
 async def category_selected(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
