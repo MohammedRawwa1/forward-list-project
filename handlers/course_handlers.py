@@ -46,7 +46,7 @@ async def add_course_name(update: Update, context: CallbackContext):
         return NAME
 
     context.user_data['course_name'] = name
-    await update.message.reply_text("Please enter the course link (must start with http/https):")
+    await update.message.reply_text("Please enter the course link (it should start with http:// or https://).")
     return LINK
 
 
@@ -59,6 +59,9 @@ async def add_course_link(update: Update, context: CallbackContext):
 
     context.user_data['course_link'] = link
 
+    logger.info(f"[ADD] Course link received: {link}")
+
+    # Check if there are categories available
     try:
         db = await get_db()
         cats = await db.categories.find().to_list(length=None)
@@ -71,6 +74,7 @@ async def add_course_link(update: Update, context: CallbackContext):
         await update.message.reply_text("No categories available. Create one first with /create_category")
         return ConversationHandler.END
 
+    # Send category selection keyboard
     keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"category_{c['name']}")] for c in cats]
     await update.message.reply_text(
         "Pick a category for the course:",
@@ -94,21 +98,28 @@ async def category_selected(update: Update, context: CallbackContext):
         await query.edit_message_text("Error: Course data is missing. Please try again.")
         return ConversationHandler.END
 
+    # Connect to the database
     db = await get_db()
-    if db is None:
+    if not db:
         await query.edit_message_text("Error: Unable to connect to the database.")
         return ConversationHandler.END
 
     try:
-        # Save the course to the database
+        # Save course to the database
         collection = db['courses']
         await collection.insert_one({
             "name": course_name,
             "link": course_link,
             "category": category_name
         })
-        await query.edit_message_text(f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉")
+
+        # Send a confirmation message
+        await query.edit_message_text(
+            f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉\n"
+            f"Course Link: {course_link}"
+        )
         return ConversationHandler.END
+
     except Exception as e:
         logger.error(f"Error saving course: {e}")
         await query.edit_message_text("An error occurred while saving the course. Please try again later.")
