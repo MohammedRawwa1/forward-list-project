@@ -8,9 +8,7 @@ from handlers.base_handlers import (
     handle_courses_pagination,
     handle_course_selection,
     handle_category_name,
-    handle_category_selection,
-    CATEGORY,
-    CATEGORY_NAME
+    handle_category_selection
 )
 from handlers.course_handlers import (
     setup_course_handlers,
@@ -46,3 +44,4 @@ from handlers.bot_handlers import (
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 from handlers.constants import MAX_CATEGORY_NAME_LENGTH, CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA
 from conversation_states import NAME, LINK, CATEGORY, CATEGORY_NAME
+
