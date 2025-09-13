@@ -188,7 +188,7 @@ async def main():
         if webhook_url:
             await application.bot.set_webhook(webhook_url)
 
-        await application.run_webhook(port=10000, webhook_path="/webhook")
+        await application.run_webhook(port=int(os.getenv("PORT", 10000)), webhook_path="/webhook")
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
 
