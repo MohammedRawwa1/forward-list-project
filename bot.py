@@ -100,7 +100,20 @@ async def create_application():
         logger.error(f"Failed to create application: {e}")
         raise
 
-
+logger.info("=== HANDLER REGISTRY ===")
+logger.info("Conversation /add : %s", any(
+    isinstance(h, ConversationHandler) and
+    any(isinstance(e, CommandHandler) and e.commands == ("add",) for e in h.entry_points)
+    for h in application.handlers.values()
+))
+logger.info("Callback delete_item_ : %s", any(
+    isinstance(h, CallbackQueryHandler) and h.pattern and h.pattern.pattern == "^delete_item_"
+    for h in application.handlers.values()
+))
+logger.info("Callback delete_category_ : %s", any(
+    isinstance(h, CallbackQueryHandler) and h.pattern and h.pattern.pattern == "^delete_category_"
+    for h in application.handlers.values()
+))
 # ----------  register everything  ----------
 async def setup_handlers(application: Application):
     if not application:
@@ -123,7 +136,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
-    application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
+    application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern="^delete_item_"))
     application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
     application.add_handler(CallbackQueryHandler(handle_courses_pagination, pattern=r"^courses_(prev|next)_\d+$"))
     application.add_handler(CallbackQueryHandler(handle_categories_pagination, pattern=r"^categories_(prev|next)_\d+$"))
