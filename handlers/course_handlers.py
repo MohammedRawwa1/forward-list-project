@@ -2,6 +2,7 @@ from telegram.ext import ConversationHandler, MessageHandler, CommandHandler, Ca
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from conversation_states import NAME, LINK, CATEGORY
 from handlers.db_connection import get_db
+from pymongo.errors import PyMongoError
 import logging
 import re
 
