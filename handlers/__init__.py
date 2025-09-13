@@ -1,4 +1,5 @@
 # 1.  base-handlers  (add the missing export)
+__all__ = []
 from handlers.base_handlers import (
     help,
     list_courses,
@@ -67,5 +68,6 @@ from conversation_states import (
     CANCEL_DELETE,
     MAX_CATEGORY_NAME_LENGTH,
 )
+
 
 
