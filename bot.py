@@ -125,15 +125,16 @@ async def setup_handlers(application: Application):
 
     # ----------  conversations  ----------
     await setup_course_handlers(application)
-        application.add_handler(ConversationHandler(
+    application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add", add_course_start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
-            LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],   # <-- NEW
-            CATEGORY: [CallbackQueryHandler(category_selected, pattern=r"^category_")]
+            NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
+            LINK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
+            CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^category_")]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
+
     # create category
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("create_category", create_category)],
