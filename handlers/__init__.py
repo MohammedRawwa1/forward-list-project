@@ -1,3 +1,4 @@
+# 1.  base-handlers  (add the missing export)
 from handlers.base_handlers import (
     help,
     list_courses,
@@ -6,9 +7,16 @@ from handlers.base_handlers import (
     get_courses_by_category,
     courses_callback,
     handle_courses_pagination,
+    handle_categories_pagination,   # <-- NEW
     handle_course_selection,
     handle_category_name,
     handle_category_selection,
+)
+
+# 2.  deletion callbacks  (completely new file)
+from handlers.delete_callbacks import (
+    handle_category_deletion,
+    handle_item_deletion,
 )
 
 # course-handlers
@@ -60,3 +68,4 @@ from conversation_states import (
     CANCEL_DELETE,
     MAX_CATEGORY_NAME_LENGTH,
 )
+
