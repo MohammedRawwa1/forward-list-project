@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 import uvicorn
+import traceback
 from fastapi import FastAPI, Request, HTTPException
 from bot import create_application, setup_handlers
 from telegram import Update, error as telegram_error  # Import telegram_error
@@ -70,11 +71,15 @@ async def send_message_with_backoff(application: Application, chat_id: int, text
     """Sends a message with exponential backoff if rate-limited."""
     await send_with_backoff(application.bot.send_message, chat_id, text)
 
-# Startup event handler
+# 1.  define the callback
+async def global_error_handler(update: object, context: object) -> None:
+    logger.error("Update '%s' caused error:\n%s", update, traceback.format_exc())
+
+# 2.  inside startup_event, AFTER application exists
 @app.on_event("startup")
 async def startup_event():
     global application
-    await initialize_db()                       # <-- MongoDB.initialize inside
+    await initialize_db()
     # >>>>>> indexes go here <<<<<<
     await MongoDB.ensure_indexes('categories')
     await MongoDB.ensure_indexes('courses')
@@ -82,13 +87,13 @@ async def startup_event():
     application = await create_application()
     await application.initialize()
     await setup_handlers(application)
-    application.add_error_handler(global_error_handler)
-
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         raise ValueError("WEBHOOK_URL environment variable is not set")
     await set_webhook_with_backoff(application, webhook_url)
-
+    # 3.  register it here
+    application.add_error_handler(global_error_handler)
+    
 @app.post("/{token}/")
 async def webhook(token: str, request: Request):
     """Handles the incoming webhook from Telegram."""
