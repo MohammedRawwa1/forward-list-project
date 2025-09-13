@@ -53,7 +53,6 @@ from conversation_states import (
     MAX_CATEGORY_NAME_LENGTH
 )
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
-from handlers.constants import MAX_CATEGORY_NAME_LENGTH, CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA
 from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 from dotenv import load_dotenv
