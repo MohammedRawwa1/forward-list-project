@@ -122,17 +122,46 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
-    await setup_course_handlers(application)   # <-- ONLY this line
+    async def setup_handlers(application: Application):
+    if not application:
+        logger.error("Application is not initialised.")
+        return
 
-    # create category
-    application.add_handler(ConversationHandler(
+    # ----------  commands  ----------
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help))
+    application.add_handler(CommandHandler("courses", list_courses))
+    application.add_handler(CommandHandler("categories", list_categories))
+    application.add_handler(CommandHandler("delete_category", delete_category_start))
+    application.add_handler(CommandHandler("delete_course", delete_item_start))
+    application.add_handler(CommandHandler("addthumb", add_thumb))
+    application.add_handler(CommandHandler("delthumb", del_thumb))
+    application.add_handler(CommandHandler("add", add_course_start))
+    application.add_handler(CommandHandler("cancel", cancel))
+
+    # ----------  callbacks  ----------
+    application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
+    application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
+    application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
+    application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
+    application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
+    application.add_handler(CallbackQueryHandler(handle_courses_pagination, pattern=r"^courses_(prev|next)_\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_categories_pagination, pattern=r"^categories_(prev|next)_\d+$"))
+    application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses_"))
+    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
+    application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
+    application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
+
+    # ----------  conversations  ----------
+    await setup_course_handlers(application)          # /add  (NAME → LINK → CATEGORY)
+
+    application.add_handler(ConversationHandler(      # /create_category
         entry_points=[CommandHandler("create_category", create_category)],
         states={CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)]},
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
 
-    # delete all data
-    application.add_handler(ConversationHandler(
+    application.add_handler(ConversationHandler(      # /delete_all_data
         entry_points=[CommandHandler("delete_all_data", delete_all_data_start)],
         states={
             DELETE_ALL: [
