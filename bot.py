@@ -64,11 +64,6 @@ load_dotenv()  # Load environment variables from .env file
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=log_level)
 logger = logging.getLogger(__name__)  # Use __name__ for logging
-
-# Constants
-MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
-DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE = range(4, 7)
-
 # Helper function to validate category names
 def is_valid_category_name(category_name: str):
     """Validate if a category name is valid."""
