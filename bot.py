@@ -109,8 +109,6 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("cancel", cancel))
     
     # ----------  callbacks  ----------
-    application.add_handler(CallbackQueryHandler(handle_deletion_confirmation, pattern="handle_deletion"))
-    application.add_handler(CallbackQueryHandler(handle_deletion_selection, pattern="handle_delete_selection"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="confirm_delete_all"))
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
@@ -130,17 +128,6 @@ async def setup_handlers(application: Application):
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("create_category", create_category)],
         states={CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)]},
-        fallbacks=[CommandHandler("cancel", cancel)]
-    ))
-
-    # add course
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("add", add_course_start)],
-        states={
-            NAME:     [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
-            LINK:     [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
-            CATEGORY: [CallbackQueryHandler(category_selected, pattern=r"^category_")]
-        },
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
 
