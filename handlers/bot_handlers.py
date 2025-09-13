@@ -182,57 +182,44 @@ async def delete_all_data_start(update: Update, context: CallbackContext) -> int
     await update.message.reply_text("Are you sure you want to delete all your data?", reply_markup=reply_markup)
     return DELETE_ALL
 
+# bot_handlers.py  (replace the two functions completely)
+# ------------------------------------------------------------------
 async def delete_category_start(update: Update, context: CallbackContext):
-    """Start the process of deleting a category."""
-    user_id = update.effective_user.id
+    """Show inline buttons with *all* categories that exist in DB."""
     db = await get_db()
+    categories = await db.categories.find().distinct("name")          # ← real list
+    if not categories:
+        await update.message.reply_text("You have no categories to delete.")
+        return
 
-    try:
-        # Fetch categories for the user
-        user = await db.users.find_one({"user_id": user_id})
-        if not user or not user.get("categories"):
-            await update.message.reply_text("You have no categories to delete.")
-            return
+    keyboard = [
+        [InlineKeyboardButton(cat, callback_data=f"delete_category_{cat}")]
+        for cat in categories
+    ]
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+    await update.message.reply_text(
+        "Choose the category you want to delete:", 
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-        # Display categories for deletion
-        categories = user["categories"]
-        keyboard = [
-            [InlineKeyboardButton(category, callback_data=f"delete_category_{category}")]
-            for category in categories
-        ]
-        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text("Select the category you want to delete:", reply_markup=reply_markup)
-    except Exception as e:
-        logger.error(f"Error starting category deletion for user {user_id}: {e}")
-        await update.message.reply_text("An unexpected error occurred. Please try again later.")
-        
 async def delete_item_start(update: Update, context: CallbackContext):
-    """Start the process of deleting an item."""
-    user_id = update.effective_user.id
+    """Show inline buttons with *all* courses that exist in DB."""
     db = await get_db()
+    courses = await db.courses.find().distinct("name")                # ← real list
+    if not courses:
+        await update.message.reply_text("You have no courses to delete.")
+        return
 
-    try:
-        # Fetch items for the user
-        user = await db.users.find_one({"user_id": user_id})
-        if not user or not user.get("courses"):
-            await update.message.reply_text("You have no items to delete.")
-            return
-
-        # Display items for deletion
-        items = user["courses"]
-        keyboard = [
-            [InlineKeyboardButton(item["name"], callback_data=f"delete_item_{item['name']}")]
-            for item in items
-        ]
-        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await update.message.reply_text("Select the item you want to delete:", reply_markup=reply_markup)
-    except Exception as e:
-        logger.error(f"Error starting item deletion for user {user_id}: {e}")
-        await update.message.reply_text("An unexpected error occurred. Please try again later.")
+    keyboard = [
+        [InlineKeyboardButton(c, callback_data=f"delete_item_{c}")]
+        for c in courses
+    ]
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+    await update.message.reply_text(
+        "Choose the course you want to delete:", 
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
         
 # Handle confirmation of deleting all data
 async def confirm_delete_all(update: Update, context: CallbackContext):
