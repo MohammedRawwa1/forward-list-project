@@ -47,7 +47,11 @@ from handlers.bot_handlers import (
     cancel_delete_all_data,
     initiate_delete_item
 )
-from conversation_states import NAME, LINK, CATEGORY, CATEGORY_NAME
+from conversation_states import (
+    NAME, LINK, CATEGORY, CATEGORY_NAME,
+    DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE,
+    MAX_CATEGORY_NAME_LENGTH
+)
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 from handlers.constants import MAX_CATEGORY_NAME_LENGTH, CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA
 from database.mongo_handler import MongoDB
