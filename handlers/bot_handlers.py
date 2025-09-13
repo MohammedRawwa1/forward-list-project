@@ -85,23 +85,6 @@ async def delete_category(user_id, category_name, db):
         logger.error(f"Error deleting category '{category_name}' for user {user_id}: {e}")
         return False
 
-async def delete_category(user_id, category_name, db):
-    """Delete a category and all its associated courses."""
-    try:
-        result = await db.users.update_one(
-            {"user_id": user_id},
-            {"$pull": {"categories": category_name, "courses": {"category": category_name}}}
-        )
-        if result.modified_count > 0:
-            logger.info(f"Category '{category_name}' deleted successfully for user {user_id}.")
-            return True
-        else:
-            logger.warning(f"Category '{category_name}' not found for user {user_id}.")
-            return False
-    except Exception as e:
-        logger.error(f"Error deleting category '{category_name}' for user {user_id}: {e}")
-        return False
-
 async def handle_course_deletion(update: Update, context: CallbackContext):
     """Handle the deletion of a course."""
     query = update.callback_query
