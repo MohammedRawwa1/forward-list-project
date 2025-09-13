@@ -101,6 +101,8 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
     application.add_handler(CommandHandler("categories", list_categories))
+    application.add_handler(CommandHandler("delete_category", delete_category_start))
+    application.add_handler(CommandHandler("delete_course",   delete_item_start))
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("add", add_course_start))
