@@ -7,18 +7,17 @@ from handlers.base_handlers import (
     get_courses_by_category,
     courses_callback,
     handle_courses_pagination,
-    handle_categories_pagination,   # <-- NEW
+    handle_categories_pagination,
     handle_course_selection,
     handle_category_name,
     handle_category_selection,
 )
-
-# 2.  deletion callbacks  (completely new file)
-from handlers.delete_callbacks import (
-    handle_category_deletion,
-    handle_item_deletion,
-)
-
+from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
+__all__ += [
+    "handle_categories_pagination",
+    "handle_category_deletion",
+    "handle_item_deletion",
+]
 # course-handlers
 from handlers.course_handlers import (
     setup_course_handlers,
@@ -68,4 +67,5 @@ from conversation_states import (
     CANCEL_DELETE,
     MAX_CATEGORY_NAME_LENGTH,
 )
+
 
