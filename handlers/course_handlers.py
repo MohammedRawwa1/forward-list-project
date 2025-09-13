@@ -186,40 +186,6 @@ def is_valid_url(url: str):
     """Check if the URL is valid."""
     url_pattern = r'^(http|https)://'
     return re.match(url_pattern, url) is not None
-    
-# New function to handle creation of a new category (added function)
-async def create_category(update: Update, context: CallbackContext):
-    """Prompt the user to enter a category name."""
-    await update.message.reply_text("Please enter the name of the new category:")
-    return CATEGORY  # Transition to the CATEGORY state
-    
-    # Ensure category name is valid
-    if not category_name or len(category_name) < 3:
-        await update.message.reply_text("Category name is too short. It must be at least 3 characters long. 😬")
-        return
-    
-    user_id = update.effective_user.id
-    db = await ensure_db_connection()  # Ensure async database connection
-
-    # Check if the category already exists
-    existing_category = await db.users.find_one({"user_id": user_id, "categories": category_name})
-    if existing_category:
-        await update.message.reply_text(f"Category '{category_name}' already exists. 😅")
-        return ConversationHandler.END
-
-    # Add new category
-    result = await db.users.update_one(
-        {"user_id": user_id},
-        {"$addToSet": {"categories": category_name}},
-        upsert=True
-    )
-
-    if result.modified_count > 0 or result.upserted_id:
-        await update.message.reply_text(f"Category '{category_name}' created successfully! 🎉")
-    else:
-        await update.message.reply_text(f"Failed to create category '{category_name}'. Please try again. 😞")
-    
-    return ConversationHandler.END
 
 # Global error handler
 async def error_handler(update: Update, context: CallbackContext):
