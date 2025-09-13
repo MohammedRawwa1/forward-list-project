@@ -8,8 +8,10 @@ from handlers.base_handlers import (
     handle_courses_pagination,
     handle_course_selection,
     handle_category_name,
-    handle_category_selection
+    handle_category_selection,
 )
+
+# course-handlers
 from handlers.course_handlers import (
     setup_course_handlers,
     start,
@@ -21,10 +23,9 @@ from handlers.course_handlers import (
     error_handler as course_error_handler,
     handle_link_parsing_error,
     cancel,
-    CATEGORY,
-    NAME,
-    LINK
 )
+
+# bot-handlers
 from handlers.bot_handlers import (
     generate_pagination_keyboard,
     generate_keyboard,
@@ -39,12 +40,23 @@ from handlers.bot_handlers import (
     delete_category_start,
     confirm_delete_all,
     cancel_delete_all_data,
-    initiate_delete_item
+    initiate_delete_item,
 )
+
+# thumbnail-handlers
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
-from handlers.constants import MAX_CATEGORY_NAME_LENGTH, CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA
+
+# constants (only the ones that really live here)
+from handlers.constants import CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA
+
+# conversation states – single source of truth
 from conversation_states import (
-    NAME, LINK, CATEGORY, CATEGORY_NAME,
-    DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE,
-    MAX_CATEGORY_NAME_LENGTH
+    NAME,
+    LINK,
+    CATEGORY,
+    CATEGORY_NAME,
+    DELETE_ALL,
+    CONFIRM_DELETE,
+    CANCEL_DELETE,
+    MAX_CATEGORY_NAME_LENGTH,
 )
