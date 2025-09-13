@@ -15,6 +15,7 @@ from handlers.base_handlers import (
     get_courses_by_category,
     courses_callback,
     handle_courses_pagination,
+    handle_categories_pagination,   # <-- NEW
     handle_course_selection,
     handle_category_name,
     handle_category_selection
@@ -35,7 +36,6 @@ from handlers.bot_handlers import (
     generate_pagination_keyboard,
     generate_keyboard,
     delete_item,
-    delete_category,
     handle_course_deletion,
     handle_deletion_confirmation,
     handle_deletion_selection,
@@ -60,18 +60,17 @@ import os
 import asyncio
 import re
 
-load_dotenv()  # Load environment variables from .env file
+load_dotenv()
 
-# Load logging configuration
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=log_level)
-logger = logging.getLogger(__name__)  # Use __name__ for logging
-# Helper function to validate category names
+logger = logging.getLogger(__name__)
+
+# ----------  helpers  ----------
 def is_valid_category_name(category_name: str):
-    """Validate if a category name is valid."""
-    # Allow letters, numbers, spaces, and hyphens
     return bool(re.match(r"^[a-zA-Z0-9\s\-]+$", category_name))
 
+# ----------  application factory  ----------
 async def create_application():
     try:
         bot_token = os.getenv("BOT_TOKEN")
@@ -79,25 +78,24 @@ async def create_application():
             raise ValueError("BOT_TOKEN environment variable is not set")
 
         mongo_uri = os.getenv("MONGODB_URL")
-        db_name = os.getenv("MONGODB_NAME")
+        db_name   = os.getenv("MONGODB_NAME")
         if not mongo_uri or not db_name:
-            raise ValueError("MONGODB_URL and MONGODB_NAME environment variables are not set")
+            raise ValueError("MONGODB_URL and MONGODB_NAME must be set")
 
-        # Build the application instance
         application = Application.builder().token(bot_token).build()
-
-        # Initialize MongoDB asynchronously
         await MongoDB.initialize(mongo_uri, db_name)
         return application
     except Exception as e:
         logger.error(f"Failed to create application: {e}")
         raise
+
+# ----------  register everything  ----------
 async def setup_handlers(application: Application):
     if not application:
-        logger.error("Application is not initialized.")
+        logger.error("Application is not initialised.")
         return
 
-    # Command Handlers
+    # ----------  commands  ----------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
@@ -106,78 +104,71 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("add", add_course_start))
 
-    # CallbackQuery Handlers for deleting items
+    # ----------  callbacks  ----------
     application.add_handler(CallbackQueryHandler(handle_deletion_confirmation, pattern="handle_deletion"))
     application.add_handler(CallbackQueryHandler(handle_deletion_selection, pattern="handle_delete_selection"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="confirm_delete_all"))
     application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="cancel_delete_all"))
     application.add_handler(CallbackQueryHandler(initiate_delete_item, pattern="^delete_item_"))
-    application.add_handler(CallbackQueryHandler(handle_courses_pagination, pattern=r"^courses_(prev|next)_\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_courses_pagination,    pattern=r"^courses_(prev|next)_\d+$"))
+    application.add_handler(CallbackQueryHandler(handle_categories_pagination, pattern=r"^categories_(prev|next)_\d+$"))  # NEW
     application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses_"))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
 
-    # Setup course-related handlers
+    # ----------  conversations  ----------
     await setup_course_handlers(application)
 
-    # Add new category_conversation
+    # create category
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("create_category", create_category)],
-        states={
-            CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)],
-        },
+        states={CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)]},
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
 
-    # Add course conversation handler
+    # add course
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add", add_course_start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
-            LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
+            NAME:     [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
+            LINK:     [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
             CATEGORY: [CallbackQueryHandler(category_selected, pattern=r"^category_")]
         },
         fallbacks=[CommandHandler("cancel", cancel)]
     ))
 
-    # Delete all data conversation
+    # delete all data
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("delete_all_data", delete_all_data_start)],
         states={
             DELETE_ALL: [
                 CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"),
                 CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$")
-            ],
+            ]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]  # Add cancel as a fallback
+        fallbacks=[CommandHandler("cancel", cancel)]
     ))
 
-    # Setup thumbnail-related handlers
+    # ----------  thumbnails  ----------
     await setup_thumbnail_handlers(application)
 
-    # Error_handler
+    # ----------  errors  ----------
     application.add_error_handler(course_error_handler)
 
+# ----------  run  ----------
 async def main():
     try:
-        # Create the application
         application = await create_application()
-
-        # Set up handlers
         await setup_handlers(application)
 
-        # Set the webhook
         webhook_url = os.getenv("WEBHOOK_URL")
         if webhook_url:
             await application.bot.set_webhook(webhook_url)
 
-        # Run the application using webhook
         await application.run_webhook(port=10000, webhook_path="/webhook")
-
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
 
 if __name__ == "__main__":
-    # Run the main function within an event loop
     asyncio.run(main())
