@@ -35,31 +35,29 @@ async def add_course_start(update: Update, context: CallbackContext):
     await update.message.reply_text("Enter the name of the course:")
     return NAME
 
+# ----------  add_course_name  ----------
 async def add_course_name(update: Update, context: CallbackContext):
-    """Save the course name and ask for the link."""
-    course_name = update.message.text.strip()
-    if not course_name:
+    """Store name and ask for link."""
+    name = update.message.text.strip()
+    if not name:
         await update.message.reply_text("Name can’t be empty – try again.")
-        return NAME                     # stay in the same state
-
-    context.user_data['course_name'] = course_name
-
-    # ⬇️  await the prompt so it is actually delivered
-    await update.message.reply_text("Please enter the link for the course:")
+        return NAME
+    context.user_data['course_name'] = name
+    await update.message.reply_text("Please enter the course link (must start with http/https):")
     return LINK
-    
-# course_handlers.py  (replace the whole add_course_link function)
-# ------------------------------------------------------------------
+
+
+# ----------  add_course_link  ----------
 async def add_course_link(update: Update, context: CallbackContext):
-    """Save the course URL and prompt for the category."""
-    course_link = update.message.text.strip()
+    """Validate link, store it, then show category picker."""
+    link = update.message.text.strip()
 
     # basic URL check
-    if not re.match(r'^https?://', course_link):
+    if not re.match(r'^https?://', link):
         await update.message.reply_text("❗️ Invalid URL. Please provide a valid link.")
         return LINK          # stay in the same state, user can retry
 
-    context.user_data['course_link'] = course_link
+    context.user_data['course_link'] = link
 
     # fetch categories
     db = await get_db()
@@ -68,12 +66,9 @@ async def add_course_link(update: Update, context: CallbackContext):
         await update.message.reply_text("No categories available. Create one first with /create_category")
         return ConversationHandler.END
 
-    keyboard = [
-        [InlineKeyboardButton(c['name'], callback_data=f"category_{c['name']}")]
-        for c in cats
-    ]
+    keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"category_{c['name']}")] for c in cats]
     await update.message.reply_text(
-        "Pick a category for the course:", 
+        "Pick a category for the course:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return CATEGORY
