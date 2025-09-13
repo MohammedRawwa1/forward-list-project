@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from bot import create_application, setup_handlers
 from telegram import Update, error as telegram_error  # Import telegram_error
-from telegram.ext import Application
+from telegram.ext import Application, TypeHandler, CallbackContext, filters
 from dotenv import load_dotenv
 from database.mongo_handler import MongoDB
 from loguru import logger
