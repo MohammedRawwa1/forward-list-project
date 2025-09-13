@@ -75,6 +75,14 @@ async def global_error_handler(update: object, context: object) -> None:
     logger.error("⚠️  global_error_handler caught: %s", context.error)
     logger.error("Update: %s", update)
 
+
+# Define echo_update first
+async def echo_update(update: Update, context: CallbackContext):
+    logger.info("RAW update %s | user=%s chat=%s",
+                update.update_id,
+                update.effective_user.id if update.effective_user else None,
+                update.effective_chat.id if update.effective_chat else None)
+    
 # 2.  inside startup_event, AFTER application exists
 @app.on_event("startup")
 async def startup_event():
