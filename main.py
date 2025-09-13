@@ -3,7 +3,6 @@ import os
 import json
 import asyncio
 import uvicorn
-import traceback
 from fastapi import FastAPI, Request, HTTPException
 from bot import create_application, setup_handlers
 from telegram import Update, error as telegram_error  # Import telegram_error
@@ -71,10 +70,10 @@ async def send_message_with_backoff(application: Application, chat_id: int, text
     """Sends a message with exponential backoff if rate-limited."""
     await send_with_backoff(application.bot.send_message, chat_id, text)
 
-# 1.  define the callback
+# main.py
 async def global_error_handler(update: object, context: object) -> None:
-    logger.error("Update '%s' caused error:\n%s", update,
-                 "".join(traceback.format_exception(None, context.error, context.error.__traceback__)))
+    logger.error("⚠️  global_error_handler caught: %s", context.error)
+    logger.error("Update: %s", update)
 
 # 2.  inside startup_event, AFTER application exists
 @app.on_event("startup")
