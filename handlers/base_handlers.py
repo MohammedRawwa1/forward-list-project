@@ -26,20 +26,6 @@ def validate_category_name(category_name: str):
         return "Category name can only contain letters, numbers, spaces, and hyphens. 😓"
     
     return None
-
-def validate_category_name(category_name: str):
-    """Validates the category name."""
-    if not category_name or category_name.isspace():
-        return "The category name cannot be empty. Please try again! 😬"
-    
-    if len(category_name) < 3 or len(category_name) > MAX_CATEGORY_NAME_LENGTH:
-        return f"Category name must be between 3 and {MAX_CATEGORY_NAME_LENGTH} characters."
-    
-    # Check if the category name matches the allowed pattern (letters, numbers, spaces, and hyphens)
-    if not re.match(r"^[a-zA-Z0-9\s\-]+$", category_name):
-        return "Category name can only contain letters, numbers, spaces, and hyphens. 😓"
-    
-    return None
     
 async def help(update: Update, context: CallbackContext):
     """Customized Help message."""
