@@ -109,6 +109,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("cancel", cancel))
     
     # ----------  callbacks  ----------
+    application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="confirm_delete_all"))
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
