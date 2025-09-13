@@ -182,8 +182,27 @@ async def delete_all_data_start(update: Update, context: CallbackContext) -> int
     await update.message.reply_text("Are you sure you want to delete all your data?", reply_markup=reply_markup)
     return DELETE_ALL
 
-# bot_handlers.py  (replace the two functions completely)
-# ------------------------------------------------------------------
+async def delete_course_menu(update: Update, context: CallbackContext):
+    """Show course names (callback buttons) so admin can pick one to delete."""
+    query = update.callback_query
+    await query.answer()
+    cat_name = query.data.replace("del_menu_", "")
+
+    db = await get_db()
+    courses = await db.courses.find({"category": cat_name}).to_list(length=None)
+    if not courses:
+        await query.edit_message_text("Nothing to delete.")
+        return
+
+    keyboard = [
+        [InlineKeyboardButton(crs["name"], callback_data=f"delete_item_{crs['name']}")]
+        for crs in courses
+    ]
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data=f"category_{cat_name}")])
+    await query.edit_message_text(
+        "Choose the course you want to delete:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 async def delete_category_start(update: Update, context: CallbackContext):
     """Show inline buttons with *all* categories that exist in DB."""
     db = await get_db()
