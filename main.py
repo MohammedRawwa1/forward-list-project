@@ -82,6 +82,7 @@ async def startup_event():
     application = await create_application()
     await application.initialize()
     await setup_handlers(application)
+    application.add_error_handler(global_error_handler)
 
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
