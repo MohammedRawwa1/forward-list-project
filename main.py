@@ -87,22 +87,25 @@ async def startup_event():
     application = await create_application()
     await application.initialize()
     await setup_handlers(application)
+    
+    # Register the error handler
+    application.add_error_handler(global_error_handler)
+    
+    # Add your echo handler here, after application is initialized
+    application.add_handler(TypeHandler(Update, echo_update), group=-1)
+
+    # Set webhook
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         raise ValueError("WEBHOOK_URL environment variable is not set")
     await set_webhook_with_backoff(application, webhook_url)
-    # 3.  register it here
-    application.add_error_handler(global_error_handler)
+
+    # Set webhook
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if not webhook_url:
+        raise ValueError("WEBHOOK_URL environment variable is not set")
+    await set_webhook_with_backoff(application, webhook_url)
     
-from telegram.ext import TypeHandler, CallbackContext
-async def echo_update(update: Update, context: CallbackContext):
-    logger.info("RAW update %s | user=%s chat=%s",
-                update.update_id,
-                update.effective_user.id if update.effective_user else None,
-                update.effective_chat.id if update.effective_chat else None)
-
-application.add_handler(TypeHandler(Update, echo_update), group=-1)
-
 @app.post("/{token}/")
 async def webhook(token: str, request: Request):
     """Handles the incoming webhook from Telegram."""
