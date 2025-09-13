@@ -284,18 +284,30 @@ async def handle_category_name(update: Update, context: CallbackContext):
         logger.error(f"[CAT-INSERT-FAIL] {exc}", exc_info=True)
         await update.message.reply_text("Save failed – check console.")
         return ConversationHandler.END
-    
+
 async def handle_category_selection(update: Update, context: CallbackContext):
-    """Handle the selection of a category from the buttons."""
+    """List courses in the chosen category – each course button is a direct URL."""
     query = update.callback_query
     await query.answer()
+    cat_name = query.data.replace("category_", "")
 
-    # Extract the category name from the callback data
-    category_name = query.data.replace("category_", "")
-    context.user_data['category_name'] = category_name
+    db = await get_db()
+    courses = await db.courses.find({"category": cat_name}).to_list(length=None)
+    if not courses:
+        await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
+        return
 
-    # Fetch and display the courses in the selected category
-    await list_courses_by_category(update, context, category_name, page=1)
+    # every button is a url button → opens the link immediately
+    keyboard = [
+        [InlineKeyboardButton(crs["name"], url=crs["link"])]
+        for crs in courses
+    ]
+    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{cat_name}")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    await query.edit_message_text(
+        f'📚 Tap any course to open its link:',
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
     
 async def handle_course_selection(update: Update, context: CallbackContext):
     """Handle the selection of a course from the buttons."""
