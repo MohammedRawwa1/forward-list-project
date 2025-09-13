@@ -77,7 +77,7 @@ async def startup_event():
     await initialize_db()                       # <-- MongoDB.initialize inside
     # >>>>>> indexes go here <<<<<<
     await MongoDB.ensure_indexes('categories')
-    await MongoDB.ensure_indexes('courses', [('name', 1)])
+    await MongoDB.ensure_indexes('courses')
     # >>>>>> end indexes <<<<<<
     application = await create_application()
     await application.initialize()
