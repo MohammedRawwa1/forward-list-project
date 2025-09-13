@@ -49,6 +49,7 @@ from handlers.bot_handlers import (
     confirm_delete_all,
     cancel_delete_all_data,
     initiate_delete_item,
+    delete_course_menu
 )
 
 # thumbnail-handlers
@@ -68,6 +69,7 @@ from conversation_states import (
     CANCEL_DELETE,
     MAX_CATEGORY_NAME_LENGTH,
 )
+
 
 
 
