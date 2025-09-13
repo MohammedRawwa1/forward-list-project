@@ -31,6 +31,7 @@ async def start(update: Update, context: CallbackContext):
     
 # course_handlers.py
 async def add_course_start(update: Update, context: CallbackContext):
+    logger.info("[ADD] conversation entered")
     """Start the process of adding a new course."""
     await update.message.reply_text("Enter the name of the course:")
     return NAME
