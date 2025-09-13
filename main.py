@@ -74,15 +74,18 @@ async def send_message_with_backoff(application: Application, chat_id: int, text
 @app.on_event("startup")
 async def startup_event():
     global application
-    await initialize_db()  # Initialize MongoDB
+    await initialize_db()                       # <-- MongoDB.initialize inside
+    # >>>>>> indexes go here <<<<<<
+    await MongoDB.ensure_indexes('categories')
+    await MongoDB.ensure_indexes('courses', [('name', 1)])
+    # >>>>>> end indexes <<<<<<
     application = await create_application()
     await application.initialize()
     await setup_handlers(application)
-    
+
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         raise ValueError("WEBHOOK_URL environment variable is not set")
-    
     await set_webhook_with_backoff(application, webhook_url)
 
 @app.post("/{token}/")
