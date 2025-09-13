@@ -15,7 +15,7 @@ from handlers.base_handlers import (
     get_courses_by_category,
     courses_callback,
     handle_courses_pagination,
-    handle_categories_pagination,   # <-- NEW
+    handle_categories_pagination,
     handle_course_selection,
     handle_category_name,
     handle_category_selection
@@ -125,7 +125,15 @@ async def setup_handlers(application: Application):
 
     # ----------  conversations  ----------
     await setup_course_handlers(application)
-
+        application.add_handler(ConversationHandler(
+        entry_points=[CommandHandler("add", add_course_start)],
+        states={
+            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
+            LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],   # <-- NEW
+            CATEGORY: [CallbackQueryHandler(category_selected, pattern=r"^category_")]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    ))
     # create category
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("create_category", create_category)],
