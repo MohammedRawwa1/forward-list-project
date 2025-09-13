@@ -38,8 +38,8 @@ async def add_course_start(update: Update, context: CallbackContext):
 
 # ----------  add_course_name  ----------
 async def add_course_name(update: Update, context: CallbackContext):
-    """Store name and ask for link."""
     name = update.message.text.strip()
+    logger.info("[ADD] name received: %r", name)
     if not name:
         await update.message.reply_text("Name can’t be empty – try again.")
         return NAME
