@@ -1,5 +1,6 @@
 from telegram.ext import ConversationHandler, MessageHandler, CommandHandler, CallbackQueryHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from conversation_states import NAME, LINK, CATEGORY
 from handlers.db_connection import get_db
 import logging
 import re
