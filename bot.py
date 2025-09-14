@@ -16,6 +16,7 @@ from handlers.base_handlers import (
     courses_callback,
     handle_courses_pagination,
     handle_categories_pagination,
+    showcat_handler,
     handle_course_selection,
     handle_category_name,
     handle_category_selection,
