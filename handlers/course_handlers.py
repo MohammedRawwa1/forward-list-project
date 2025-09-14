@@ -1,6 +1,6 @@
 from telegram.ext import ConversationHandler, MessageHandler, CommandHandler, CallbackQueryHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from conversation_states import NAME, LINK, CATEGORY
+from conversation_states import ADD_NAME, ADD_LINK, ADD_CATEGORY
 from handlers.db_connection import get_db
 from pymongo.errors import PyMongoError
 import logging
@@ -13,15 +13,16 @@ logger = logging.getLogger(__name__)
 NAME, LINK, CATEGORY = range(3)
 
 async def setup_course_handlers(application):
-    """Set up all course-related handlers."""
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add", add_course_start)],
         states={
-            NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
-            LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
-            CATEGORY: [CallbackQueryHandler(category_selected, pattern=r"^category_")]
+            ADD_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
+            ADD_LINK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
+            ADD_CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^category_")]
         },
-        fallbacks=[CommandHandler("cancel", cancel)]
+        fallbacks=[CommandHandler("cancel", cancel)],
+        name="add_course_conv",
+        persistent=False
     ))
 
 async def start(update: Update, context: CallbackContext):
@@ -31,10 +32,8 @@ async def start(update: Update, context: CallbackContext):
     
 # course_handlers.py
 async def add_course_start(update: Update, context: CallbackContext):
-    logger.info("[ADD] conversation entered")
-    """Start the process of adding a new course."""
     await update.message.reply_text("Enter the name of the course:")
-    return NAME
+    return ADD_NAME
 
 # ----------  add_course_name  ----------
 async def add_course_name(update: Update, context: CallbackContext):
@@ -43,11 +42,11 @@ async def add_course_name(update: Update, context: CallbackContext):
     logger.info("[ADD] name received: %r", name)
     if not name:
         await update.message.reply_text("Name can’t be empty – try again.")
-        return NAME
+        return ADD_NAME
 
     context.user_data['course_name'] = name
     await update.message.reply_text("Please enter the course link (it should start with http:// or https://).")
-    return LINK
+    return ADD_LINK
 
 
 async def add_course_link(update: Update, context: CallbackContext):
@@ -55,7 +54,7 @@ async def add_course_link(update: Update, context: CallbackContext):
 
     if not re.match(r'^https?://', link):
         await update.message.reply_text("❗️ Invalid URL. Please provide a valid link.")
-        return LINK
+        return ADD_CATEGORY
 
     context.user_data['course_link'] = link
 
@@ -80,7 +79,7 @@ async def add_course_link(update: Update, context: CallbackContext):
         "Pick a category for the course:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    return CATEGORY
+    return ADD_CATEGORY
         
 async def category_selected(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
