@@ -81,6 +81,7 @@ logger = logging.getLogger(__name__)
 def is_valid_category_name(category_name: str):
     return bool(re.match(r"^[a-zA-Z0-9\s\-]+$", category_name))
 
+
 # ----------  application factory  ----------
 async def create_application():
     try:
@@ -99,6 +100,8 @@ async def create_application():
     except Exception as e:
         logger.error(f"Failed to create application: {e}")
         raise
+
+
 # ----------  register everything  ----------
 async def setup_handlers(application: Application):
     # ---------------  quick sanity check  ---------------
@@ -132,7 +135,8 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("add", add_course_start))
     application.add_handler(CommandHandler("cancel", cancel))
-    # ----------  callbacks  ----------
+
+    # ----------  ordinary callbacks  ----------
     application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
     application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
@@ -143,13 +147,8 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
 
-    # deletion callbacks
-    application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
-    application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
-    # ----------  extra callbacks  ----------
-    application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_"))
     # ----------  conversations  ----------
-    await setup_course_handlers(application)  # /add  (NAME → LINK → CATEGORY)
+    await setup_course_handlers(application)  # /add  (ADD_NAME → ADD_LINK → ADD_CATEGORY)
 
     application.add_handler(
         ConversationHandler(  # /create_category
@@ -171,6 +170,11 @@ async def setup_handlers(application: Application):
             fallbacks=[CommandHandler("cancel", cancel)],
         )
     )
+
+    # ----------  deletion & extra callbacks (LAST so they can't be shadowed) ----------
+    application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
+    application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
+    application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_"))
 
     # ----------  thumbnails  ----------
     await setup_thumbnail_handlers(application)
