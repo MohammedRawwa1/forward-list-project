@@ -146,7 +146,8 @@ async def setup_handlers(application: Application):
     # deletion callbacks
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
-
+    # ----------  extra callbacks  ----------
+    application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_"))
     # ----------  conversations  ----------
     await setup_course_handlers(application)  # /add  (NAME → LINK → CATEGORY)
 
