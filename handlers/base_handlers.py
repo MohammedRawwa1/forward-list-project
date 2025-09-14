@@ -51,30 +51,33 @@ async def help(update: Update, context: CallbackContext):
     await update.message.reply_text(help_message)
 
 async def list_categories(update: Update, context: CallbackContext):
+    """Show every category as an inline button that opens its courses."""
     try:
         db = await get_db()
-        if db is None:
-            logger.error("Failed to connect to the database.")
-            await update.message.reply_text("Error: Unable to connect to the database.")
-            return
-
-        collection = db['categories']
-        logger.info("Connected to 'categories' collection.")
-
-        # Fetch all categories
-        categories = await collection.find().to_list(length=None)
-        logger.info(f"Fetched categories: {categories}")
-
-        if categories:
-            # Create a plain text list of categories
-            category_list = "\n".join([f"- {category['name']}" for category in categories])
-            await update.message.reply_text(f"Here are the available categories:\n{category_list}")
-        else:
-            logger.info("No categories found in the database.")
+        categories = await db.categories.find().to_list(length=None)
+        if not categories:
             await update.message.reply_text("No categories available. Use /create_category to create one.")
+            return
+        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{cat['name']}")] for cat in categories]
+        await update.message.reply_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Error listing categories: {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
+
+async def showcat_handler(update: Update, context: CallbackContext):
+    """Show courses in the chosen category as URL buttons."""
+    query = update.callback_query
+    await query.answer()
+    cat_name = query.data.split("_", 1)[1]
+    db = await get_db()
+    courses = await db.courses.find({"category": cat_name}).to_list(length=None)
+    if not courses:
+        await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
+        return
+    keyboard = [[InlineKeyboardButton(crs["name"], url=crs["link"])] for crs in courses]
+    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{cat_name}")])
+    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    await query.edit_message_text('📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def list_courses(update: Update, context: CallbackContext):
     """List all available courses with pagination."""
