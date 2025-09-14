@@ -56,7 +56,7 @@ from conversation_states import (
     DELETE_ALL,
     CONFIRM_DELETE,
     CANCEL_DELETE,
-    MAX_CATEGORY_NAME_LENGTH,
+    MAX_CATEGORY_NAME_LENGTH
 )
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
