@@ -69,7 +69,6 @@ from conversation_states import (
     CANCEL_DELETE,
     MAX_CATEGORY_NAME_LENGTH,
 )
-
-
-
-
+# ----------  new helpers  ----------
+from handlers.base_handlers import showcat_handler
+__all__ += ["showcat_handler"]
