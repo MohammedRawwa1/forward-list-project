@@ -60,15 +60,16 @@ from handlers.constants import CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA
 
 # conversation states – single source of truth
 from conversation_states import (
-    NAME,
-    LINK,
-    CATEGORY,
-    CATEGORY_NAME,
+    ADD_NAME,
+    ADD_LINK,
+    ADD_CATEGORY,
+    CREATE_CAT_NAME,
     DELETE_ALL,
     CONFIRM_DELETE,
     CANCEL_DELETE,
-    MAX_CATEGORY_NAME_LENGTH,
+    MAX_CATEGORY_NAME_LENGTH
 )
 # ----------  new helpers  ----------
 from handlers.base_handlers import showcat_handler
 __all__ += ["showcat_handler"]
+
