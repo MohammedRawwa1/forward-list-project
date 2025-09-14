@@ -1,7 +1,7 @@
 from telegram.ext import CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import logging
-from conversation_states import CATEGORY_NAME
+from conversation_states import CREATE_CAT_NAME
 from handlers.db_connection import get_db  # Importing get_db from db_connection.py
 from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
