@@ -49,10 +49,10 @@ from handlers.bot_handlers import (
     delete_course_menu,
 )
 from conversation_states import (
-    NAME,
-    LINK,
-    CATEGORY,
-    CATEGORY_NAME,
+    ADD_NAME,
+    ADD_LINK,
+    ADD_CATEGORY,
+    CREATE_CAT_NAME,
     DELETE_ALL,
     CONFIRM_DELETE,
     CANCEL_DELETE,
