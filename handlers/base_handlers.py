@@ -256,10 +256,10 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
         logger.error(f"Error handling pagination: {e}")
         await query.edit_message_text("An error occurred while fetching categories. Please try again later.")
 
-logger.info(f"[STATE] returning {CATEGORY_NAME=} id={id(CATEGORY_NAME)}")        
+logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
     await update.message.reply_text("Enter the new category name:")
-    return CATEGORY_NAME
+    return CREATE_CAT_NAME
     
 async def handle_category_name(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
@@ -269,10 +269,10 @@ async def handle_category_name(update: Update, context: CallbackContext):
     # --- single validator (delete any other validate_category_name) ---
     if not category_name or len(category_name) < 3 or len(category_name) > 30:
         await update.message.reply_text("Name must be 3-30 chars.")
-        return CATEGORY_NAME
+        return CREATE_CAT_NAME
     if not re.match(r"^[a-zA-Z0-9\s\-]+$", category_name):
         await update.message.reply_text("Only letters, numbers, space, hyphen.")
-        return CATEGORY_NAME
+        return CREATE_CAT_NAME
 
     try:
         db = await MongoDB.get_db()          # yes, import MongoDB here
