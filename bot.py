@@ -153,7 +153,7 @@ async def setup_handlers(application: Application):
     application.add_handler(
         ConversationHandler(  # /create_category
             entry_points=[CommandHandler("create_category", create_category)],
-            states={CATEGORY_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)]},
+            states={CREATE_CAT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)]},
             fallbacks=[CommandHandler("cancel", cancel)],
         )
     )
