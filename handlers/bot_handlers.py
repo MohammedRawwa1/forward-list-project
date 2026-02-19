@@ -26,7 +26,7 @@ async def generate_pagination_keyboard(items_list, page, page_size, callback_pat
 
 # Helper function for generating the inline keyboard
 async def generate_keyboard(user_id, items, callback_pattern, page=1, page_size=20):
-    db = get_db()
+    db = await get_db()
     try:
         user = await db.users.find_one({"user_id": user_id})
         if not user or items not in user:
@@ -91,7 +91,12 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
     await query.answer()
 
     # Extract course name from callback data
-    course_name = query.data.split('_')[2]
+    # support underscores in course names
+    if query.data.startswith("delete_item_"):
+        course_name = query.data.replace("delete_item_", "", 1)
+    else:
+        parts = query.data.split('_')
+        course_name = parts[-1]
 
     # Delete the course from the database
     db = await get_db()
@@ -116,9 +121,11 @@ async def handle_deletion_confirmation(update: Update, context: CallbackContext,
     await query.answer()
 
     if item_type == 'course':
-        deleted = await delete_item(update.effective_user.id, item_name, 'courses', get_db())
+        db = await get_db()
+        deleted = await delete_item(update.effective_user.id, item_name, 'courses', db)
     elif item_type == 'category':
-        deleted = await delete_category(update.effective_user.id, item_name, get_db())
+        db = await get_db()
+        deleted = await delete_category(update.effective_user.id, item_name, db)
 
     if deleted:
         await query.edit_message_text(f"{item_type.capitalize()} '{item_name}' deleted successfully! 🎉")
@@ -131,7 +138,7 @@ async def handle_deletion_selection(update: Update, context: CallbackContext, it
     await query.answer()
     user_id = update.effective_user.id
 
-    db = get_db()
+    db = await get_db()
     try:
         user = await db.users.find_one({"user_id": user_id})
         if not user or not user.get(items_key):
