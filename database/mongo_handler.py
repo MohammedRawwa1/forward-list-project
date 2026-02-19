@@ -1,6 +1,5 @@
 import logging
 import os
-from fastapi import FastAPI
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
@@ -110,11 +109,7 @@ class MongoDB:
             await coll.create_index('name', unique=True)
             logger.info("Unique index on categories.name created")
 
-        # --- courses ---
-        coll = db['courses']
-        if 'name_1' not in await coll.index_information():
-            await coll.create_index('name', unique=True)
-            logger.info("Unique index on courses.name created")
+        # Note: legacy global `courses` collection removed; courses are embedded in `categories` documents.
 
     @classmethod
     async def delete_all_categories(cls):
@@ -131,11 +126,3 @@ class MongoDB:
         except Exception as e:
             logger.error(f"Error occurred while deleting all categories: {e}")
             raise MongoConnectionError(f"Failed to delete categories: {e}")
-            
-# Shutdown handler for FastAPI to close MongoDB connections properly
-app = FastAPI()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await MongoDB.close()
-    await asyncio.sleep(1)
