@@ -85,6 +85,23 @@ async def showcat_handler(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await query.edit_message_text('📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard))
 
+
+async def handle_back_to_cats(update: Update, context: CallbackContext):
+    """Handle the 🔙 Back callback and show the categories list."""
+    query = update.callback_query
+    await query.answer()
+    try:
+        db = await get_db()
+        categories = await db.categories.find().to_list(length=None)
+        if not categories:
+            await query.edit_message_text("No categories available. Use /create_category to create one.")
+            return
+        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{urllib.parse.quote_plus(cat['name'])}")] for cat in categories]
+        await query.edit_message_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.error(f"Error returning to categories: {e}")
+        await query.edit_message_text("An unexpected error occurred. Please try again later.")
+
 async def list_courses(update: Update, context: CallbackContext):
     """List all available courses with pagination."""
     db = await get_db()
