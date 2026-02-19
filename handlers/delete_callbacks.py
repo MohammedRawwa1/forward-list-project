@@ -1,6 +1,7 @@
 from telegram import Update
 from telegram.ext import CallbackContext
 from database.mongo_handler import MongoDB
+import urllib.parse
 import logging
 logger = logging.getLogger(__name__)
 
@@ -10,6 +11,7 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
     await query.answer()
     # everything after "delete_category_"
     cat = query.data.split("_", 2)[2]
+    cat = urllib.parse.unquote_plus(cat)
     db = await MongoDB.get_db()
     res = await db['categories'].delete_one({"name": cat})
     # courses are embedded in `categories` so deleting the category removes them
@@ -30,8 +32,8 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         payload = data.replace("delete_item::", "", 1)
         parts = payload.split("::", 1)
         if len(parts) == 2:
-            cat = parts[0]
-            item = parts[1]
+            cat = urllib.parse.unquote_plus(parts[0])
+            item = urllib.parse.unquote_plus(parts[1])
             # remove from category embedded array
             res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
             if res.modified_count:
@@ -43,6 +45,7 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
 
     # legacy underscore-style fallback: pull from any category that contains the course
     item = data.split("_", 2)[2] if "_" in data else data
+    item = urllib.parse.unquote_plus(item)
     res = await db['categories'].update_one({"courses.name": item}, {"$pull": {"courses": {"name": item}}})
     if res.modified_count:
         await query.edit_message_text(f"Course ‘{item}’ deleted. ✅")
