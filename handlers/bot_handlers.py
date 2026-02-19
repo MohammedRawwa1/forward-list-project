@@ -9,6 +9,7 @@ from conversation_states import DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE
 import logging
 from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
+import urllib.parse
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -90,13 +91,33 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    # Extract course name from callback data
-    # support underscores in course names
-    if query.data.startswith("delete_item_"):
-        course_name = query.data.replace("delete_item_", "", 1)
+    # Support new callback formats: delete_item::{category}::{course} or delete_course::{category}::{course}
+    data = query.data
+    cat_name = None
+    course_name = None
+    if data.startswith("delete_item::") or data.startswith("delete_course::"):
+        payload = data.split("::", 1)[1]
+        parts = payload.split("::", 1)
+        if len(parts) == 2:
+            encoded_cat, encoded_course = parts
+            cat_name = urllib.parse.unquote_plus(encoded_cat)
+            course_name = urllib.parse.unquote_plus(encoded_course)
+        else:
+            course_name = urllib.parse.unquote_plus(payload)
     else:
-        parts = query.data.split('_')
-        course_name = parts[-1]
+        # fallback to old underscore format: delete_item_cat_course or delete_course_cat_course
+        if data.startswith("delete_item_"):
+            data_old = data.replace("delete_item_", "", 1)
+        elif data.startswith("delete_course_"):
+            data_old = data.replace("delete_course_", "", 1)
+        else:
+            data_old = data.replace("delete_item_", "", 1)
+        parts_old = data_old.split('_', 1)
+        if len(parts_old) == 2:
+            cat_name = urllib.parse.unquote_plus(parts_old[0])
+            course_name = urllib.parse.unquote_plus(parts_old[1])
+        else:
+            course_name = urllib.parse.unquote_plus(data_old)
 
     # Delete the course from the database
     db = await get_db()
@@ -105,12 +126,28 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
         return
 
     try:
-        collection = db['courses']
-        result = await collection.delete_one({"name": course_name})
-        if result.deleted_count > 0:
-            await query.edit_message_text(f"Course '{course_name}' deleted successfully! 🎉")
+        # Remove the course from the category's embedded array
+        if cat_name:
+            result = await db['categories'].update_one(
+                {"name": cat_name},
+                {"$pull": {"courses": {"name": course_name}}}
+            )
+            logger.info("[DEL-COURSE] pull result=%s", getattr(result, 'raw_result', result))
+            if result.modified_count > 0:
+                await query.edit_message_text(f"Course '{course_name}' deleted successfully from '{cat_name}'! 🎉")
+            else:
+                await query.edit_message_text(f"Course '{course_name}' not found in category '{cat_name}'.")
         else:
-            await query.edit_message_text(f"Course '{course_name}' not found.")
+            # If category not provided, try to pull from any category that contains it
+            result = await db['categories'].update_one(
+                {"courses.name": course_name},
+                {"$pull": {"courses": {"name": course_name}}}
+            )
+            logger.info("[DEL-COURSE] pull-any result=%s", getattr(result, 'raw_result', result))
+            if result.modified_count > 0:
+                await query.edit_message_text(f"Course '{course_name}' deleted successfully! 🎉")
+            else:
+                await query.edit_message_text(f"Course '{course_name}' not found.")
     except Exception as e:
         logger.error(f"Error deleting course '{course_name}': {e}")
         await query.edit_message_text("An error occurred while deleting the course. Please try again later.")
@@ -169,8 +206,6 @@ async def delete_all_data(user_id, db):
     try:
         # Delete all categories
         await db['categories'].delete_many({})
-        # Delete all courses
-        await db['courses'].delete_many({})
         logger.info(f"All data deleted successfully for user {user_id}.")
         return True
     except Exception as e:
@@ -194,18 +229,21 @@ async def delete_course_menu(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     cat_name = query.data.replace("del_menu_", "")
-
     db = await get_db()
-    courses = await db.courses.find({"category": cat_name}).to_list(length=None)
-    if not courses:
+    # fetch category document and list its courses
+    category_doc = await db.categories.find_one({"name": cat_name})
+    if not category_doc or not category_doc.get('courses'):
         await query.edit_message_text("Nothing to delete.")
         return
 
+    courses = category_doc.get('courses', [])
+
+    # include category name in callback so we can remove from correct category
     keyboard = [
-        [InlineKeyboardButton(crs["name"], callback_data=f"delete_item_{crs['name']}")]
+        [InlineKeyboardButton(crs["name"], callback_data=f"delete_item::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs['name'])))]
         for crs in courses
     ]
-    keyboard.append([InlineKeyboardButton("Cancel", callback_data=f"category_{cat_name}")])
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data=f"category_{urllib.parse.quote_plus(cat_name)}")])
     await query.edit_message_text(
         "Choose the course you want to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -232,14 +270,20 @@ async def delete_category_start(update: Update, context: CallbackContext):
 async def delete_item_start(update: Update, context: CallbackContext):
     """Show every course in the DB as inline buttons."""
     db = await get_db()
-    courses = await db.courses.find().distinct("name")      # real global list
-    if not courses:
+    # Aggregate courses across all categories and present them with category-aware callbacks
+    cats = await db.categories.find().to_list(length=None)
+    all_courses = []
+    for cat in cats:
+        for crs in cat.get('courses', []):
+            all_courses.append({"name": crs.get('name'), "category": cat.get('name')})
+
+    if not all_courses:
         await update.message.reply_text("No courses to delete.")
         return
 
     keyboard = [
-        [InlineKeyboardButton(c, callback_data=f"delete_item_{c}")]
-        for c in courses
+        [InlineKeyboardButton(c['name'], callback_data=f"delete_item::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))]
+        for c in all_courses
     ]
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
     await update.message.reply_text(
@@ -262,16 +306,15 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
             await query.edit_message_text("Error: Unable to connect to the database. Please try again later.")
             return ConversationHandler.END
 
-        # Perform the deletion
+        # Perform the deletion of categories (courses embedded inside will be removed)
         result = await db['categories'].delete_many({})
-        result = await db['courses'].delete_many({})
 
         if result.deleted_count > 0:
-            logger.info(f"All data deleted successfully for user {user_id}.")  # Success log
-            await query.edit_message_text("All categories and courses have been deleted. 😞")
+            logger.info(f"All categories deleted successfully for user {user_id}.")
+            await query.edit_message_text("All categories and their embedded courses have been deleted. 😞")
         else:
-            logger.warning(f"No data found to delete for user {user_id}.")  # Warning log
-            await query.edit_message_text("No data found to delete. 😞")
+            logger.warning(f"No categories found to delete for user {user_id}.")
+            await query.edit_message_text("No categories found to delete. 😞")
     except Exception as e:
         logger.error(f"Error confirming delete all data for user {user_id}: {e}", exc_info=True)
         await query.edit_message_text("An error occurred while deleting all data. Please try again later.")
