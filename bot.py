@@ -134,7 +134,6 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("delete_course", delete_item_start))
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
-    application.add_handler(CommandHandler("add", add_course_start))
     application.add_handler(CommandHandler("cancel", cancel))
 
     # ----------  ordinary callbacks  ----------
