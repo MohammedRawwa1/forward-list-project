@@ -52,9 +52,10 @@ async def add_course_name(update: Update, context: CallbackContext):
 async def add_course_link(update: Update, context: CallbackContext):
     link = update.message.text.strip()
 
-    if not re.match(r'^https?://', link):
-        await update.message.reply_text("❗️ Invalid URL. Please provide a valid link.")
-        return ADD_CATEGORY
+    # Validate URL strictly (allow only http/https)
+    if not is_valid_url(link):
+        await update.message.reply_text("❗️ Invalid URL. Please provide a valid link (http:// or https://).")
+        return ADD_LINK
 
     context.user_data['course_link'] = link
 
@@ -86,8 +87,8 @@ async def category_selected(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    # Extract category name from callback data
-    category_name = query.data.split('_')[1]
+    # Extract category name from callback data (allow underscores in names)
+    category_name = query.data.split('_', 1)[1]
 
     # Get course data from user context
     course_name = context.user_data.get('course_name')
@@ -129,7 +130,8 @@ async def add_course_category(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    category_name = query.data.split('_')[2]
+    # Support callback data formats and allow underscores in names
+    category_name = query.data.split('_', 1)[1]
     course_name = context.user_data.get("course_name")
     course_link = context.user_data.get("course_link")
 
@@ -162,7 +164,7 @@ async def cancel(update: Update, context: CallbackContext) -> int:
 # Utility function to check valid URL format
 def is_valid_url(url: str):
     """Check if the URL is valid."""
-    url_pattern = r'^(http|https)://'
+    url_pattern = r'^(https?:\/\/)([A-Za-z0-9\-._~%]+)(:[0-9]+)?(\/[^\s]*)?$'
     return re.match(url_pattern, url) is not None
 
 # Global error handler
