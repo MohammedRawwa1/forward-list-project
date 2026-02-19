@@ -5,6 +5,7 @@ from conversation_states import CREATE_CAT_NAME
 from handlers.db_connection import get_db  # Importing get_db from db_connection.py
 from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
+import urllib.parse
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -58,7 +59,7 @@ async def list_categories(update: Update, context: CallbackContext):
         if not categories:
             await update.message.reply_text("No categories available. Use /create_category to create one.")
             return
-        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{cat['name']}")] for cat in categories]
+        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{urllib.parse.quote_plus(cat['name'])}")] for cat in categories]
         await update.message.reply_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Error listing categories: {e}")
@@ -68,14 +69,15 @@ async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
     await query.answer()
-    cat_name = query.data.split("_", 1)[1]
+    encoded = query.data.split("_", 1)[1]
+    cat_name = urllib.parse.unquote_plus(encoded)
     db = await get_db()
     courses = await db.courses.find({"category": cat_name}).to_list(length=None)
     if not courses:
         await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
         return
     keyboard = [[InlineKeyboardButton(crs["name"], url=crs["link"])] for crs in courses]
-    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{cat_name}")])
+    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await query.edit_message_text('📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -108,7 +110,7 @@ async def list_courses(update: Update, context: CallbackContext):
 
             # rebuild keyboard from trimmed list
             keyboard = [
-                [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
+                [InlineKeyboardButton(course['name'], callback_data=f"course_{urllib.parse.quote_plus(course['name'])}")]
                 for course in display_courses
             ]
 
@@ -156,9 +158,9 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
 
             pagination_buttons = []
             if page > 1:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category_name}_{page-1}"))
+                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{urllib.parse.quote_plus(category_name)}_{page-1}"))
             if has_next:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category_name}_{page+1}"))
+                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{urllib.parse.quote_plus(category_name)}_{page+1}"))
             if pagination_buttons:
                 keyboard.append(pagination_buttons)
 
@@ -189,7 +191,8 @@ async def handle_courses_pagination(update: Update, context: CallbackContext):
         await query.edit_message_text("Invalid page number.")
         return
 
-    category_name = "_".join(parts[1:-1])
+    encoded_cat = "_".join(parts[1:-1])
+    category_name = urllib.parse.unquote_plus(encoded_cat)
 
     db = await get_db()
     if db is None:
@@ -254,7 +257,7 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
         if categories:
             # Create buttons for each category
             keyboard = [
-                [InlineKeyboardButton(category['name'], callback_data=f"category_{category['name']}")]
+                [InlineKeyboardButton(category['name'], callback_data=f"category_{urllib.parse.quote_plus(category['name'])}")]
                 for category in categories
             ]
 
@@ -313,7 +316,8 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     """List courses in the chosen category – each course button is a direct URL."""
     query = update.callback_query
     await query.answer()
-    cat_name = query.data.replace("category_", "")
+    encoded = query.data.replace("category_", "", 1)
+    cat_name = urllib.parse.unquote_plus(encoded)
 
     db = await get_db()
     courses = await db.courses.find({"category": cat_name}).to_list(length=None)
@@ -326,7 +330,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         [InlineKeyboardButton(crs["name"], url=crs["link"])]
         for crs in courses
     ]
-    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{cat_name}")])
+    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await query.edit_message_text(
         f'📚 Tap any course to open its link:',
