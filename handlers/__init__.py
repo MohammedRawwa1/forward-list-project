@@ -47,7 +47,6 @@ from handlers.bot_handlers import (
     handle_deletion_selection,
     delete_all_data,
     delete_all_data_start,
-    delete_item_start,
     delete_category_start,
     confirm_delete_all,
     cancel_delete_all_data,
