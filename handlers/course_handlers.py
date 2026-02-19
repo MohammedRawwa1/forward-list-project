@@ -5,6 +5,7 @@ from handlers.db_connection import get_db
 from pymongo.errors import PyMongoError
 import logging
 import re
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,7 +76,7 @@ async def add_course_link(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
     # Send category selection keyboard
-    keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"category_{c['name']}")] for c in cats]
+    keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"category_{urllib.parse.quote_plus(c['name'])}")] for c in cats]
     await update.message.reply_text(
         "Pick a category for the course:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -88,7 +89,8 @@ async def category_selected(update: Update, context: CallbackContext):
     await query.answer()
 
     # Extract category name from callback data (allow underscores in names)
-    category_name = query.data.split('_', 1)[1]
+    encoded = query.data.split('_', 1)[1]
+    category_name = urllib.parse.unquote_plus(encoded)
 
     # Get course data from user context
     course_name = context.user_data.get('course_name')
