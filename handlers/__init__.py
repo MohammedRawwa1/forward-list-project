@@ -7,7 +7,6 @@ from handlers.base_handlers import (
     create_category,
     get_courses_by_category,
     courses_callback,
-    handle_courses_pagination,
     handle_categories_pagination,
     showcat_handler,
     handle_back_to_cats,
