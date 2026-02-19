@@ -168,9 +168,30 @@ def is_valid_url(url: str):
     return re.match(url_pattern, url) is not None
 
 # Global error handler
-async def error_handler(update: Update, context: CallbackContext):
-    logger.error(f"Error: {context.error}")
-    await update.message.reply_text("An unexpected error occurred. Please try again later.")
+async def error_handler(update, context):
+    """Global error handler — safe when update or update.message is None."""
+    try:
+        err = getattr(context, 'error', context)
+        logger.error(f"Error: {err}")
+        # Try to reply to user if possible
+        if update is None:
+            return
+        # Message-based update
+        if getattr(update, 'message', None) is not None:
+            await update.message.reply_text("An unexpected error occurred. Please try again later.")
+        # CallbackQuery-based update
+        elif getattr(update, 'callback_query', None) is not None:
+            cq = update.callback_query
+            try:
+                await cq.answer()
+            except Exception:
+                pass
+            try:
+                await cq.edit_message_text("An unexpected error occurred. Please try again later.")
+            except Exception:
+                pass
+    except Exception:
+        logger.exception("Error in error_handler")
 
 # Handle URL parsing errors for course link input
 async def handle_link_parsing_error(update: Update, context: CallbackContext):
