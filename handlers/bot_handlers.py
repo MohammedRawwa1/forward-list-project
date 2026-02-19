@@ -291,6 +291,11 @@ async def delete_item_start(update: Update, context: CallbackContext):
         "Choose the course you want to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    
+    # Note: this command was previously exposed as /delete_course. It has been
+    # removed from the top-level command list; deletion should be done via the
+    # course UI (/courses) which presents per-course delete buttons.
+    
         
 # Handle confirmation of deleting all data
 async def confirm_delete_all(update: Update, context: CallbackContext):
