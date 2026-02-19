@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
+PAGE_SIZE = 10  # Default number of items per page for pagination
 
 # Input Validation for Category Name
 def validate_category_name(category_name: str):
@@ -112,7 +113,7 @@ async def list_courses(update: Update, context: CallbackContext):
     try:
         # Build a flattened list of courses from all categories
         page = 1
-        page_size = 5
+        page_size = PAGE_SIZE
         cats = await db.categories.find().to_list(length=None)
         all_courses = []
         for cat in cats:
@@ -153,7 +154,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
 
     try:
         # Paginate over the embedded courses array inside the category document
-        page_size = 5
+        page_size = PAGE_SIZE
         category_doc = await db.categories.find_one({"name": category_name})
         if not category_doc or not category_doc.get('courses'):
             await update.message.reply_text(f"No courses found in category '{category_name}'.")
@@ -183,65 +184,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         logger.error(f"Error listing courses for category '{category_name}': {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
         
-async def handle_courses_pagination(update: Update, context: CallbackContext):
-    """Handle pagination for listing courses within a category."""
-    query = update.callback_query
-    await query.answer()
-
-    # Parse callback data robustly: format expected is `courses_{category}_{page}`
-    parts = query.data.split('_')
-    if parts[0] != 'courses':
-        await query.edit_message_text("Invalid pagination callback.")
-        return
-
-    # page is last segment, category is everything between prefix and last segment
-    try:
-        page = int(parts[-1])
-    except ValueError:
-        await query.edit_message_text("Invalid page number.")
-        return
-
-    encoded_cat = "_".join(parts[1:-1])
-    category_name = urllib.parse.unquote_plus(encoded_cat)
-
-    db = await get_db()
-    if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
-        return
-
-    try:
-        # paginate using embedded array from category document
-        page_size = 5
-        category_doc = await db.categories.find_one({"name": category_name})
-        if not category_doc or not category_doc.get('courses'):
-            await query.edit_message_text(f"No more courses found in category '{category_name}'.")
-            return
-
-        courses = category_doc.get('courses', [])
-        start = (page - 1) * page_size
-        display = courses[start:start + page_size]
-
-        if display:
-            keyboard = [
-                [InlineKeyboardButton(course['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))]
-                for course in display
-            ]
-
-            pagination_buttons = []
-            if start > 0:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page-1}"))
-            if len(courses) > start + page_size:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page+1}"))
-            if pagination_buttons:
-                keyboard.append(pagination_buttons)
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(f"Courses in category '{category_name}':", reply_markup=reply_markup)
-        else:
-            await query.edit_message_text(f"No more courses found in category '{category_name}'.")
-    except Exception as e:
-        logger.error(f"Error handling pagination for category '{category_name}': {e}")
-        await query.edit_message_text("An error occurred while fetching courses. Please try again later.")
+# legacy underscore-format pagination handler removed; modern `courses::` callbacks are used
 
 async def handle_categories_pagination(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -259,7 +202,7 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
 
     try:
         collection = db['categories']
-        page_size = 5  # Number of categories per page
+        page_size = PAGE_SIZE  # Number of categories per page
 
         # Fetch categories for the current page
         categories = await collection.find().skip((page - 1) * page_size).limit(page_size).to_list(length=None)
@@ -449,7 +392,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                     for crs in cat.get('courses', []):
                         all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
 
-                page_size = 10
+                page_size = PAGE_SIZE
                 start = (page - 1) * page_size
                 display = all_courses[start:start + page_size]
                 if not display:
@@ -485,7 +428,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                 await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
                 return
 
-            page_size = 10
+            page_size = PAGE_SIZE
             start = (page - 1) * page_size
             courses = category_doc.get('courses', [])
             display = courses[start:start + page_size]
@@ -509,42 +452,8 @@ async def courses_callback(update: Update, context: CallbackContext):
             await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
-        # legacy underscore format handling (courses_{category}_{page})
-        parts = query.data.split('_')
-        if parts[0] != 'courses':
-            await query.edit_message_text("Invalid pagination callback.")
-            return
-        try:
-            page = int(parts[-1])
-        except ValueError:
-            await query.edit_message_text("Invalid page number.")
-            return
-        category = "_".join(parts[1:-1])
-        # fetch from embedded arrays
-        category_doc = await db.categories.find_one({"name": urllib.parse.unquote_plus(category)})
-        if not category_doc or not category_doc.get('courses'):
-            await query.edit_message_text(f"No courses found in category '{category}'.")
-            return
-        courses = category_doc.get('courses', [])
-        page_size = 10
-        start = (page - 1) * page_size
-        display = courses[start:start + page_size]
-        if not display:
-            await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
-            return
-        course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
-        keyboard = [
-            [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))]
-            for c in display
-        ]
-        pagination = []
-        if start > 0:
-            pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category}_{page-1}"))
-        if len(courses) > start + page_size:
-            pagination.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category}_{page+1}"))
-        if pagination:
-            keyboard.append(pagination)
-        await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        # legacy underscore format removed. Only `courses::` callbacks are supported.
+        await query.edit_message_text("Invalid pagination callback.")
         return
     except Exception as e:
         logger.error(f"Error handling courses callback: {e}")
