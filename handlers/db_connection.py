@@ -1,6 +1,9 @@
 import logging
 from database.mongo_handler import MongoDB, MongoConnectionError
 
+# Logger for this module
+logger = logging.getLogger(__name__)
+
 async def get_db():
     """
     Retrieves the MongoDB database instance asynchronously.
