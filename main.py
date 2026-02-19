@@ -102,11 +102,13 @@ async def startup_event():
     # Add your echo handler here, after application is initialized
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
 
-    # Set webhook (once)
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if not webhook_url:
-        raise ValueError("WEBHOOK_URL environment variable is not set")
-    await set_webhook_with_backoff(application, webhook_url)
+    # Set webhook (once). Can be disabled by setting SET_WEBHOOK_ON_STARTUP=0
+    set_webhook_flag = os.getenv("SET_WEBHOOK_ON_STARTUP", "1")
+    if set_webhook_flag != "0":
+        webhook_url = os.getenv("WEBHOOK_URL")
+        if not webhook_url:
+            raise ValueError("WEBHOOK_URL environment variable is not set")
+        await set_webhook_with_backoff(application, webhook_url)
     
 @app.post("/{token}/")
 async def webhook(token: str, request: Request):
@@ -125,5 +127,5 @@ async def root():
     return {"message": "Hello, this is the root path."}
     
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
+    port = int(os.getenv("PORT", 10000))  # Use environment variable PORT or default to 10000
     uvicorn.run("main:app", host="0.0.0.0", port=port)
