@@ -90,7 +90,7 @@ async def startup_event():
     await initialize_db()
     # >>>>>> indexes go here <<<<<<
     await MongoDB.ensure_indexes('categories')
-    await MongoDB.ensure_indexes('courses')
+    # legacy 'courses' collection removed — indexes now handled on `categories` embedded arrays
     # >>>>>> end indexes <<<<<<
     application = await create_application()
     await application.initialize()
@@ -102,13 +102,7 @@ async def startup_event():
     # Add your echo handler here, after application is initialized
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
 
-    # Set webhook
-    webhook_url = os.getenv("WEBHOOK_URL")
-    if not webhook_url:
-        raise ValueError("WEBHOOK_URL environment variable is not set")
-    await set_webhook_with_backoff(application, webhook_url)
-
-    # Set webhook
+    # Set webhook (once)
     webhook_url = os.getenv("WEBHOOK_URL")
     if not webhook_url:
         raise ValueError("WEBHOOK_URL environment variable is not set")
@@ -125,20 +119,11 @@ async def webhook(token: str, request: Request):
     await application.process_update(update)
     return {"status": "ok"}
     
-async def retry_send_message():
-    try:
-        # Your code to send messages
-        await bot.send_message(chat_id, "Message text")
-    except telegram_error.RetryAfter as e:  # Use telegram_error.RetryAfter
-        # Wait for the time specified in the exception
-        await asyncio.sleep(e.retry_after)
-        await retry_send_message()
-        
 # Root endpoint
 @app.get("/")
 async def root():
     return {"message": "Hello, this is the root path."}
     
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))  # Use environment variable PORT or default to 10000
+    port = int(os.getenv("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
