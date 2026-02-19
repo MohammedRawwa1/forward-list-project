@@ -127,12 +127,14 @@ async def setup_handlers(application: Application):
         return
 
     # Debug helper: log all incoming callback data (non-invasive)
-    async def _log_callback(update, context):
-        cq = getattr(update, 'callback_query', None)
-        if cq is not None:
-            logger.info("[CB-DBG] callback data=%s", cq.data)
+    # Enable by setting environment variable CB_DEBUG=1
+    if os.getenv("CB_DEBUG", "0") == "1":
+        async def _log_callback(update, context):
+            cq = getattr(update, 'callback_query', None)
+            if cq is not None:
+                logger.info("[CB-DBG] callback data=%s", cq.data)
 
-    application.add_handler(CallbackQueryHandler(_log_callback), group=0)
+        application.add_handler(CallbackQueryHandler(_log_callback), group=0)
 
     # ----------  commands  ----------
     application.add_handler(CommandHandler("start", start))
