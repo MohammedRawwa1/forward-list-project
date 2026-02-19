@@ -20,6 +20,7 @@ from handlers.base_handlers import (
     handle_course_selection,
     handle_category_name,
     handle_category_selection,
+    handle_back_to_cats,
 )
 from handlers.course_handlers import (
     setup_course_handlers,
