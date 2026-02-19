@@ -72,10 +72,14 @@ async def showcat_handler(update: Update, context: CallbackContext):
     encoded = query.data.split("_", 1)[1]
     cat_name = urllib.parse.unquote_plus(encoded)
     db = await get_db()
-    courses = await db.courses.find({"category": cat_name}).to_list(length=None)
-    if not courses:
+    # Read category document and its embedded courses array
+    category_doc = await db.categories.find_one({"name": cat_name})
+    if not category_doc or not category_doc.get('courses'):
         await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
         return
+
+    courses = category_doc.get('courses', [])
+    # Build keyboard with course buttons (URL buttons)
     keyboard = [[InlineKeyboardButton(crs["name"], url=crs["link"])] for crs in courses]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
@@ -89,42 +93,33 @@ async def list_courses(update: Update, context: CallbackContext):
         return
 
     try:
-        collection = db['courses']
-        page = 1  # Default page number
-        page_size = 5  # Number of courses per page
+        # Build a flattened list of courses from all categories
+        page = 1
+        page_size = 5
+        cats = await db.categories.find().to_list(length=None)
+        all_courses = []
+        for cat in cats:
+            for crs in cat.get('courses', []):
+                all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
 
-        # fetch one extra to detect "next" page
-        cursor = collection.find().skip((page - 1) * page_size).limit(page_size + 1)
-        courses = await cursor.to_list(length=None)
+        if all_courses:
+            start = (page - 1) * page_size
+            display = all_courses[start:start + page_size]
 
-        if courses:
-            # Create buttons for each course
             keyboard = [
-                [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
-                for course in courses
+                [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))]
+                for c in display
             ]
 
-            # detect next page by extra item
-            has_next = len(courses) > page_size
-            display_courses = courses[:page_size]
-
-            # rebuild keyboard from trimmed list
-            keyboard = [
-                [InlineKeyboardButton(course['name'], callback_data=f"course_{urllib.parse.quote_plus(course['name'])}")]
-                for course in display_courses
-            ]
-
-            # Add pagination buttons
             pagination_buttons = []
-            if page > 1:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{page-1}"))
-            if has_next:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{page+1}"))
+            if start > 0:
+                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}"))
+            if len(all_courses) > start + page_size:
+                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}"))
             if pagination_buttons:
                 keyboard.append(pagination_buttons)
 
             reply_markup = InlineKeyboardMarkup(keyboard)
-
             await update.message.reply_text("Here are the available courses:", reply_markup=reply_markup)
         else:
             await update.message.reply_text("No courses available.")
@@ -140,35 +135,33 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         return
 
     try:
-        collection = db['courses']
-        page_size = 5  # Number of courses per page
-
-        # Fetch courses for the current page (fetch one extra to detect next page)
-        cursor = collection.find({"category": category_name}).skip((page - 1) * page_size).limit(page_size + 1)
-        courses = await cursor.to_list(length=None)
-
-        if courses:
-            has_next = len(courses) > page_size
-            display_courses = courses[:page_size]
-
-            keyboard = [
-                [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
-                for course in display_courses
-            ]
-
-            pagination_buttons = []
-            if page > 1:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{urllib.parse.quote_plus(category_name)}_{page-1}"))
-            if has_next:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{urllib.parse.quote_plus(category_name)}_{page+1}"))
-            if pagination_buttons:
-                keyboard.append(pagination_buttons)
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(f"Courses in category '{category_name}':", reply_markup=reply_markup)
-        else:
+        # Paginate over the embedded courses array inside the category document
+        page_size = 5
+        category_doc = await db.categories.find_one({"name": category_name})
+        if not category_doc or not category_doc.get('courses'):
             await update.message.reply_text(f"No courses found in category '{category_name}'.")
+            return
+
+        courses = category_doc.get('courses', [])
+        start = (page - 1) * page_size
+        display = courses[start:start + page_size]
+
+        keyboard = [
+            [InlineKeyboardButton(course['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))]
+            for course in display
+        ]
+
+        pagination_buttons = []
+        if start > 0:
+            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page-1}"))
+        if len(courses) > start + page_size:
+            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page+1}"))
+        if pagination_buttons:
+            keyboard.append(pagination_buttons)
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(f"Courses in category '{category_name}':", reply_markup=reply_markup)
+        
     except Exception as e:
         logger.error(f"Error listing courses for category '{category_name}': {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
@@ -200,32 +193,32 @@ async def handle_courses_pagination(update: Update, context: CallbackContext):
         return
 
     try:
-        collection = db['courses']
-        page_size = 5  # Number of courses per page
+        # paginate using embedded array from category document
+        page_size = 5
+        category_doc = await db.categories.find_one({"name": category_name})
+        if not category_doc or not category_doc.get('courses'):
+            await query.edit_message_text(f"No more courses found in category '{category_name}'.")
+            return
 
-        # Fetch courses for the current page (one extra to detect next)
-        cursor = collection.find({"category": category_name}).skip((page - 1) * page_size).limit(page_size + 1)
-        courses = await cursor.to_list(length=None)
+        courses = category_doc.get('courses', [])
+        start = (page - 1) * page_size
+        display = courses[start:start + page_size]
 
-        if courses:
-            has_next = len(courses) > page_size
-            display_courses = courses[:page_size]
-
+        if display:
             keyboard = [
-                [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
-                for course in display_courses
+                [InlineKeyboardButton(course['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))]
+                for course in display
             ]
 
             pagination_buttons = []
-            if page > 1:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category_name}_{page-1}"))
-            if has_next:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category_name}_{page+1}"))
+            if start > 0:
+                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page-1}"))
+            if len(courses) > start + page_size:
+                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page+1}"))
             if pagination_buttons:
                 keyboard.append(pagination_buttons)
 
             reply_markup = InlineKeyboardMarkup(keyboard)
-
             await query.edit_message_text(f"Courses in category '{category_name}':", reply_markup=reply_markup)
         else:
             await query.edit_message_text(f"No more courses found in category '{category_name}'.")
@@ -318,14 +311,14 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     await query.answer()
     encoded = query.data.replace("category_", "", 1)
     cat_name = urllib.parse.unquote_plus(encoded)
-
     db = await get_db()
-    courses = await db.courses.find({"category": cat_name}).to_list(length=None)
-    if not courses:
+    category_doc = await db.categories.find_one({"name": cat_name})
+    if not category_doc or not category_doc.get('courses'):
         await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
         return
 
     # every button is a url button → opens the link immediately
+    courses = category_doc.get('courses', [])
     keyboard = [
         [InlineKeyboardButton(crs["name"], url=crs["link"])]
         for crs in courses
@@ -341,23 +334,45 @@ async def handle_course_selection(update: Update, context: CallbackContext):
     """Handle the selection of a course from the buttons."""
     query = update.callback_query
     await query.answer()
+    # Expect callback format: course::{category}::{course}
+    data = query.data.replace("course::", "", 1)
+    parts = data.split("::", 1)
+    if len(parts) == 2:
+        encoded_cat, encoded_course = parts
+        cat_name = urllib.parse.unquote_plus(encoded_cat)
+        course_name = urllib.parse.unquote_plus(encoded_course)
+    else:
+        cat_name = None
+        course_name = urllib.parse.unquote_plus(data)
 
-    # Extract course name from callback data
-    course_name = query.data.split('_')[1]
-
-    # Fetch the course details from the database
     db = await get_db()
     if db is None:
         await query.edit_message_text("Error: Unable to connect to the database.")
         return
 
     try:
-        collection = db['courses']
-        course = await collection.find_one({"name": course_name})
+        course = None
+        if cat_name:
+            category_doc = await db.categories.find_one({"name": cat_name})
+            if category_doc:
+                for crs in category_doc.get('courses', []):
+                    if crs.get('name') == course_name:
+                        course = {"name": crs.get('name'), "link": crs.get('link'), "category": cat_name}
+                        break
+        else:
+            # search across categories
+            cats = await db.categories.find().to_list(length=None)
+            for cat in cats:
+                for crs in cat.get('courses', []):
+                    if crs.get('name') == course_name:
+                        course = {"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')}
+                        break
+                if course:
+                    break
+
         if course:
-            # Display course details and options (e.g., delete)
             keyboard = [
-                [InlineKeyboardButton("Delete Course", callback_data=f"delete_course_{course_name}")]
+                [InlineKeyboardButton("Delete Course", callback_data=f"delete_course::{urllib.parse.quote_plus(course['category'])}::{urllib.parse.quote_plus(course['name'])}")]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
@@ -381,11 +396,13 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         return []
 
     try:
-        collection = db['courses']
-        skip = (page - 1) * page_size
-        cursor = collection.find({"category": category}).skip(skip).limit(page_size)
-        courses = await cursor.to_list(length=None)
-        return courses
+        # Read courses from the category document's embedded array and paginate
+        category_doc = await db.categories.find_one({"name": category})
+        if not category_doc or not category_doc.get('courses'):
+            return []
+        courses = category_doc.get('courses', [])
+        start = (page - 1) * page_size
+        return courses[start:start + page_size]
     except Exception as e:
         logger.error(f"Error while fetching courses for category '{category}': {str(e)}")
         return []
@@ -394,52 +411,124 @@ async def courses_callback(update: Update, context: CallbackContext):
     """Handle the courses callback and display courses based on pagination."""
     query = update.callback_query
     await query.answer()
+    data = query.data
+    db = await get_db()
+    if db is None:
+        await query.edit_message_text("Error: Unable to connect to the database.")
+        return
 
-    # Split the callback data to extract category and page. Expected: `courses_{category}_{page}`
-    parts = query.data.split('_')
-    if parts[0] == "courses":
+    try:
+        # New format supports: courses::{category}::{page} or courses::{page} for global
+        if data.startswith("courses::"):
+            payload = data.replace("courses::", "", 1)
+            parts = payload.split("::")
+            if len(parts) == 1:
+                # global page
+                page = int(parts[0])
+                # flatten all courses
+                cats = await db.categories.find().to_list(length=None)
+                all_courses = []
+                for cat in cats:
+                    for crs in cat.get('courses', []):
+                        all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+
+                page_size = 10
+                start = (page - 1) * page_size
+                display = all_courses[start:start + page_size]
+                if not display:
+                    await query.edit_message_text(f"No courses found on page {page}.")
+                    return
+
+                course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
+                keyboard = [
+                    [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))]
+                    for c in display
+                ]
+                pagination = []
+                if start > 0:
+                    pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}"))
+                if len(all_courses) > start + page_size:
+                    pagination.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}"))
+                if pagination:
+                    keyboard.append(pagination)
+
+                await query.edit_message_text(text=f"All courses (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+                return
+
+            # category + page
+            category = urllib.parse.unquote_plus(parts[0])
+            try:
+                page = int(parts[1])
+            except Exception:
+                await query.edit_message_text("Invalid page number.")
+                return
+
+            category_doc = await db.categories.find_one({"name": category})
+            if not category_doc or not category_doc.get('courses'):
+                await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
+                return
+
+            page_size = 10
+            start = (page - 1) * page_size
+            courses = category_doc.get('courses', [])
+            display = courses[start:start + page_size]
+            if not display:
+                await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
+                return
+
+            course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
+            keyboard = [
+                [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))]
+                for c in display
+            ]
+            pagination = []
+            if start > 0:
+                pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{urllib.parse.quote_plus(category)}::{page-1}"))
+            if len(courses) > start + page_size:
+                pagination.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category)}::{page+1}"))
+            if pagination:
+                keyboard.append(pagination)
+
+            await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+
+        # legacy underscore format handling (courses_{category}_{page})
+        parts = query.data.split('_')
+        if parts[0] != 'courses':
+            await query.edit_message_text("Invalid pagination callback.")
+            return
         try:
             page = int(parts[-1])
         except ValueError:
             await query.edit_message_text("Invalid page number.")
             return
-        category = "_".join(parts[1:-1])  # Support underscores in category names
-
-        # Fetch the courses from the database based on the category and page
-        db = await get_db()
-        if db is None:
-            await query.edit_message_text("Error: Unable to connect to the database.")
+        category = "_".join(parts[1:-1])
+        # fetch from embedded arrays
+        category_doc = await db.categories.find_one({"name": urllib.parse.unquote_plus(category)})
+        if not category_doc or not category_doc.get('courses'):
+            await query.edit_message_text(f"No courses found in category '{category}'.")
             return
-
-        try:
-            collection = db['courses']
-            courses = await collection.find({"category": category}).to_list(length=10)  # Fetch 10 courses per page
-            if courses:
-                # Build a message with the course details
-                course_list_text = "\n".join([f"📚 {course['name']}\n{course['link']}" for course in courses])
-                
-                # Build the keyboard for course selection
-                keyboard = [
-                    [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
-                    for course in courses
-                ]
-
-                # Add pagination buttons if needed
-                if page > 1:
-                    keyboard.append([InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category}_{page-1}")])
-                if len(courses) == 10:  # If there are more courses to show
-                    keyboard.append([InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category}_{page+1}")])
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await query.edit_message_text(
-                    text=f"Courses in category '{category}':\n\n{course_list_text}",
-                    reply_markup=reply_markup
-                )
-            else:
-                await query.edit_message_text(
-                    text=f"No courses found in category '{category}' on page {page}.",
-                    reply_markup=None
-                )
-        except Exception as e:
-            logger.error(f"Error fetching courses for category '{category}': {e}")
-            await query.edit_message_text("An error occurred while fetching courses. Please try again later.")
+        courses = category_doc.get('courses', [])
+        page_size = 10
+        start = (page - 1) * page_size
+        display = courses[start:start + page_size]
+        if not display:
+            await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
+            return
+        course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
+        keyboard = [
+            [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))]
+            for c in display
+        ]
+        pagination = []
+        if start > 0:
+            pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category}_{page-1}"))
+        if len(courses) > start + page_size:
+            pagination.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category}_{page+1}"))
+        if pagination:
+            keyboard.append(pagination)
+        await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    except Exception as e:
+        logger.error(f"Error handling courses callback: {e}")
+        await query.edit_message_text("An error occurred while fetching courses. Please try again later.")
