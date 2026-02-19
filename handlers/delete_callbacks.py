@@ -8,10 +8,11 @@ logger = logging.getLogger(__name__)
 async def handle_category_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    cat = query.data.split("_", 2)[2]          # everything after "delete_category_"
+    # everything after "delete_category_"
+    cat = query.data.split("_", 2)[2]
     db = await MongoDB.get_db()
     res = await db['categories'].delete_one({"name": cat})
-    await db['courses'].delete_many({"category": cat})   # cascade
+    # courses are embedded in `categories` so deleting the category removes them
     if res.deleted_count:
         await query.edit_message_text(f"Category ‘{cat}’ and all its courses deleted. ✅")
     else:
@@ -21,10 +22,29 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
 async def handle_item_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    item = query.data.split("_", 2)[2]         # everything after "delete_item_"
+    # Support new format: delete_item::category::course or legacy delete_item_{course}
+    data = query.data
     db = await MongoDB.get_db()
-    res = await db['courses'].delete_one({"name": item})
-    if res.deleted_count:
+
+    if data.startswith("delete_item::"):
+        payload = data.replace("delete_item::", "", 1)
+        parts = payload.split("::", 1)
+        if len(parts) == 2:
+            cat = parts[0]
+            item = parts[1]
+            # remove from category embedded array
+            res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+            if res.modified_count:
+                await query.edit_message_text(f"Course ‘{item}’ deleted from category ‘{cat}’. ✅")
+                return
+            else:
+                await query.edit_message_text("Course not found. ❌")
+                return
+
+    # legacy underscore-style fallback: pull from any category that contains the course
+    item = data.split("_", 2)[2] if "_" in data else data
+    res = await db['categories'].update_one({"courses.name": item}, {"$pull": {"courses": {"name": item}}})
+    if res.modified_count:
         await query.edit_message_text(f"Course ‘{item}’ deleted. ✅")
     else:
         await query.edit_message_text("Course not found. ❌")
