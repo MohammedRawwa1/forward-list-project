@@ -24,6 +24,7 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
 async def handle_item_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
+    logger.info("[DEL-ITEM] callback data=%s", query.data)
     # Support new format: delete_item::category::course or legacy delete_item_{course}
     data = query.data
     db = await MongoDB.get_db()
