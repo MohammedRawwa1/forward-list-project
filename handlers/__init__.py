@@ -10,6 +10,7 @@ from handlers.base_handlers import (
     handle_courses_pagination,
     handle_categories_pagination,
     showcat_handler,
+    handle_back_to_cats,
     handle_course_selection,
     handle_category_name,
     handle_category_selection,
@@ -17,6 +18,7 @@ from handlers.base_handlers import (
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
 __all__ += [
     "handle_categories_pagination",
+    "handle_back_to_cats",
     "handle_category_deletion",
     "handle_item_deletion",
 ]
