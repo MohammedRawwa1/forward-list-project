@@ -19,7 +19,8 @@ async def setup_course_handlers(application):
         states={
             ADD_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
             ADD_LINK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
-            ADD_CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^category_")]
+            # use a distinct callback prefix for add-flow to avoid clashes with global category handlers
+            ADD_CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^addcat_")]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         name="add_course_conv",
@@ -75,8 +76,8 @@ async def add_course_link(update: Update, context: CallbackContext):
         await update.message.reply_text("No categories available. Create one first with /create_category")
         return ConversationHandler.END
 
-    # Send category selection keyboard
-    keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"category_{urllib.parse.quote_plus(c['name'])}")] for c in cats]
+    # Send category selection keyboard (use `addcat_` prefix to target this conversation)
+    keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"addcat_{urllib.parse.quote_plus(c['name'])}")] for c in cats]
     await update.message.reply_text(
         "Pick a category for the course:",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -88,7 +89,7 @@ async def category_selected(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    # Extract category name from callback data (allow underscores in names)
+    # Extract category name from callback data using the add-flow prefix
     encoded = query.data.split('_', 1)[1]
     category_name = urllib.parse.unquote_plus(encoded)
 
@@ -107,13 +108,20 @@ async def category_selected(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
     try:
-        # Save course to the database
-        collection = db['courses']
-        await collection.insert_one({
-            "name": course_name,
-            "link": course_link,
-            "category": category_name
-        })
+        # Save course inside the category document (push into categories.courses array)
+        categories_coll = db['categories']
+        update_result = await categories_coll.update_one(
+            {"name": category_name},
+            {"$push": {"courses": {"name": course_name, "link": course_link}}}
+        )
+        # Log the update result for debugging
+        logger.info("[ADD-COURSE] update_result=%s", getattr(update_result, 'raw_result', update_result))
+
+        if update_result.modified_count == 0:
+            # Category not found
+            logger.warning("[ADD-COURSE] Category not found: %s", category_name)
+            await query.edit_message_text(f"Error: Category '{category_name}' not found. Create it first.")
+            return ConversationHandler.END
 
         # Send a confirmation message
         await query.edit_message_text(
@@ -143,13 +151,17 @@ async def add_course_category(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
     try:
-        # Insert the course into the database
-        collection = db['courses']
-        await collection.insert_one({
-            "name": course_name,
-            "link": course_link,
-            "category": category_name,
-        })
+        # Push the course into the category document (embedded array)
+        categories_coll = db['categories']
+        upd = await categories_coll.update_one(
+            {"name": category_name},
+            {"$push": {"courses": {"name": course_name, "link": course_link}}}
+        )
+        logger.info("[ADD-COURSE-alt] update_result=%s", getattr(upd, 'raw_result', upd))
+        if upd.modified_count == 0:
+            await query.edit_message_text(f"Error: Category '{category_name}' not found. Create it first.")
+            return ConversationHandler.END
+
         await query.edit_message_text(f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉")
         return ConversationHandler.END
     except PyMongoError as e:
