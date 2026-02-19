@@ -143,9 +143,15 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_courses_pagination, pattern=r"^courses_(prev|next)_\d+$"))
     application.add_handler(CallbackQueryHandler(handle_categories_pagination, pattern=r"^categories_(prev|next)_\d+$"))
     application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses_"))
+    application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses::"))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
+    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category::"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
+    application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course::"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
+    application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course::"))
+    application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_item_"))
+    application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_item::"))
 
     # ----------  conversations  ----------
     await setup_course_handlers(application)  # /add  (ADD_NAME → ADD_LINK → ADD_CATEGORY)
@@ -174,6 +180,7 @@ async def setup_handlers(application: Application):
     # ----------  deletion & extra callbacks (LAST so they can't be shadowed) ----------
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
+    application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item::"))
     application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_"))
 
     # ----------  thumbnails  ----------
