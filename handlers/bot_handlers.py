@@ -90,6 +90,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
     """Handle the deletion of a course."""
     query = update.callback_query
     await query.answer()
+    logger.info("[DEL-COURSE] callback data=%s", query.data)
 
     # Support new callback formats: delete_item::{category}::{course} or delete_course::{category}::{course}
     data = query.data
