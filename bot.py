@@ -148,6 +148,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category::"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course::"))
+    application.add_handler(CallbackQueryHandler(handle_back_to_cats, pattern=r"^back_to_cats$"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course::"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_item_"))
