@@ -14,7 +14,6 @@ from handlers.base_handlers import (
     create_category,
     get_courses_by_category,
     courses_callback,
-    handle_courses_pagination,
     handle_categories_pagination,
     showcat_handler,
     handle_course_selection,
@@ -150,9 +149,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
     application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
-    application.add_handler(CallbackQueryHandler(handle_courses_pagination, pattern=r"^courses_(prev|next)_\d+$"))
     application.add_handler(CallbackQueryHandler(handle_categories_pagination, pattern=r"^categories_(prev|next)_\d+$"))
-    application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses_"))
     application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses::"))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category::"))
