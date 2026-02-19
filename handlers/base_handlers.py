@@ -392,7 +392,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 async def get_courses_by_category(user_id, category, page: int = 1, page_size: int = 20):
     """Fetch courses by category with pagination."""
     db = await get_db()
-    if not db:
+    if db is None:
         return []
 
     try:
