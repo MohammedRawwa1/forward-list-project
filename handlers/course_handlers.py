@@ -103,7 +103,7 @@ async def category_selected(update: Update, context: CallbackContext):
 
     # Connect to the database
     db = await get_db()
-    if not db:
+    if db is None:
         await query.edit_message_text("Error: Unable to connect to the database.")
         return ConversationHandler.END
 
@@ -146,7 +146,7 @@ async def add_course_category(update: Update, context: CallbackContext):
     course_link = context.user_data.get("course_link")
 
     db = await get_db()  # Await the database connection
-    if not db:
+    if db is None:
         await query.edit_message_text("Error: Unable to connect to the database.")
         return ConversationHandler.END
 
