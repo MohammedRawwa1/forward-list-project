@@ -91,8 +91,9 @@ async def list_courses(update: Update, context: CallbackContext):
         page = 1  # Default page number
         page_size = 5  # Number of courses per page
 
-        # Fetch courses for the current page
-        courses = await collection.find().skip((page - 1) * page_size).limit(page_size).to_list(length=None)
+        # fetch one extra to detect "next" page
+        cursor = collection.find().skip((page - 1) * page_size).limit(page_size + 1)
+        courses = await cursor.to_list(length=None)
 
         if courses:
             # Create buttons for each course
@@ -101,13 +102,22 @@ async def list_courses(update: Update, context: CallbackContext):
                 for course in courses
             ]
 
+            # detect next page by extra item
+            has_next = len(courses) > page_size
+            display_courses = courses[:page_size]
+
+            # rebuild keyboard from trimmed list
+            keyboard = [
+                [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
+                for course in display_courses
+            ]
+
             # Add pagination buttons
             pagination_buttons = []
             if page > 1:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_prev_{page-1}"))
-            if len(courses) == page_size:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_next_{page+1}"))
-            
+                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{page-1}"))
+            if has_next:
+                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{page+1}"))
             if pagination_buttons:
                 keyboard.append(pagination_buttons)
 
@@ -131,23 +141,24 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         collection = db['courses']
         page_size = 5  # Number of courses per page
 
-        # Fetch courses for the current page
-        courses = await collection.find({"category": category_name}).skip((page - 1) * page_size).limit(page_size).to_list(length=None)
+        # Fetch courses for the current page (fetch one extra to detect next page)
+        cursor = collection.find({"category": category_name}).skip((page - 1) * page_size).limit(page_size + 1)
+        courses = await cursor.to_list(length=None)
 
         if courses:
-            # Create buttons for each course
+            has_next = len(courses) > page_size
+            display_courses = courses[:page_size]
+
             keyboard = [
                 [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
-                for course in courses
+                for course in display_courses
             ]
 
-            # Add pagination buttons
             pagination_buttons = []
             if page > 1:
                 pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category_name}_{page-1}"))
-            if len(courses) == page_size:
+            if has_next:
                 pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category_name}_{page+1}"))
-            
             if pagination_buttons:
                 keyboard.append(pagination_buttons)
 
@@ -165,11 +176,20 @@ async def handle_courses_pagination(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    # Extract the category name, action, and page number from the callback data
-    data = query.data.split('_')
-    category_name = data[1]  # The category name
-    action = data[2]  # "prev" or "next"
-    page = int(data[3])  # Page number
+    # Parse callback data robustly: format expected is `courses_{category}_{page}`
+    parts = query.data.split('_')
+    if parts[0] != 'courses':
+        await query.edit_message_text("Invalid pagination callback.")
+        return
+
+    # page is last segment, category is everything between prefix and last segment
+    try:
+        page = int(parts[-1])
+    except ValueError:
+        await query.edit_message_text("Invalid page number.")
+        return
+
+    category_name = "_".join(parts[1:-1])
 
     db = await get_db()
     if db is None:
@@ -180,23 +200,24 @@ async def handle_courses_pagination(update: Update, context: CallbackContext):
         collection = db['courses']
         page_size = 5  # Number of courses per page
 
-        # Fetch courses for the current page
-        courses = await collection.find({"category": category_name}).skip((page - 1) * page_size).limit(page_size).to_list(length=None)
+        # Fetch courses for the current page (one extra to detect next)
+        cursor = collection.find({"category": category_name}).skip((page - 1) * page_size).limit(page_size + 1)
+        courses = await cursor.to_list(length=None)
 
         if courses:
-            # Create buttons for each course
+            has_next = len(courses) > page_size
+            display_courses = courses[:page_size]
+
             keyboard = [
                 [InlineKeyboardButton(course['name'], callback_data=f"course_{course['name']}")]
-                for course in courses
+                for course in display_courses
             ]
 
-            # Add pagination buttons
             pagination_buttons = []
             if page > 1:
                 pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses_{category_name}_{page-1}"))
-            if len(courses) == page_size:
+            if has_next:
                 pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses_{category_name}_{page+1}"))
-            
             if pagination_buttons:
                 keyboard.append(pagination_buttons)
 
@@ -351,25 +372,18 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 # Main entry point for your bot (add handlers as needed)
 async def get_courses_by_category(user_id, category, page: int = 1, page_size: int = 20):
     """Fetch courses by category with pagination."""
-    db = await get_database()  # Use helper function to get DB connection
+    db = await get_db()
     if not db:
         return []
 
     try:
-        user = await db.users.find_one({"user_id": user_id})
-        courses = user.get("courses", [])
-        
-        # Filter courses by category
-        filtered_courses = [course for course in courses if course.get("category") == category]
-
-        # Apply pagination
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        paginated_courses = filtered_courses[start_index:end_index]
-
-        return paginated_courses
+        collection = db['courses']
+        skip = (page - 1) * page_size
+        cursor = collection.find({"category": category}).skip(skip).limit(page_size)
+        courses = await cursor.to_list(length=None)
+        return courses
     except Exception as e:
-        logger.error(f"Error while fetching courses for user {user_id} in category '{category}': {str(e)}")
+        logger.error(f"Error while fetching courses for category '{category}': {str(e)}")
         return []
 
 async def courses_callback(update: Update, context: CallbackContext):
@@ -377,11 +391,15 @@ async def courses_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
 
-    # Split the callback data to extract category and page
-    data = query.data.split('_')
-    if data[0] == "courses":
-        category = data[1]  # The course category (e.g., "Programming")
-        page = int(data[2])  # The page number (e.g., 1, 2, 3, etc.)
+    # Split the callback data to extract category and page. Expected: `courses_{category}_{page}`
+    parts = query.data.split('_')
+    if parts[0] == "courses":
+        try:
+            page = int(parts[-1])
+        except ValueError:
+            await query.edit_message_text("Invalid page number.")
+            return
+        category = "_".join(parts[1:-1])  # Support underscores in category names
 
         # Fetch the courses from the database based on the category and page
         db = await get_db()
