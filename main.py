@@ -2,8 +2,11 @@ import logging
 import os
 import json
 import uvicorn
+import asyncio
+import signal
 
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, TypeHandler, CallbackContext
 from dotenv import load_dotenv
@@ -21,6 +24,10 @@ app = FastAPI()
 
 application: Application = None
 bot_token = os.getenv("BOT_TOKEN")
+
+# Optional token for an authenticated liveness probe. If set, the health
+# endpoint requires the header `X-LIVENESS-TOKEN: <token>`.
+LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
 
 if not bot_token:
     raise ValueError("BOT_TOKEN environment variable is not set")
@@ -67,6 +74,17 @@ async def startup_event():
     application.add_error_handler(global_error_handler)
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
 
+    # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
+    loop = asyncio.get_event_loop()
+    def _log_signal(sig):
+        logger.warning("Received shutdown signal: %s", sig)
+    try:
+        loop.add_signal_handler(signal.SIGTERM, lambda: _log_signal('SIGTERM'))
+        loop.add_signal_handler(signal.SIGINT, lambda: _log_signal('SIGINT'))
+    except NotImplementedError:
+        # add_signal_handler may not be available on all platforms (e.g., Windows)
+        logger.info("Signal handlers not supported on this platform; skipping registration.")
+
 
 # ---------- webhook ----------
 @app.post("/{token}/")
@@ -85,6 +103,18 @@ async def webhook(token: str, request: Request):
 @app.get("/")
 async def root():
     return {"message": "Bot is running"}
+
+
+@app.get("/health")
+async def health(request: Request):
+    """Liveness endpoint. If `LIVENESS_TOKEN` is set, caller must provide
+    header `X-LIVENESS-TOKEN` with the same value.
+    """
+    if LIVENESS_TOKEN:
+        hdr = request.headers.get("X-LIVENESS-TOKEN")
+        if hdr != LIVENESS_TOKEN:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    return JSONResponse({"status": "ok"})
 
 
 if __name__ == "__main__":
