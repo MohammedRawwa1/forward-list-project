@@ -81,18 +81,17 @@ async def showcat_handler(update: Update, context: CallbackContext):
         return
 
     courses = category_doc.get('courses', [])
-    # Build compact keyboard: show course names in the message, buttons are small
-    course_list_text = "\n".join([f"📚 {crs['name']}" for crs in courses])
+    # Build compact keyboard: left button opens link, right button shows details
     keyboard = [
         [
-            InlineKeyboardButton(crs["name"], callback_data=f"noop_{i}"),
+            InlineKeyboardButton(crs["name"], url=crs.get("link")),
             InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs["name"])))
         ]
-        for i, crs in enumerate(courses)
+        for crs in courses
     ]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-    await query.edit_message_text(f"Courses in '{cat_name}':\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"Courses in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
@@ -135,10 +134,10 @@ async def list_courses(update: Update, context: CallbackContext):
             course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
             keyboard = [
                 [
-                    InlineKeyboardButton(c['name'], callback_data=f"noop_{i}"),
+                    InlineKeyboardButton(c['name'], url=c.get('link')),
                     InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
                 ]
-                for i, c in enumerate(display)
+                for c in display
             ]
 
             pagination_buttons = []
@@ -150,7 +149,7 @@ async def list_courses(update: Update, context: CallbackContext):
                 keyboard.append(pagination_buttons)
 
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(f"Here are the available courses (page {page}):\n\n{course_list_text}", reply_markup=reply_markup)
+            await update.message.reply_text(f"Here are the available courses (page {page}):", reply_markup=reply_markup)
         else:
             await update.message.reply_text("No courses available.")
     except Exception as e:
@@ -176,13 +175,12 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         start = (page - 1) * page_size
         display = courses[start:start + page_size]
 
-        course_list_text = "\n".join([f"📚 {course['name']}" for course in display])
         keyboard = [
             [
-                InlineKeyboardButton(course['name'], callback_data=f"noop_{i}"),
+                InlineKeyboardButton(course['name'], url=course.get('link')),
                 InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))
             ]
-            for i, course in enumerate(display)
+            for course in display
         ]
 
         pagination_buttons = []
@@ -194,7 +192,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             keyboard.append(pagination_buttons)
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):\n\n{course_list_text}", reply_markup=reply_markup)
+        await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):", reply_markup=reply_markup)
         
     except Exception as e:
         logger.error(f"Error listing courses for category '{category_name}': {e}")
@@ -418,13 +416,12 @@ async def courses_callback(update: Update, context: CallbackContext):
                 if not display:
                     await query.edit_message_text(f"No courses found on page {page}.")
                     return
-                    course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
                     keyboard = [
                         [
-                            InlineKeyboardButton(c['name'], callback_data=f"noop_{i}"),
+                            InlineKeyboardButton(c['name'], url=c.get('link')),
                             InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
                         ]
-                        for i, c in enumerate(display)
+                        for c in display
                     ]
                 pagination = []
                 if start > 0:
@@ -434,7 +431,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                 if pagination:
                     keyboard.append(pagination)
 
-                await query.edit_message_text(text=f"All courses (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+                await query.edit_message_text(text=f"All courses (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard))
                 return
 
             # category + page
@@ -458,13 +455,12 @@ async def courses_callback(update: Update, context: CallbackContext):
                 await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
                 return
 
-            course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
             keyboard = [
                 [
-                    InlineKeyboardButton(c['name'], callback_data=f"noop_{i}"),
+                    InlineKeyboardButton(c['name'], url=c.get('link')),
                     InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))
                 ]
-                for i, c in enumerate(display)
+                for c in display
             ]
             pagination = []
             if start > 0:
@@ -474,7 +470,7 @@ async def courses_callback(update: Update, context: CallbackContext):
             if pagination:
                 keyboard.append(pagination)
 
-            await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard))
             return
 
         # legacy underscore format removed. Only `courses::` callbacks are supported.
@@ -485,9 +481,3 @@ async def courses_callback(update: Update, context: CallbackContext):
         await query.edit_message_text("An error occurred while fetching courses. Please try again later.")
 
 
-async def noop_callback(update: Update, context: CallbackContext):
-    """A no-op callback for course name buttons (prevents accidental actions)."""
-    query = update.callback_query
-    if query:
-        await query.answer()
-    return
