@@ -70,7 +70,16 @@ async def handle_delete_ref(update: Update, context: CallbackContext):
     cat = payload.get('category')
     item = payload.get('name')
     # attempt to remove
-    res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+    try:
+        db = await MongoDB.get_db()
+        if db is None:
+            await query.edit_message_text("Error: Unable to connect to the database.")
+            return
+        res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+    except Exception as e:
+        logger.error("[DEL-REF] DB error: %s", e, exc_info=True)
+        await query.edit_message_text("An error occurred while deleting the course. Please try again later.")
+        return
     if res.modified_count:
         await query.edit_message_text(f"Course ‘{item}’ deleted from category ‘{cat}’. ✅")
     else:
