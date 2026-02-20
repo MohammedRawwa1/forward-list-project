@@ -143,13 +143,13 @@ async def list_courses(update: Update, context: CallbackContext):
             display = all_courses[start:start + page_size]
 
             course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
-                    keyboard = [
-                        [
-                            InlineKeyboardButton(c['name'], url=c.get('link')),
-                            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], 'global', page))
-                        ]
-                        for c in display
-                    ]
+            keyboard = [
+                [
+                    InlineKeyboardButton(c['name'], url=c.get('link')),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], 'global', page))
+                ]
+                for c in display
+            ]
             # Always return to the global courses list (page 1)
             back_cb = "courses::1"
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
