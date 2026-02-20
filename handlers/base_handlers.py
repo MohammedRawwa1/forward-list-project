@@ -237,33 +237,36 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
 
     try:
         collection = db['categories']
-        page_size = PAGE_SIZE  # Number of categories per page
 
-        # Fetch categories for the current page
-        categories = await collection.find().skip((page - 1) * page_size).limit(page_size).to_list(length=None)
+        # Load all categories from the database (no DB-side limit) so the bot
+        # can support an effectively unlimited number of categories. We keep
+        # UI pagination on the bot side to avoid huge messages at once.
+        all_categories = await collection.find().to_list(length=None)
+        if not all_categories:
+            await query.edit_message_text("No categories available.")
+            return
 
-        if categories:
-            # Create buttons for each category
-            keyboard = [
-                [InlineKeyboardButton(category['name'], callback_data=f"category_{urllib.parse.quote_plus(category['name'])}")]
-                for category in categories
-            ]
+        page_size = PAGE_SIZE  # Number of categories per page in the UI
+        start = (page - 1) * page_size
+        display = all_categories[start:start + page_size]
 
-            # Add pagination buttons
-            pagination_buttons = []
-            if page > 1:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"categories_prev_{page-1}"))
-            if len(categories) == page_size:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"categories_next_{page+1}"))
-            
-            if pagination_buttons:
-                keyboard.append(pagination_buttons)
+        # Create buttons for the slice of categories for this page
+        keyboard = [
+            [InlineKeyboardButton(category['name'], callback_data=f"category_{urllib.parse.quote_plus(category['name'])}")]
+            for category in display
+        ]
 
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        # Add pagination buttons if needed
+        pagination_buttons = []
+        if start > 0:
+            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"categories_prev_{page-1}"))
+        if len(all_categories) > start + page_size:
+            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"categories_next_{page+1}"))
+        if pagination_buttons:
+            keyboard.append(pagination_buttons)
 
-            await query.edit_message_text("Here are the available categories:", reply_markup=reply_markup)
-        else:
-            await query.edit_message_text("No more categories available.")
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Here are the available categories:", reply_markup=reply_markup)
     except Exception as e:
         logger.error(f"Error handling pagination: {e}")
         await query.edit_message_text("An error occurred while fetching categories. Please try again later.")
