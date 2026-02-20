@@ -92,7 +92,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     ]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-    await query.edit_message_text('📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(f"Courses in '{cat_name}':\n\n{course_list_text}", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
@@ -150,7 +150,7 @@ async def list_courses(update: Update, context: CallbackContext):
                 keyboard.append(pagination_buttons)
 
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text("Here are the available courses:", reply_markup=reply_markup)
+            await update.message.reply_text(f"Here are the available courses (page {page}):\n\n{course_list_text}", reply_markup=reply_markup)
         else:
             await update.message.reply_text("No courses available.")
     except Exception as e:
@@ -194,7 +194,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             keyboard.append(pagination_buttons)
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"Courses in category '{category_name}':", reply_markup=reply_markup)
+        await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):\n\n{course_list_text}", reply_markup=reply_markup)
         
     except Exception as e:
         logger.error(f"Error listing courses for category '{category_name}': {e}")
