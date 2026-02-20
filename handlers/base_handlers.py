@@ -5,6 +5,7 @@ from conversation_states import CREATE_CAT_NAME
 from handlers.db_connection import get_db  # Importing get_db from db_connection.py
 from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
+from pymongo.errors import DuplicateKeyError
 import urllib.parse
 
 # Enable logging
@@ -260,6 +261,10 @@ async def handle_category_name(update: Update, context: CallbackContext):
         logger.info(f"[CAT-INSERT-DONE] _id={result.inserted_id}")
         await update.message.reply_text(f"Category ‘{category_name}’ saved ✔")
         return ConversationHandler.END
+    except DuplicateKeyError:
+        logger.warning(f"[CAT-INSERT-DUP] category already exists: {category_name!r}")
+        await update.message.reply_text(f"A category named '{category_name}' already exists. Please choose a different name.")
+        return CREATE_CAT_NAME
     except Exception as exc:
         logger.error(f"[CAT-INSERT-FAIL] {exc}", exc_info=True)
         await update.message.reply_text("Save failed – check console.")
