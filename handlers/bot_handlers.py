@@ -10,6 +10,7 @@ import logging
 from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
+import difflib
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -127,6 +128,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
         return
 
     try:
+        logger.info("[DEL-COURSE] parsed cat_name=%s course_name=%s", cat_name, course_name)
         # Remove the course from the category's embedded array
         if cat_name:
             result = await db['categories'].update_one(
@@ -137,6 +139,16 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
             if result.modified_count > 0:
                 await query.edit_message_text(f"Course '{course_name}' deleted successfully from '{cat_name}'! 🎉")
             else:
+                # Log category document for debugging
+                category_doc = await db['categories'].find_one({"name": cat_name})
+                logger.warning("[DEL-COURSE] delete failed for '%s' in category '%s' — category_doc=%s", course_name, cat_name, category_doc)
+                if category_doc and category_doc.get('courses'):
+                    names = [c.get('name') for c in category_doc.get('courses', [])]
+                    logger.info("[DEL-COURSE] available course names in category '%s': %s", cat_name, names)
+                    # fuzzy matches
+                    close = difflib.get_close_matches(course_name, names, n=5, cutoff=0.6)
+                    if close:
+                        logger.info("[DEL-COURSE] close matches for '%s' in '%s': %s", course_name, cat_name, close)
                 await query.edit_message_text(f"Course '{course_name}' not found in category '{cat_name}'.")
         else:
             # If category not provided, try to pull from any category that contains it
@@ -148,6 +160,23 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
             if result.modified_count > 0:
                 await query.edit_message_text(f"Course '{course_name}' deleted successfully! 🎉")
             else:
+                # dump categories containing similar names for debugging
+                cats = await db['categories'].find().to_list(length=None)
+                candidates = []
+                for cat in cats:
+                    for crs in cat.get('courses', []):
+                        if crs.get('name') == course_name:
+                            candidates.append((cat.get('name'), crs.get('name')))
+                if not candidates:
+                    # fuzzy search
+                    all_names = []
+                    for cat in cats:
+                        for crs in cat.get('courses', []):
+                            all_names.append((cat.get('name'), crs.get('name')))
+                    close = [ (cn, nm) for cn, nm in all_names if difflib.get_close_matches(course_name, [nm], cutoff=0.6) ]
+                    logger.warning("[DEL-COURSE] no exact candidates; fuzzy close matches: %s", close)
+                else:
+                    logger.info("[DEL-COURSE] exact candidates found (unexpected): %s", candidates)
                 await query.edit_message_text(f"Course '{course_name}' not found.")
     except Exception as e:
         logger.error(f"Error deleting course '{course_name}': {e}")
