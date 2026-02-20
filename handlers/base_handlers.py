@@ -85,7 +85,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     keyboard = [
         [
             InlineKeyboardButton(crs["name"], url=crs.get("link")),
-            InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs["name"])))
+            InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(crs['name'])}::from::category::1")
         ]
         for crs in courses
     ]
@@ -135,10 +135,13 @@ async def list_courses(update: Update, context: CallbackContext):
             keyboard = [
                 [
                     InlineKeyboardButton(c['name'], url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
+                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(c['category'])}::{urllib.parse.quote_plus(c['name'])}::from::global::{page}")
                 ]
                 for c in display
             ]
+            # Always return to the global courses list (page 1)
+            back_cb = "courses::1"
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
 
             pagination_buttons = []
             if start > 0:
@@ -178,7 +181,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         keyboard = [
             [
                 InlineKeyboardButton(course['name'], url=course.get('link')),
-                InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))
+                InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(category_name)}::{urllib.parse.quote_plus(course['name'])}::from::category::{page}")
             ]
             for course in display
         ]
@@ -314,6 +317,18 @@ async def handle_course_selection(update: Update, context: CallbackContext):
     await query.answer()
     # Expect callback format: course::{category}::{course}
     data = query.data.replace("course::", "", 1)
+    # Extract optional origin info appended as `::from::{origin_type}::{page}`
+    origin_type = None
+    origin_page = 1
+    if "::from::" in data:
+        data, from_part = data.rsplit("::from::", 1)
+        try:
+            origin_type, origin_page_s = from_part.split("::", 1)
+            origin_page = int(origin_page_s)
+        except Exception:
+            origin_type = None
+            origin_page = 1
+
     parts = data.split("::", 1)
     if len(parts) == 2:
         encoded_cat, encoded_course = parts
@@ -349,11 +364,13 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     break
 
         if course:
-            # Back button: if we have a category, go back to that category's course list page 1,
-            # otherwise go to global courses page 1
-            if course.get('category'):
-                back_cb = f"courses::{urllib.parse.quote_plus(course['category'])}::1"
+            # Build Back callback based on originating view if provided
+            if origin_type == 'category' and origin_page:
+                back_cb = f"courses::{urllib.parse.quote_plus(str(cat_name))}::{origin_page}"
+            elif origin_type == 'global' and origin_page:
+                back_cb = f"courses::{origin_page}"
             else:
+                # default fallback: global page 1
                 back_cb = "courses::1"
 
             keyboard = [
@@ -426,13 +443,13 @@ async def courses_callback(update: Update, context: CallbackContext):
                 if not display:
                     await query.edit_message_text(f"No courses found on page {page}.")
                     return
-                    keyboard = [
-                        [
-                            InlineKeyboardButton(c['name'], url=c.get('link')),
-                            InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
-                        ]
-                        for c in display
+                keyboard = [
+                    [
+                        InlineKeyboardButton(c['name'], url=c.get('link')),
+                        InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
                     ]
+                    for c in display
+                ]
                 pagination = []
                 if start > 0:
                     pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}"))
@@ -468,7 +485,7 @@ async def courses_callback(update: Update, context: CallbackContext):
             keyboard = [
                 [
                     InlineKeyboardButton(c['name'], url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))
+                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(category)}::{urllib.parse.quote_plus(c['name'])}::from::category::{page}")
                 ]
                 for c in display
             ]
@@ -489,5 +506,3 @@ async def courses_callback(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Error handling courses callback: {e}")
         await query.edit_message_text("An error occurred while fetching courses. Please try again later.")
-
-
