@@ -84,10 +84,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # Build compact keyboard: show course names in the message, buttons are small
     course_list_text = "\n".join([f"📚 {crs['name']}" for crs in courses])
     keyboard = [
-        [
-            InlineKeyboardButton("🔗 Open", url=crs["link"]),
-            InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs["name"])))
-        ]
+        [InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs["name"])))]
         for crs in courses
     ]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
@@ -134,10 +131,7 @@ async def list_courses(update: Update, context: CallbackContext):
 
             course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
             keyboard = [
-                [
-                    InlineKeyboardButton("🔗 Open", url=c['link']),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
-                ]
+                [InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))]
                 for c in display
             ]
 
@@ -178,10 +172,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
 
         course_list_text = "\n".join([f"📚 {course['name']}" for course in display])
         keyboard = [
-            [
-                InlineKeyboardButton("🔗 Open", url=course['link']),
-                InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))
-            ]
+            [InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))]
             for course in display
         ]
 
