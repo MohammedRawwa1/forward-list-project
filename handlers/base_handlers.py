@@ -349,8 +349,18 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     break
 
         if course:
+            # Back button: if we have a category, go back to that category's course list page 1,
+            # otherwise go to global courses page 1
+            if course.get('category'):
+                back_cb = f"courses::{urllib.parse.quote_plus(course['category'])}::1"
+            else:
+                back_cb = "courses::1"
+
             keyboard = [
-                [InlineKeyboardButton("Delete Course", callback_data=f"delete_course::{urllib.parse.quote_plus(course['category'])}::{urllib.parse.quote_plus(course['name'])}")]
+                [
+                    InlineKeyboardButton("🔙 Back", callback_data=back_cb),
+                    InlineKeyboardButton("Delete Course", callback_data=f"delete_course::{urllib.parse.quote_plus(course['category'])}::{urllib.parse.quote_plus(course['name'])}")
+                ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await query.edit_message_text(
