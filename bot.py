@@ -67,6 +67,7 @@ from conversation_states import (
 )
 
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
+from handlers.delete_callbacks import handle_delete_ref
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 
 from dotenv import load_dotenv
@@ -165,6 +166,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item::"))
+    application.add_handler(CallbackQueryHandler(handle_delete_ref, pattern=r"^delete_ref::"))
     application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_"))
 
     # ---------- thumbnails ----------
