@@ -143,13 +143,13 @@ async def list_courses(update: Update, context: CallbackContext):
             display = all_courses[start:start + page_size]
 
             course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
-            keyboard = [
-                [
-                    InlineKeyboardButton(c['name'], url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(c['category'])}::{urllib.parse.quote_plus(c['name'])}::from::global::{page}")
-                ]
-                for c in display
-            ]
+                    keyboard = [
+                        [
+                            InlineKeyboardButton(c['name'], url=c.get('link')),
+                            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], 'global', page))
+                        ]
+                        for c in display
+                    ]
             # Always return to the global courses list (page 1)
             back_cb = "courses::1"
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
@@ -192,7 +192,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         keyboard = [
             [
                 InlineKeyboardButton(course['name'], url=course.get('link')),
-                InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(category_name)}::{urllib.parse.quote_plus(course['name'])}::from::category::{page}")
+                InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category_name, course['name'], 'category', page))
             ]
             for course in display
         ]
@@ -326,28 +326,48 @@ async def handle_course_selection(update: Update, context: CallbackContext):
     """Handle the selection of a course from the buttons."""
     query = update.callback_query
     await query.answer()
-    # Expect callback format: course::{category}::{course}
-    data = query.data.replace("course::", "", 1)
-    # Extract optional origin info appended as `::from::{origin_type}::{page}`
+
+    data = query.data
+    # Support short refs: course_ref::<key> -> lookup payload in CALLBACK_MAP
     origin_type = None
     origin_page = 1
-    if "::from::" in data:
-        data, from_part = data.rsplit("::from::", 1)
-        try:
-            origin_type, origin_page_s = from_part.split("::", 1)
-            origin_page = int(origin_page_s)
-        except Exception:
-            origin_type = None
-            origin_page = 1
+    cat_name = None
+    course_name = None
 
-    parts = data.split("::", 1)
-    if len(parts) == 2:
-        encoded_cat, encoded_course = parts
-        cat_name = urllib.parse.unquote_plus(encoded_cat)
-        course_name = urllib.parse.unquote_plus(encoded_course)
+    if data.startswith("course_ref::"):
+        key = data.split("::", 1)[1]
+        payload = CALLBACK_MAP.get(key)
+        if not payload:
+            await query.edit_message_text("Reference expired. Please open the list again.")
+            return
+        cat_name = payload.get("category")
+        course_name = payload.get("name")
+        origin_type = payload.get("origin_type")
+        try:
+            origin_page = int(payload.get("origin_page", 1))
+        except Exception:
+            origin_page = 1
     else:
-        cat_name = None
-        course_name = urllib.parse.unquote_plus(data)
+        # Expect callback format: course::{category}::{course}
+        data = data.replace("course::", "", 1)
+        # Extract optional origin info appended as `::from::{origin_type}::{page}`
+        if "::from::" in data:
+            data, from_part = data.rsplit("::from::", 1)
+            try:
+                origin_type, origin_page_s = from_part.split("::", 1)
+                origin_page = int(origin_page_s)
+            except Exception:
+                origin_type = None
+                origin_page = 1
+
+        parts = data.split("::", 1)
+        if len(parts) == 2:
+            encoded_cat, encoded_course = parts
+            cat_name = urllib.parse.unquote_plus(encoded_cat)
+            course_name = urllib.parse.unquote_plus(encoded_course)
+        else:
+            cat_name = None
+            course_name = urllib.parse.unquote_plus(data)
 
     db = await get_db()
     if db is None:
@@ -457,7 +477,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                 keyboard = [
                     [
                         InlineKeyboardButton(c['name'], url=c.get('link')),
-                        InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
+                        InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], 'global', page))
                     ]
                     for c in display
                 ]
@@ -496,7 +516,7 @@ async def courses_callback(update: Update, context: CallbackContext):
             keyboard = [
                 [
                     InlineKeyboardButton(c['name'], url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(category)}::{urllib.parse.quote_plus(c['name'])}::from::category::{page}")
+                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category, c['name'], 'category', page))
                 ]
                 for c in display
             ]
