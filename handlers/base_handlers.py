@@ -7,6 +7,17 @@ from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
 from pymongo.errors import DuplicateKeyError
 import urllib.parse
+import hashlib
+import json
+
+# In-memory mapping for short callback ids -> payload
+CALLBACK_MAP = {}
+
+def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int) -> str:
+    payload = {"category": category, "name": name, "origin_type": origin_type, "origin_page": origin_page}
+    key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    CALLBACK_MAP[key] = payload
+    return f"course_ref::{key}"
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -85,7 +96,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     keyboard = [
         [
             InlineKeyboardButton(crs["name"], url=crs.get("link")),
-            InlineKeyboardButton("ℹ️ Details", callback_data=f"course::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(crs['name'])}::from::category::1")
+            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(cat_name, crs['name'], 'category', 1))
         ]
         for crs in courses
     ]
