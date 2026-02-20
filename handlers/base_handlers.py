@@ -81,11 +81,12 @@ async def showcat_handler(update: Update, context: CallbackContext):
         return
 
     courses = category_doc.get('courses', [])
-    # Build keyboard with course URL buttons and a Details callback beside each
+    # Build compact keyboard: show course names in the message, buttons are small
+    course_list_text = "\n".join([f"📚 {crs['name']}" for crs in courses])
     keyboard = [
         [
-            InlineKeyboardButton(crs["name"], url=crs["link"]),
-            InlineKeyboardButton("Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs["name"])))
+            InlineKeyboardButton("🔗 Open", url=crs["link"]),
+            InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(cat_name), urllib.parse.quote_plus(crs["name"])))
         ]
         for crs in courses
     ]
@@ -131,10 +132,11 @@ async def list_courses(update: Update, context: CallbackContext):
             start = (page - 1) * page_size
             display = all_courses[start:start + page_size]
 
+            course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
             keyboard = [
                 [
-                    InlineKeyboardButton(c['name'], url=c['link']),
-                    InlineKeyboardButton("Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
+                    InlineKeyboardButton("🔗 Open", url=c['link']),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
                 ]
                 for c in display
             ]
@@ -174,10 +176,11 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         start = (page - 1) * page_size
         display = courses[start:start + page_size]
 
+        course_list_text = "\n".join([f"📚 {course['name']}" for course in display])
         keyboard = [
             [
-                InlineKeyboardButton(course['name'], url=course['link']),
-                InlineKeyboardButton("Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))
+                InlineKeyboardButton("🔗 Open", url=course['link']),
+                InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))
             ]
             for course in display
         ]
@@ -416,11 +419,11 @@ async def courses_callback(update: Update, context: CallbackContext):
                     await query.edit_message_text(f"No courses found on page {page}.")
                     return
 
-                course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
+                course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
                 keyboard = [
                     [
-                        InlineKeyboardButton(c['name'], url=c['link']),
-                        InlineKeyboardButton("Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
+                        InlineKeyboardButton("🔗 Open", url=c['link']),
+                        InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))
                     ]
                     for c in display
                 ]
@@ -456,9 +459,12 @@ async def courses_callback(update: Update, context: CallbackContext):
                 await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
                 return
 
-            course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
+            course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
             keyboard = [
-                [InlineKeyboardButton(c['name'], url=c['link'])]
+                [
+                    InlineKeyboardButton("🔗 Open", url=c['link']),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))
+                ]
                 for c in display
             ]
             pagination = []
