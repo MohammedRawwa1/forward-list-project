@@ -3,6 +3,8 @@ from telegram.ext import CallbackContext
 from database.mongo_handler import MongoDB
 import urllib.parse
 import logging
+from handlers.base_handlers import CALLBACK_MAP
+import json
 logger = logging.getLogger(__name__)
 
 # ----------  delete category  ----------
@@ -50,5 +52,26 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
     res = await db['categories'].update_one({"courses.name": item}, {"$pull": {"courses": {"name": item}}})
     if res.modified_count:
         await query.edit_message_text(f"Course ‘{item}’ deleted. ✅")
+    else:
+        await query.edit_message_text("Course not found. ❌")
+
+
+async def handle_delete_ref(update: Update, context: CallbackContext):
+    """Handle delete_ref::<key> callbacks by resolving the payload from CALLBACK_MAP."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    key = data.split("::", 1)[1] if "::" in data else data
+    payload = CALLBACK_MAP.get(key)
+    if not payload:
+        await query.edit_message_text("Reference expired. Please reopen the list and try again.")
+        return
+
+    cat = payload.get('category')
+    item = payload.get('name')
+    # attempt to remove
+    res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+    if res.modified_count:
+        await query.edit_message_text(f"Course ‘{item}’ deleted from category ‘{cat}’. ✅")
     else:
         await query.edit_message_text("Course not found. ❌")
