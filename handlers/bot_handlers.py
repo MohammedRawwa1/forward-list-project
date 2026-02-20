@@ -258,7 +258,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
         return
 
     keyboard = [
-        [InlineKeyboardButton(cat, callback_data=f"delete_category_{cat}")]
+        [InlineKeyboardButton(cat, callback_data=f"delete_category_{urllib.parse.quote_plus(cat)}")]
         for cat in categories
     ]
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
@@ -266,6 +266,47 @@ async def delete_category_start(update: Update, context: CallbackContext):
         "Choose the category you want to delete:", 
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+async def handle_confirm_delete_callback(update: Update, context: CallbackContext):
+    """Parse confirm_delete_{type}::{encoded_name} callbacks and call confirmation handler."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if not data.startswith("confirm_delete_"):
+        await query.edit_message_text("Invalid confirmation callback.")
+        return
+    payload = data.replace("confirm_delete_", "", 1)
+    # Expect format: {item_type}::{encoded_name}
+    parts = payload.split("::", 1)
+    if len(parts) == 2:
+        item_type, enc_name = parts
+        item_name = urllib.parse.unquote_plus(enc_name)
+        await handle_deletion_confirmation(update, context, item_type, item_name)
+    else:
+        await query.edit_message_text("Invalid confirmation payload.")
+
+
+async def handle_cancel_delete_callback(update: Update, context: CallbackContext):
+    """Handle cancel_delete_{type}::{encoded_name} and simple cancel_delete callbacks."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    # simple cancel without args
+    if data == "cancel_delete":
+        await query.edit_message_text("Deletion canceled.")
+        return
+    if not data.startswith("cancel_delete_"):
+        await query.edit_message_text("Invalid cancel callback.")
+        return
+    payload = data.replace("cancel_delete_", "", 1)
+    parts = payload.split("::", 1)
+    if len(parts) == 2:
+        item_type, enc_name = parts
+        item_name = urllib.parse.unquote_plus(enc_name)
+        await query.edit_message_text(f"Deletion of {item_type} '{item_name}' canceled.")
+    else:
+        await query.edit_message_text("Deletion canceled.")
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
@@ -344,8 +385,8 @@ async def initiate_delete_item(update: Update, context: CallbackContext, item_ty
     
     # Inline keyboard for confirmation
     keyboard = [
-        [InlineKeyboardButton("Yes", callback_data=f"confirm_delete_{item_type}_{item_name}")],
-        [InlineKeyboardButton("No", callback_data=f"cancel_delete_{item_type}_{item_name}")]
+        [InlineKeyboardButton("Yes", callback_data=f"confirm_delete_{item_type}::{urllib.parse.quote_plus(item_name)}")],
+        [InlineKeyboardButton("No", callback_data=f"cancel_delete_{item_type}::{urllib.parse.quote_plus(item_name)}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
