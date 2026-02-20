@@ -126,7 +126,7 @@ async def list_courses(update: Update, context: CallbackContext):
             display = all_courses[start:start + page_size]
 
             keyboard = [
-                [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))]
+                [InlineKeyboardButton(c['name'], url=c['link'])]
                 for c in display
             ]
 
@@ -166,7 +166,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         display = courses[start:start + page_size]
 
         keyboard = [
-            [InlineKeyboardButton(course['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category_name), urllib.parse.quote_plus(course['name'])))]
+            [InlineKeyboardButton(course['name'], url=course['link'])]
             for course in display
         ]
 
@@ -406,7 +406,7 @@ async def courses_callback(update: Update, context: CallbackContext):
 
                 course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
                 keyboard = [
-                    [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(c['category']), urllib.parse.quote_plus(c['name'])))]
+                    [InlineKeyboardButton(c['name'], url=c['link'])]
                     for c in display
                 ]
                 pagination = []
@@ -443,7 +443,7 @@ async def courses_callback(update: Update, context: CallbackContext):
 
             course_list_text = "\n".join([f"📚 {c['name']}\n{c['link']}" for c in display])
             keyboard = [
-                [InlineKeyboardButton(c['name'], callback_data=f"course::%s::%s" % (urllib.parse.quote_plus(category), urllib.parse.quote_plus(c['name'])))]
+                [InlineKeyboardButton(c['name'], url=c['link'])]
                 for c in display
             ]
             pagination = []
