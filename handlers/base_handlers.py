@@ -19,6 +19,13 @@ def _make_course_ref(category: str, name: str, origin_type: str, origin_page: in
     CALLBACK_MAP[key] = payload
     return f"course_ref::{key}"
 
+
+def _store_callback_payload(payload: dict) -> str:
+    """Store an arbitrary payload and return a short key."""
+    key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    CALLBACK_MAP[key] = payload
+    return key
+
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -407,7 +414,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             keyboard = [
                 [
                     InlineKeyboardButton("🔙 Back", callback_data=back_cb),
-                    InlineKeyboardButton("Delete Course", callback_data=f"delete_course::{urllib.parse.quote_plus(course['category'])}::{urllib.parse.quote_plus(course['name'])}")
+                    # Use a short delete_ref callback to avoid exceeding Telegram callback_data limits
+                    InlineKeyboardButton("Delete Course", callback_data=f"delete_ref::{_store_callback_payload({'category': course['category'], 'name': course['name']})}")
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
