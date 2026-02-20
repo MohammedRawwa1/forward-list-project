@@ -7,6 +7,7 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
+
 from handlers.base_handlers import (
     help,
     list_courses,
@@ -21,6 +22,7 @@ from handlers.base_handlers import (
     handle_category_selection,
     handle_back_to_cats,
 )
+
 from handlers.course_handlers import (
     setup_course_handlers,
     start,
@@ -33,6 +35,7 @@ from handlers.course_handlers import (
     handle_link_parsing_error,
     cancel,
 )
+
 from handlers.bot_handlers import (
     generate_pagination_keyboard,
     generate_keyboard,
@@ -49,6 +52,7 @@ from handlers.bot_handlers import (
     initiate_delete_item,
     delete_course_menu,
 )
+
 from conversation_states import (
     ADD_NAME,
     ADD_LINK,
@@ -57,85 +61,49 @@ from conversation_states import (
     DELETE_ALL,
     CONFIRM_DELETE,
     CANCEL_DELETE,
-    MAX_CATEGORY_NAME_LENGTH
+    MAX_CATEGORY_NAME_LENGTH,
 )
+
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
-from database.mongo_handler import MongoDB
+
 from dotenv import load_dotenv
 import logging
 import os
-import asyncio
-import traceback
 import re
 
 load_dotenv()
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=log_level
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=log_level,
 )
 logger = logging.getLogger(__name__)
 
 
-# ----------  helpers  ----------
+# ---------- helpers ----------
 def is_valid_category_name(category_name: str):
     return bool(re.match(r"^[a-zA-Z0-9\s\-]+$", category_name))
 
 
-# ----------  application factory  ----------
+# ---------- application factory ----------
 async def create_application():
-    try:
-        bot_token = os.getenv("BOT_TOKEN")
-        if not bot_token:
-            raise ValueError("BOT_TOKEN environment variable is not set")
+    bot_token = os.getenv("BOT_TOKEN")
+    if not bot_token:
+        raise ValueError("BOT_TOKEN environment variable is not set")
 
-        mongo_uri = os.getenv("MONGODB_URL")
-        db_name = os.getenv("MONGODB_NAME")
-        if not mongo_uri or not db_name:
-            raise ValueError("MONGODB_URL and MONGODB_NAME must be set")
-
-        application = Application.builder().token(bot_token).build()
-        await MongoDB.initialize(mongo_uri, db_name)
-        return application
-    except Exception as e:
-        logger.error(f"Failed to create application: {e}")
-        raise
+    application = Application.builder().token(bot_token).build()
+    return application
 
 
-# ----------  register everything  ----------
+# ---------- register handlers ----------
 async def setup_handlers(application: Application):
-    # ---------------  quick sanity check  ---------------
-    logger.info("=== HANDLER REGISTRY ===")
-    logger.info("Conversation /add : %s", any(
-        isinstance(h, ConversationHandler) and
-        any(isinstance(e, CommandHandler) and e.commands == ("add",) for e in h.entry_points)
-        for h in application.handlers.values()
-    ))
-    logger.info("Callback delete_item_ : %s", any(
-        isinstance(h, CallbackQueryHandler) and h.pattern and h.pattern.pattern == r"^delete_item_"
-        for h in application.handlers.values()
-    ))
-    logger.info("Callback delete_category_ : %s", any(
-        isinstance(h, CallbackQueryHandler) and h.pattern and h.pattern.pattern == r"^delete_category_"
-        for h in application.handlers.values()
-    ))
-
     if not application:
         logger.error("Application is not initialised.")
         return
 
-    # Debug helper: log all incoming callback data (non-invasive)
-    # Enable by setting environment variable CB_DEBUG=1
-    if os.getenv("CB_DEBUG", "0") == "1":
-        async def _log_callback(update, context):
-            cq = getattr(update, 'callback_query', None)
-            if cq is not None:
-                logger.info("[CB-DBG] callback data=%s", cq.data)
-
-        application.add_handler(CallbackQueryHandler(_log_callback), group=0)
-
-    # ----------  commands  ----------
+    # ---------- commands ----------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
@@ -145,7 +113,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("cancel", cancel))
 
-    # ----------  ordinary callbacks  ----------
+    # ---------- callbacks ----------
     application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
     application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
@@ -159,19 +127,23 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course::"))
 
-    # ----------  conversations  ----------
-    await setup_course_handlers(application)  # /add  (ADD_NAME → ADD_LINK → ADD_CATEGORY)
+    # ---------- conversations ----------
+    await setup_course_handlers(application)
 
     application.add_handler(
-        ConversationHandler(  # /create_category
+        ConversationHandler(
             entry_points=[CommandHandler("create_category", create_category)],
-            states={CREATE_CAT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)]},
+            states={
+                CREATE_CAT_NAME: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category_name)
+                ]
+            },
             fallbacks=[CommandHandler("cancel", cancel)],
         )
     )
 
     application.add_handler(
-        ConversationHandler(  # /delete_all_data
+        ConversationHandler(
             entry_points=[CommandHandler("delete_all_data", delete_all_data_start)],
             states={
                 DELETE_ALL: [
@@ -183,33 +155,14 @@ async def setup_handlers(application: Application):
         )
     )
 
-    # ----------  deletion & extra callbacks (LAST so they can't be shadowed) ----------
+    # ---------- deletion (last so not shadowed) ----------
     application.add_handler(CallbackQueryHandler(handle_category_deletion, pattern=r"^delete_category_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item_"))
     application.add_handler(CallbackQueryHandler(handle_item_deletion, pattern=r"^delete_item::"))
     application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_"))
 
-    # ----------  thumbnails  ----------
+    # ---------- thumbnails ----------
     await setup_thumbnail_handlers(application)
 
-    # ----------  errors  ----------
+    # ---------- error handler ----------
     application.add_error_handler(course_error_handler)
-
-
-# ----------  run  ----------
-async def main():
-    try:
-        application = await create_application()
-        await setup_handlers(application)
-
-        webhook_url = os.getenv("WEBHOOK_URL")
-        if webhook_url:
-            await application.bot.set_webhook(webhook_url)
-
-        await application.run_webhook(port=int(os.getenv("PORT", 10000)), webhook_path="/webhook")
-    except Exception as e:
-        logger.error(f"Failed to start application: {e}")
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
