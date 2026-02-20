@@ -51,6 +51,8 @@ from handlers.bot_handlers import (
     cancel_delete_all_data,
     initiate_delete_item,
     delete_course_menu,
+    handle_confirm_delete_callback,
+    handle_cancel_delete_callback,
 )
 
 from conversation_states import (
@@ -123,6 +125,10 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category::"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course::"))
+    application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_ref::"))
+    # confirm/cancel per-item handlers
+    application.add_handler(CallbackQueryHandler(handle_confirm_delete_callback, pattern=r"^confirm_delete"))
+    application.add_handler(CallbackQueryHandler(handle_cancel_delete_callback, pattern=r"^cancel_delete"))
     application.add_handler(CallbackQueryHandler(handle_back_to_cats, pattern=r"^back_to_cats$"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course::"))
