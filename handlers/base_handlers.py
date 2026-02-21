@@ -723,6 +723,97 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         logger.exception("Error fetching coach courses in category: %s", e)
         await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
 
+async def showtype_handler(update: Update, context: CallbackContext):
+    """
+    Handle type selection inside a category.
+    Expected callback format:
+    showtype::{category}::{type_name}
+    """
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.split("::")
+    if len(data) < 3:
+        await safe_edit_message(
+            query,
+            "Invalid type callback.",
+            action_key=getattr(query, 'data', None)
+        )
+        return
+
+    _, encoded_category, encoded_type = data[:3]
+    category_name = urllib.parse.unquote_plus(encoded_category)
+    type_name = urllib.parse.unquote_plus(encoded_type)
+
+    db = await get_db()
+    if db is None:
+        await safe_edit_message(
+            query,
+            "Error: Unable to connect to the database.",
+            action_key=getattr(query, 'data', None)
+        )
+        return
+
+    try:
+        category_doc = await db.categories.find_one({"name": category_name})
+        if not category_doc or not category_doc.get("courses"):
+            await safe_edit_message(
+                query,
+                f"No courses found in category '{category_name}'.",
+                action_key=getattr(query, 'data', None)
+            )
+            return
+
+        filtered_courses = []
+        for crs in category_doc.get("courses", []):
+            c_type = (
+                crs.get("type")
+                or crs.get("category_type")
+                or crs.get("categoryType")
+            )
+            if c_type and str(c_type) == type_name:
+                filtered_courses.append({
+                    "name": crs.get("name"),
+                    "link": crs.get("link"),
+                    "category": category_name,
+                })
+
+        # Sort case-insensitive
+        filtered_courses = sorted(
+            filtered_courses,
+            key=lambda c: (c.get("name") or "").lower()
+        )
+
+        text, reply_markup = build_courses_page(
+            filtered_courses,
+            page=1,
+            origin_type="category",
+            category=category_name
+        )
+
+        if not text:
+            await safe_edit_message(
+                query,
+                f"No courses found for type '{type_name}' in '{category_name}'.",
+                action_key=getattr(query, 'data', None)
+            )
+            return
+
+        await safe_edit_message(
+            query,
+            text=text,
+            reply_markup=reply_markup,
+            action_key=getattr(query, 'data', None)
+        )
+
+    except Exception as e:
+        logger.exception("Error showing type courses: %s", e)
+        await safe_edit_message(
+            query,
+            "An unexpected error occurred. Please try again later.",
+            action_key=getattr(query, 'data', None)
+        )
+        
 async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
