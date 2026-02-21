@@ -16,6 +16,7 @@ from handlers.base_handlers import (
     create_category,
     create_parent,
     handle_create_category_parent,
+    handle_create_category_parent_text,
     get_courses_by_category,
     courses_callback,
     handle_categories_pagination,
