@@ -24,8 +24,8 @@ CALLBACK_MAP = {}
 
 def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int) -> str:
     payload = {"category": category, "name": name, "origin_type": origin_type, "origin_page": origin_page}
-    key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
-    CALLBACK_MAP[key] = payload
+    # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
+    key = _store_callback_payload(payload)
     return f"course_ref::{key}"
 
 
@@ -38,6 +38,7 @@ def _store_callback_payload(payload: dict) -> str:
         asyncio.create_task(_persist_callback_payload(key, payload))
     except Exception:
         pass
+    return key
 
 
 async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
@@ -485,8 +486,13 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
     if origin_type == 'category' and category:
         text = f"Courses in category '{category}' (page {page}):"
+        breadcrumb = ["Home", "categories", category]
+    elif origin_type == 'coach' and category is None:
+        text = f"Courses (page {page}):"
+        breadcrumb = ["Home", "coaches"]
     else:
         text = f"Here are the available courses (page {page}):"
+        breadcrumb = ["Home", "courses"]
 
     keyboard = []
     for c in display:
@@ -513,6 +519,13 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page+1}"))
     if pagination_buttons:
         keyboard.append(pagination_buttons)
+
+    # prepend breadcrumb to text
+    try:
+        bc = " / ".join(breadcrumb)
+        text = f"{bc}\n\n{text}"
+    except Exception:
+        pass
 
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -569,6 +582,152 @@ async def list_categories(update: Update, context: CallbackContext):
         logger.error(f"Error listing categories: {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
 
+
+async def list_coaches(update: Update, context: CallbackContext):
+    """List coaches (creators). Falls back to category names or embedded course coach fields if no `coaches` collection."""
+    try:
+        db = await get_db()
+        # Try dedicated coaches collection first
+        coaches = []
+        try:
+            if hasattr(db, 'coaches'):
+                coaches = await db.coaches.find().to_list(length=None)
+        except Exception:
+            coaches = []
+
+        if not coaches:
+            # Fallback: derive coaches from category names (legacy) or from embedded course 'coach' field
+            cats = await db.categories.find().to_list(length=None)
+            # If categories appear to be coach names (legacy), use them
+            # Otherwise, scan embedded courses for a 'coach' field
+            derived = set()
+            for cat in cats:
+                # if courses exist and have a 'coach' field, prefer that
+                for crs in cat.get('courses', []):
+                    if crs.get('coach'):
+                        derived.add(crs.get('coach'))
+                # also include category name as fallback coach label
+                derived.add(cat.get('name'))
+            coaches = [{'name': c, 'slug': urllib.parse.quote_plus(c)} for c in sorted(derived, key=lambda s: (s or '').lower())]
+
+        # Build keyboard
+        keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_{urllib.parse.quote_plus(coach.get('slug') or coach.get('name'))}")] for coach in coaches]
+        await update.message.reply_text("Tap a coach to see their courses:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.exception("Error listing coaches: %s", e)
+        await update.message.reply_text("An unexpected error occurred. Please try again later.")
+
+
+async def show_coach_handler(update: Update, context: CallbackContext):
+    """Show courses for a selected coach. Supports coaches stored in a `coaches` collection or derived from categories/courses."""
+    query = update.callback_query
+    await query.answer()
+    encoded = query.data.split("_", 1)[1]
+    coach_slug = urllib.parse.unquote_plus(encoded)
+
+    db = await get_db()
+    if db is None:
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
+        return
+
+    # Try to find coach by slug in dedicated collection
+    coach_name = None
+    try:
+        if hasattr(db, 'coaches'):
+            coach_doc = await db.coaches.find_one({'slug': coach_slug})
+            if coach_doc:
+                coach_name = coach_doc.get('name')
+    except Exception:
+        coach_name = None
+
+    # Fallback: treat slug as a name
+    if not coach_name:
+        coach_name = urllib.parse.unquote_plus(coach_slug)
+
+    # Collect all courses for this coach: prefer explicit 'coach' field, else category name match
+    try:
+        cats = await db.categories.find().to_list(length=None)
+        coach_courses = []
+        for cat in cats:
+            for crs in cat.get('courses', []):
+                if crs.get('coach'):
+                    if crs.get('coach') == coach_name:
+                        coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+                else:
+                    # legacy: category name represents coach
+                    if (cat.get('name') or '') == coach_name:
+                        coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+
+        # Sort and render using existing helper
+        coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
+        text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='coach')
+        if not text:
+            await safe_edit_message(query, f"No courses found for coach '{coach_name}'.", action_key=getattr(query, 'data', None))
+            return
+        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    except Exception as e:
+        logger.exception("Error showing coach courses: %s", e)
+        await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
+
+
+async def show_coach_in_category(update: Update, context: CallbackContext):
+    """Handle coach selection within a specific category: coach_in_cat::{category}::{coach_slug}"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    parts = data.split("::", 2)
+    if len(parts) != 3:
+        await safe_edit_message(query, "Invalid coach callback.", action_key=getattr(query, 'data', None))
+        return
+    _, enc_cat, enc_coach = parts
+    category = urllib.parse.unquote_plus(enc_cat)
+    coach_slug = urllib.parse.unquote_plus(enc_coach)
+
+    db = await get_db()
+    if db is None:
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
+        return
+
+    # Resolve coach name: try coaches collection then fallback to slug-as-name
+    coach_name = None
+    try:
+        if hasattr(db, 'coaches'):
+            coach_doc = await db.coaches.find_one({'slug': coach_slug})
+            if coach_doc:
+                coach_name = coach_doc.get('name')
+    except Exception:
+        coach_name = None
+    if not coach_name:
+        coach_name = coach_slug
+
+    try:
+        category_doc = await db.categories.find_one({'name': category})
+        if not category_doc or not category_doc.get('courses'):
+            await safe_edit_message(query, f"No courses found in category '{category}'.", action_key=getattr(query, 'data', None))
+            return
+
+        coach_courses = []
+        for crs in category_doc.get('courses', []):
+            if crs.get('coach'):
+                if crs.get('coach') == coach_name:
+                    coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": category})
+        # Fallback: if no explicit coach fields, maybe the category itself was used as coach (legacy)
+        if not coach_courses:
+            for crs in category_doc.get('courses', []):
+                # if category name equals selected coach_name (legacy), include
+                if (category or '') == coach_name:
+                    coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": category})
+
+        coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
+        text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='category', category=category)
+        if not text:
+            await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
+            return
+        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    except Exception as e:
+        logger.exception("Error fetching coach courses in category: %s", e)
+        await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
+
 async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
@@ -578,14 +737,45 @@ async def showcat_handler(update: Update, context: CallbackContext):
     db = await get_db()
     # Read category document and its embedded courses array
     category_doc = await db.categories.find_one({"name": cat_name})
-    if not category_doc or not category_doc.get('courses'):
-        await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
+    if not category_doc:
+        await safe_edit_message(query, f'Category “{cat_name}” not found.', action_key=getattr(query, 'data', None))
         return
 
+    # Goal: for a chosen category (topic), list coaches who have courses in this category.
+    # Prefer a dedicated `coaches` collection with a `topics` field; otherwise derive coaches from embedded course 'coach' fields.
+    coaches = []
+    try:
+        # Look for coaches that explicitly list this topic
+        if hasattr(db, 'coaches'):
+            # find coaches whose topics array contains this category name (case-insensitive)
+            coaches = await db.coaches.find({"topics": cat_name}).to_list(length=None)
+    except Exception:
+        coaches = []
+
+    # If no dedicated coaches found, derive from embedded course 'coach' fields
+    if not coaches:
+        derived = {}
+        for crs in category_doc.get('courses', []):
+            coach_name = crs.get('coach')
+            if coach_name:
+                slug = urllib.parse.quote_plus(coach_name)
+                derived[slug] = coach_name
+        # If still empty, we will fallback to showing the courses directly later
+        coaches = [{'name': v, 'slug': k} for k, v in derived.items()]
+
+    # If we found coaches, show them; otherwise fall back to showing courses in this category
+    if coaches:
+        keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach.get('slug') or urllib.parse.quote_plus(coach.get('name'))}")] for coach in coaches]
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+        await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        return
+
+    # Fallback: show courses if no coaches found
     courses = category_doc.get('courses', [])
-    # Ensure deterministic, case-insensitive A→Z ordering for display
+    if not courses:
+        await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
+        return
     courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-    # Build compact keyboard: left button opens link, right button shows details
     keyboard = [
         [
             InlineKeyboardButton(crs["name"], url=crs.get("link")),
@@ -891,11 +1081,25 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 # default fallback: global page 1
                 back_cb = "courses::1"
 
+            # Prepare persisted short ref for delete action (await the store helper)
+            delete_payload = {
+                'category': course['category'],
+                'name': course['name'],
+                'origin_type': origin_type,
+                'origin_page': origin_page,
+            }
+            try:
+                delete_key = _store_callback_payload(delete_payload)
+            except Exception:
+                delete_key = None
+
+            delete_cb = f"delete_ref::{delete_key}" if delete_key else "delete_ref::"
+
             keyboard = [
                 [
                     InlineKeyboardButton("🔙 Back", callback_data=back_cb),
                     # Use a short delete_ref callback to avoid exceeding Telegram callback_data limits
-                    InlineKeyboardButton("Delete Course", callback_data=f"delete_ref::{_store_callback_payload({'category': course['category'], 'name': course['name']})}")
+                    InlineKeyboardButton("Delete Course", callback_data=delete_cb)
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
