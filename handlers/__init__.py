@@ -35,22 +35,18 @@ from handlers.course_handlers import (
     cancel,
 )
 
-# bot-handlers
+# bot-handlers — import the actual available symbols from bot_handlers
 from handlers.bot_handlers import (
     generate_pagination_keyboard,
     generate_keyboard,
     delete_item,
     delete_category,
     handle_course_deletion,
-    handle_deletion_confirmation,
-    handle_deletion_selection,
-    delete_all_data,
-    delete_all_data_start,
-    delete_category_start,
+    handle_cancel_delete_callback,
+    delete_item_start,
     confirm_delete_all,
     cancel_delete_all_data,
     initiate_delete_item,
-    delete_course_menu
 )
 
 # thumbnail-handlers
