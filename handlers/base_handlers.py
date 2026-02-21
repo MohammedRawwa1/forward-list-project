@@ -496,9 +496,15 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
     keyboard = []
     for c in display:
+        # Determine course's category: prefer explicit field on item, else use
+        # the `category` argument passed to this page builder (for embedded
+        # course documents inside a category).
+        course_cat = c.get('category') if isinstance(c, dict) else None
+        if not course_cat:
+            course_cat = category
         keyboard.append([
             InlineKeyboardButton(c['name'], url=c.get('link')),
-            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], origin_type, page))
+            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(course_cat, c['name'], origin_type, page))
         ])
 
     # Home / Back (only on pages > 1)
@@ -1339,9 +1345,15 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     break
 
         if course:
+            # Determine canonical category for this course (prefer explicit field)
+            course_category = course.get('category') if isinstance(course, dict) else None
+            if not course_category:
+                course_category = cat_name
+
             # Build Back callback based on originating view if provided
             if origin_type == 'category' and origin_page:
-                back_cb = f"courses::{urllib.parse.quote_plus(str(cat_name))}::{origin_page}"
+                back_target = course_category or cat_name or '1'
+                back_cb = f"courses::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
             elif origin_type == 'global' and origin_page:
                 back_cb = f"courses::{origin_page}"
             else:
@@ -1350,8 +1362,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 
             # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
-                'category': course['category'],
-                'name': course['name'],
+                'category': course_category,
+                'name': course.get('name'),
                 'origin_type': origin_type,
                 'origin_page': origin_page,
             }
@@ -1372,9 +1384,9 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             reply_markup = InlineKeyboardMarkup(keyboard)
             details = (
                 f"📚 **Course Details**\n\n"
-                f"Name: {course['name']}\n"
-                f"Link: {course['link']}\n"
-                f"Category: {course['category']}"
+                f"Name: {course.get('name')}\n"
+                f"Link: {course.get('link')}\n"
+                f"Category: {course_category}"
             )
             await safe_edit_message(query, details, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
         else:
