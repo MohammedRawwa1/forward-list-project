@@ -7,6 +7,7 @@ from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
 from pymongo.errors import DuplicateKeyError
 import urllib.parse
+import os
 from datetime import datetime, timedelta
 
 import hashlib
@@ -15,7 +16,6 @@ import time
 import asyncio
 # How long to persist callback refs (seconds). Default: 7 days.
 CALLBACK_REF_TTL = int(os.getenv("CALLBACK_REF_TTL", str(7 * 24 * 3600)))
-import os
 import math
 from telegram.error import RetryAfter
 
