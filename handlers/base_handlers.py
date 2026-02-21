@@ -689,31 +689,31 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         coach_name = coach_slug
 
     try:
-        category_doc = await db.categories.find_one({'name': category})
-        if not category_doc or not category_doc.get('courses'):
-            await safe_edit_message(query, f"No courses found in category '{category}'.", action_key=getattr(query, 'data', None))
-            return
-
+        # First, check if the coach is modeled as a child category under this category
+        coach_child = await db.categories.find_one({'name': coach_name, 'parent': category})
         coach_courses = []
-        for crs in category_doc.get('courses', []):
-            # If a type filter was provided, only include courses matching that type
-            if type_slug:
-                # try fields 'type' or 'category_type'
-                c_type = crs.get('type') or crs.get('category_type') or crs.get('categoryType')
-                if not c_type:
-                    continue
-                # match slugified/type name
-                if urllib.parse.quote_plus(str(c_type)) != type_slug:
-                    continue
-            if crs.get('coach'):
-                if crs.get('coach') == coach_name:
-                    coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": category})
-        # Fallback: if no explicit coach fields, maybe the category itself was used as coach (legacy)
-        if not coach_courses and not type_slug:
+        if coach_child:
+            # use child's embedded courses
+            for crs in coach_child.get('courses', []):
+                coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": coach_name})
+        else:
+            # Fallback: look for courses in the parent category that have a 'coach' field
+            category_doc = await db.categories.find_one({'name': category})
+            if not category_doc or not category_doc.get('courses'):
+                await safe_edit_message(query, f"No courses found in category '{category}'.", action_key=getattr(query, 'data', None))
+                return
+
             for crs in category_doc.get('courses', []):
-                # if category name equals selected coach_name (legacy), include
-                if (category or '') == coach_name:
-                    coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": category})
+                # If a type filter was provided, only include courses matching that type
+                if type_slug:
+                    c_type = crs.get('type') or crs.get('category_type') or crs.get('categoryType')
+                    if not c_type:
+                        continue
+                    if urllib.parse.quote_plus(str(c_type)) != type_slug:
+                        continue
+                if crs.get('coach'):
+                    if crs.get('coach') == coach_name:
+                        coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": category})
 
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
         text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='category', category=category)
