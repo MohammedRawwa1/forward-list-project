@@ -1178,6 +1178,30 @@ async def handle_category_name(update: Update, context: CallbackContext):
         else:
             logger.info(f"[CAT-INSERT-CHILD] Created category '{category_name}' under parent '{parent}' _id={result.inserted_id}")
         await update.message.reply_text(f"Category ‘{category_name}’ saved ✔")
+
+        # After creating, show the parent view so the user can confirm the new
+        # category appears in the correct place. If top-level, show top-level
+        # categories; otherwise show the parent's children list.
+        try:
+            if not parent:
+                # Show top-level categories
+                await list_categories(update, context)
+            else:
+                # Show children of the parent including the newly created category
+                children = await db.categories.find({"parent": parent}).to_list(length=None)
+                keyboard = []
+                for child in sorted(children, key=lambda c: (c.get('name') or '').lower()):
+                    child_path = child.get('path') or child.get('name')
+                    keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
+                # add up/back button to parent or top-level
+                pdoc = await db.categories.find_one({"name": parent})
+                ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+                await update.message.reply_text(f"Subcategories of '{parent}':", reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception:
+            # Non-fatal; ignore errors when trying to display the view
+            pass
+
         return ConversationHandler.END
     except DuplicateKeyError:
         logger.warning(f"[CAT-INSERT-DUP] category already exists: {category_name!r}")
