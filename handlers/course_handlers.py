@@ -68,6 +68,8 @@ async def add_course_link(update: Update, context: CallbackContext):
     try:
         db = await get_db()
         cats = await db.categories.find().to_list(length=None)
+        # Ensure deterministic, case-insensitive A→Z ordering for category selection
+        cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
     except Exception as e:
         logger.error("DB error in add_course_link: %s", e)
         await update.message.reply_text("❗️ Could not connect to the database. Try again later.")
