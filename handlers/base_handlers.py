@@ -7,8 +7,17 @@ from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
 from pymongo.errors import DuplicateKeyError
 import urllib.parse
+from datetime import datetime, timedelta
+
 import hashlib
 import json
+import time
+import asyncio
+# How long to persist callback refs (seconds). Default: 7 days.
+CALLBACK_REF_TTL = int(os.getenv("CALLBACK_REF_TTL", str(7 * 24 * 3600)))
+import os
+import math
+from telegram.error import RetryAfter
 
 # In-memory mapping for short callback ids -> payload
 CALLBACK_MAP = {}
@@ -24,7 +33,433 @@ def _store_callback_payload(payload: dict) -> str:
     """Store an arbitrary payload and return a short key."""
     key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
     CALLBACK_MAP[key] = payload
-    return key
+    # best-effort background persist to Redis or Mongo so refs survive restarts
+    try:
+        asyncio.create_task(_persist_callback_payload(key, payload))
+    except Exception:
+        pass
+
+
+async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
+    """Persist callback payload to Redis (preferred) or MongoDB (fallback).
+    TTL defaults to 7 days.
+    """
+    # Try Redis
+    try:
+        if _redis is not None:
+            import json as _json
+            await _redis.set(f"callback:ref:{key}", _json.dumps(payload), ex=ttl)
+
+
+            return
+    except Exception:
+        logger.exception("Failed to persist callback payload to Redis")
+
+    # Fallback to MongoDB
+    try:
+        db = await get_db()
+        if db is None:
+            return
+        from datetime import datetime, timedelta
+        expire_at = datetime.utcnow() + timedelta(seconds=ttl)
+        # ensure TTL index exists (idempotent)
+        try:
+            await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
+        except Exception:
+            pass
+        await db.callback_refs.update_one({"_id": key}, {"$set": {"payload": payload, "expireAt": expire_at}}, upsert=True)
+    except Exception:
+        logger.exception("Failed to persist callback payload to MongoDB")
+
+
+async def _resolve_callback_payload(key: str):
+    """Resolve a callback payload by checking in-memory map, then Redis, then MongoDB."""
+    # In-memory first
+    payload = CALLBACK_MAP.get(key)
+    if payload:
+        return payload
+
+    # Redis
+    try:
+
+
+        if _redis is not None:
+            val = await _redis.get(f"callback:ref:{key}")
+            if val:
+                import json as _json
+                payload = _json.loads(val)
+                # repopulate in-memory cache for speed
+                CALLBACK_MAP[key] = payload
+                return payload
+    except Exception:
+        logger.exception("Failed to read callback payload from Redis")
+
+    # MongoDB fallback
+    try:
+        db = await get_db()
+        if db is None:
+            return None
+        doc = await db.callback_refs.find_one({"_id": key})
+        if doc:
+            payload = doc.get('payload')
+            if payload:
+                CALLBACK_MAP[key] = payload
+                return payload
+    except Exception:
+        logger.exception("Failed to read callback payload from MongoDB")
+
+    return None
+
+# Simple in-memory debounce/rate-limit to ignore very fast repeated
+# callback presses from the same user. This reduces duplicated edits and
+# avoids hitting Telegram's flood limits when users rapidly navigate pages.
+_LAST_CALLBACK = {}
+DEFAULT_DEBOUNCE = float(os.getenv("EDIT_DEBOUNCE", "0.5"))
+
+def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool:
+    if interval is None:
+        interval = DEFAULT_DEBOUNCE
+    now = time.time()
+    key = (user_id, action_key)
+    last = _LAST_CALLBACK.get(key)
+    if last and (now - last) < interval:
+        return True
+    _LAST_CALLBACK[key] = now
+    return False
+_USER_BUCKETS = {}   # user_id -> {tokens, capacity, last_refill, refill_rate}
+_GLOBAL_BUCKET = {"tokens": 20.0, "capacity": 20.0, "last_refill": time.time(), "refill_rate": 5.0}
+
+# Optional Redis-backed token buckets for multi-process deployments.
+REDIS_URL = os.getenv("REDIS_URL")
+_redis = None
+_redis_token_script = None
+if REDIS_URL:
+    try:
+        import redis.asyncio as redis_async
+        _redis = redis_async.from_url(REDIS_URL)
+        # Lua script: atomically refill tokens based on elapsed time and
+        # consume if available, otherwise return required wait seconds.
+        _redis_token_script = """
+        local key = KEYS[1]
+        local now = tonumber(ARGV[1])
+        local capacity = tonumber(ARGV[2])
+        local refill = tonumber(ARGV[3])
+        local cost = tonumber(ARGV[4])
+        local data = redis.call('HMGET', key, 'tokens', 'last')
+        local tokens = tonumber(data[1]) or capacity
+        local last = tonumber(data[2]) or now
+        local elapsed = now - last
+        tokens = math.min(capacity, tokens + elapsed * refill)
+        if tokens >= cost then
+            tokens = tokens - cost
+            redis.call('HMSET', key, 'tokens', tokens, 'last', now)
+            redis.call('EXPIRE', key, 3600)
+            return cjson.encode({1,0})
+        else
+            local need = cost - tokens
+            local wait = math.ceil(need / refill)
+            redis.call('HMSET', key, 'tokens', tokens, 'last', now)
+            redis.call('EXPIRE', key, 3600)
+            return cjson.encode({0,wait})
+        end
+        """
+    except Exception:
+        _redis = None
+        _redis_token_script = None
+
+def _refill_bucket(bucket):
+    now = time.time()
+    elapsed = now - bucket.get("last_refill", now)
+    if elapsed <= 0:
+        return
+    bucket["tokens"] = min(bucket["capacity"], bucket.get("tokens", bucket["capacity"]) + elapsed * bucket["refill_rate"])
+    bucket["last_refill"] = now
+
+def _consume_token(user_id: int, cost: float = 1.0):
+    # If Redis is configured, prefer the Redis-backed atomic token bucket.
+    if _redis is not None and _redis_token_script is not None:
+        try:
+            now = int(time.time())
+            # global first
+            res = _redis.eval(_redis_token_script, 1, 'bucket:global', now, _GLOBAL_BUCKET['capacity'], _GLOBAL_BUCKET['refill_rate'], cost)
+            # res is JSON like [1,0] or [0,wait]
+            import json as _json
+            ok, wait = _json.loads(res)
+            if ok == 1:
+                # now consume user bucket
+                user_key = f"bucket:user:{user_id}"
+                res2 = _redis.eval(_redis_token_script, 1, user_key, now, 5.0, 1.0, cost)
+                ok2, wait2 = _json.loads(res2)
+                if ok2 == 1:
+                    METRICS['token_consumed'] += 1
+                    try:
+                        asyncio.create_task(_redis.incr('metrics:token_consumed'))
+                    except Exception:
+                        pass
+                    return True, 0
+                else:
+                    return False, wait2
+            else:
+                return False, wait
+        except Exception:
+            # Fall back to local in-memory buckets on any Redis error
+            pass
+
+    # Refill global (in-memory fallback)
+    _refill_bucket(_GLOBAL_BUCKET)
+    if _GLOBAL_BUCKET["tokens"] < cost:
+        needed = cost - _GLOBAL_BUCKET["tokens"]
+        wait = math.ceil(needed / _GLOBAL_BUCKET["refill_rate"])
+        return False, wait
+    # Refill / init user bucket
+    b = _USER_BUCKETS.get(user_id)
+    if b is None:
+        b = {"tokens": 5.0, "capacity": 5.0, "last_refill": time.time(), "refill_rate": 1.0}
+        _USER_BUCKETS[user_id] = b
+    _refill_bucket(b)
+    if b["tokens"] < cost:
+        needed = cost - b["tokens"]
+        wait = math.ceil(needed / b["refill_rate"])
+        return False, wait
+    # consume
+    _GLOBAL_BUCKET["tokens"] -= cost
+    b["tokens"] -= cost
+    METRICS['token_consumed'] += 1
+    try:
+        if _redis is not None:
+            # best-effort increment
+            asyncio.create_task(_redis.incr('metrics:token_consumed'))
+    except Exception:
+        pass
+    return True, 0
+
+
+# Retry queue for scheduling edit retries when Telegram returns RetryAfter
+# or when tokens are temporarily exhausted.
+_RETRY_QUEUE = {}  # key -> asyncio.Task
+
+def _retry_key_for(query):
+    # Use chat_id + message_id if available; fall back to callback data
+    chat_id = getattr(getattr(query, 'message', None), 'chat_id', None)
+    msg_id = getattr(getattr(query, 'message', None), 'message_id', None)
+    if chat_id and msg_id:
+        return (chat_id, msg_id)
+    return getattr(query, 'data', None) or 'callback'
+
+def _schedule_retry(query, text, reply_markup=None, action_key=None, delay=1, max_retries=3):
+    key = _retry_key_for(query)
+    if key in _RETRY_QUEUE:
+        return
+
+    async def _retry_loop():
+        tries = 0
+        wait = delay
+        while tries < max_retries:
+            await asyncio.sleep(wait)
+            tries += 1
+            try:
+                await query.edit_message_text(text, reply_markup=reply_markup)
+                break
+            except RetryAfter as e:
+                wait = int(getattr(e, 'retry_after', wait) or wait)
+                logger.warning("RetryAfter while retrying; will retry in %s seconds", wait)
+                continue
+            except Exception as e:
+                logger.exception("Retry loop error: %s", e)
+                break
+        # cleanup
+        _RETRY_QUEUE.pop(key, None)
+
+    task = asyncio.create_task(_retry_loop())
+    _RETRY_QUEUE[key] = task
+
+
+# Redis-backed retry scheduling and metrics (multi-process safe)
+METRICS = {
+    "token_consumed": 0,
+    "retry_scheduled": 0,
+    "retry_executed": 0,
+    "retry_failed": 0,
+}
+
+def _serialize_markup(reply_markup: InlineKeyboardMarkup):
+    if not reply_markup:
+        return None
+    rows = []
+    for row in reply_markup.inline_keyboard:
+        r = []
+        for btn in row:
+            r.append({"text": btn.text, "callback_data": getattr(btn, 'callback_data', None), "url": getattr(btn, 'url', None)})
+        rows.append(r)
+    return rows
+
+def _deserialize_markup(rows):
+    if not rows:
+        return None
+    kb = []
+    for row in rows:
+        r = []
+        for b in row:
+            if b.get('url'):
+                r.append(InlineKeyboardButton(b['text'], url=b['url']))
+            else:
+                r.append(InlineKeyboardButton(b['text'], callback_data=b.get('callback_data')))
+        kb.append(r)
+    return InlineKeyboardMarkup(kb)
+
+async def _redis_schedule_retry(chat_id, message_id, text, reply_markup, execute_at: int):
+    """Schedule a retry in Redis sorted set. Payload stored as JSON."""
+    if _redis is None:
+        return
+    payload = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "reply_markup": _serialize_markup(reply_markup)
+    }
+    try:
+        import json as _json
+        await _redis.zadd("retry:queue", { _json.dumps(payload): execute_at })
+        METRICS['retry_scheduled'] += 1
+        try:
+            await _redis.incr('metrics:retry_scheduled')
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Failed to schedule retry in Redis")
+
+async def schedule_retry_via_redis_or_local(query, text, reply_markup=None, delay=1):
+    # Try Redis-based scheduling first
+    try:
+        chat_id = getattr(getattr(query, 'message', None), 'chat_id', None)
+        message_id = getattr(getattr(query, 'message', None), 'message_id', None)
+        when = int(time.time()) + int(delay)
+        if _redis is not None and chat_id and message_id:
+            await _redis_schedule_retry(chat_id, message_id, text, reply_markup, when)
+            return
+    except Exception:
+        logger.exception("schedule_retry_via_redis_or_local failed")
+    # Fallback: use in-process scheduler
+    _schedule_retry(query, text, reply_markup=reply_markup, delay=delay)
+
+
+async def _process_redis_retry_item(application, raw_member: str):
+    import json as _json
+    try:
+        payload = _json.loads(raw_member)
+        chat_id = payload.get('chat_id')
+        message_id = payload.get('message_id')
+        text = payload.get('text')
+        reply_markup = _deserialize_markup(payload.get('reply_markup'))
+        try:
+            await application.bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+            METRICS['retry_executed'] += 1
+            try:
+                await _redis.incr('metrics:retry_executed')
+            except Exception:
+                pass
+        except Exception as e:
+            # If Telegram responds with RetryAfter, reschedule
+            from telegram.error import RetryAfter
+            if isinstance(e, RetryAfter):
+                wait = getattr(e, 'retry_after', 5)
+                execute_at = int(time.time()) + int(wait)
+                await _redis.zadd('retry:queue', { raw_member: execute_at })
+                return
+            METRICS['retry_failed'] += 1
+            try:
+                await _redis.incr('metrics:retry_failed')
+            except Exception:
+                pass
+            logger.exception("Retry execution failed for payload %s", payload)
+    except Exception:
+        logger.exception("Failed to process redis retry item: %s", raw_member)
+
+
+async def start_redis_retry_worker(application):
+    """Background worker that executes due retry items from Redis sorted set.
+    This is safe to call even if Redis is not configured; it will just return.
+    """
+    if _redis is None:
+        logger.info("Redis not configured; skipping redis retry worker")
+        return
+
+    async def _worker():
+        logger.info("Starting Redis retry worker")
+        while True:
+            try:
+                now = int(time.time())
+                # Get due items
+                members = await _redis.zrangebyscore('retry:queue', '-inf', now, start=0, num=100)
+                if not members:
+                    await asyncio.sleep(1)
+                    continue
+                for raw in members:
+                    # Try to remove atomically; if removed, process
+                    removed = await _redis.zrem('retry:queue', raw)
+                    if removed:
+                        await _process_redis_retry_item(application, raw)
+                await asyncio.sleep(0)
+            except Exception:
+                logger.exception("Redis retry worker encountered an error")
+                await asyncio.sleep(2)
+
+    asyncio.create_task(_worker())
+
+
+
+async def safe_edit_message(query, text: str, reply_markup=None, action_key: str = None, debounce_interval: float = None):
+    """Edit a CallbackQuery message safely with rate-limiting, debounce,
+    and automatic retry for RetryAfter.
+
+    Behavior:
+    - Debounces rapid repeated presses per-user using `_is_debounced`.
+    - Checks global and per-user token buckets; if tokens unavailable,
+      schedules a retry after the estimated wait time.
+    - Attempts edit; on RetryAfter, schedules a retry using the provided
+      retry_after value and returns False.
+    - Falls back to sending a new message if edit fails for other reasons.
+    """
+    try:
+        user_id = getattr(query.from_user, 'id', None) or getattr(query.message, 'chat_id', None)
+        key = action_key or getattr(query, 'data', None) or 'callback'
+        if user_id and _is_debounced(user_id, key, debounce_interval):
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            return False
+
+        # Check tokens
+        uid = user_id or 0
+        ok, wait = _consume_token(uid)
+        if not ok:
+            logger.info("Rate limit: scheduling retry in %s seconds for key=%s", wait, key)
+            await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
+            try:
+                await query.answer(text=f"Too many requests. Retrying in {wait}s.")
+            except Exception:
+                pass
+            return False
+
+        await query.edit_message_text(text, reply_markup=reply_markup)
+        return True
+    except RetryAfter as e:
+        wait = int(getattr(e, 'retry_after', 1) or 1)
+        logger.warning("Flood control exceeded. scheduling retry in %s seconds", wait)
+        await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
+        try:
+            await query.answer(text=f"Too many requests. Will retry in {wait}s.")
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        logger.exception("Error editing message: %s", e)
+        try:
+            await query.message.reply_text(text)
+        except Exception:
+            pass
+        return False
 
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -54,7 +489,10 @@ async def help(update: Update, context: CallbackContext):
         "✨ **Welcome to the Course Manager Bot!** Here's how you can use me:\n\n"
         "/start - Start the bot and receive a welcome message\n"
         "/add - Start the process of adding a new course\n"
-        "/courses - View your saved courses\n\n"
+        "/courses - View your saved courses\n"
+        "/delete_course - Delete a specific course\n"
+        "/delete_category - Delete a category and all its associated courses\n"
+        "/delete_all_data - Deletes both courses and categories (don't use this lightly!)\n\n"
         "📚 **Category Management**:\n"
         "/categories - List all available categories\n"
         "/create_category - Create a new empty category\n\n"
@@ -72,7 +510,7 @@ async def list_categories(update: Update, context: CallbackContext):
     """Show every category as an inline button that opens its courses."""
     try:
         db = await get_db()
-        categories = await db.categories.find().to_list(length=None)
+        categories = await db.categories.find().sort("name", 1).to_list(length=None)
         if not categories:
             await update.message.reply_text("No categories available. Use /create_category to create one.")
             return
@@ -92,7 +530,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # Read category document and its embedded courses array
     category_doc = await db.categories.find_one({"name": cat_name})
     if not category_doc or not category_doc.get('courses'):
-        await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
+        await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
         return
 
     courses = category_doc.get('courses', [])
@@ -106,7 +544,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     ]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-    await query.edit_message_text(f"Courses in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard))
+    await safe_edit_message(query, f"Courses in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
@@ -115,15 +553,15 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
     await query.answer()
     try:
         db = await get_db()
-        categories = await db.categories.find().to_list(length=None)
+        categories = await db.categories.find().sort("name", 1).to_list(length=None)
         if not categories:
-            await query.edit_message_text("No categories available. Use /create_category to create one.")
+            await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
             return
         keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{urllib.parse.quote_plus(cat['name'])}")] for cat in categories]
-        await query.edit_message_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await safe_edit_message(query, "Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error returning to categories: {e}")
-        await query.edit_message_text("An unexpected error occurred. Please try again later.")
+        await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
 
 async def list_courses(update: Update, context: CallbackContext):
     """List all available courses with pagination."""
@@ -229,44 +667,50 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
 
     db = await get_db()
     if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return
 
     try:
         collection = db['categories']
 
-        # Load all categories from the database (no DB-side limit) so the bot
-        # can support an effectively unlimited number of categories. We keep
-        # UI pagination on the bot side to avoid huge messages at once.
-        all_categories = await collection.find().to_list(length=None)
-        if not all_categories:
-            await query.edit_message_text("No categories available.")
+        # Use DB-side pagination: fetch page_size+1 items starting at the
+        # requested offset. This avoids loading the entire collection into
+        # memory (which caused lag) while still allowing arbitrary page
+        # numbers. We sort by name for deterministic ordering.
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+
+        # Fetch one extra document as a lookahead to decide whether a "Next"
+        # button is needed.
+        cursor = collection.find().sort("name", 1).skip(start).limit(page_size + 1)
+        results = await cursor.to_list(length=None)
+
+        if not results:
+            # If no results for this page, inform the user (they may have
+            # navigated past the end).
+            await safe_edit_message(query, "No categories available.", action_key=getattr(query, 'data', None))
             return
 
-        page_size = PAGE_SIZE  # Number of categories per page in the UI
-        start = (page - 1) * page_size
-        display = all_categories[start:start + page_size]
+        display = results[:page_size]
 
-        # Create buttons for the slice of categories for this page
         keyboard = [
             [InlineKeyboardButton(category['name'], callback_data=f"category_{urllib.parse.quote_plus(category['name'])}")]
             for category in display
         ]
 
-        # Add pagination buttons if needed
         pagination_buttons = []
         if start > 0:
             pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"categories_prev_{page-1}"))
-        if len(all_categories) > start + page_size:
+        if len(results) > page_size:
             pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"categories_next_{page+1}"))
         if pagination_buttons:
             keyboard.append(pagination_buttons)
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Here are the available categories:", reply_markup=reply_markup)
+        await safe_edit_message(query, "Here are the available categories:", reply_markup=reply_markup, action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error handling pagination: {e}")
-        await query.edit_message_text("An error occurred while fetching categories. Please try again later.")
+        await safe_edit_message(query, "An error occurred while fetching categories. Please try again later.", action_key=getattr(query, 'data', None))
 
 logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
@@ -313,7 +757,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     db = await get_db()
     category_doc = await db.categories.find_one({"name": cat_name})
     if not category_doc or not category_doc.get('courses'):
-        await query.edit_message_text(f'Category “{cat_name}” is empty.\nUse /add to populate it.')
+        await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
         return
 
     # every button is a url button → opens the link immediately
@@ -324,10 +768,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     ]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
     keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-    await query.edit_message_text(
-        f'📚 Tap any course to open its link:',
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await safe_edit_message(query, f'📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     
 async def handle_course_selection(update: Update, context: CallbackContext):
     """Handle the selection of a course from the buttons."""
@@ -343,9 +784,9 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 
     if data.startswith("course_ref::"):
         key = data.split("::", 1)[1]
-        payload = CALLBACK_MAP.get(key)
+        payload = await _resolve_callback_payload(key)
         if not payload:
-            await query.edit_message_text("Reference expired. Please open the list again.")
+            await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
         cat_name = payload.get("category")
         course_name = payload.get("name")
@@ -378,7 +819,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 
     db = await get_db()
     if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return
 
     try:
@@ -419,18 +860,18 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                text=f"📚 **Course Details**\n\n"
-                     f"Name: {course['name']}\n"
-                     f"Link: {course['link']}\n"
-                     f"Category: {course['category']}",
-                reply_markup=reply_markup
+            details = (
+                f"📚 **Course Details**\n\n"
+                f"Name: {course['name']}\n"
+                f"Link: {course['link']}\n"
+                f"Category: {course['category']}"
             )
+            await safe_edit_message(query, details, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
         else:
-            await query.edit_message_text("Course not found. Please try again.")
+            await safe_edit_message(query, "Course not found. Please try again.", action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error fetching course '{course_name}': {e}")
-        await query.edit_message_text("An error occurred while fetching the course. Please try again later.")
+        await safe_edit_message(query, "An error occurred while fetching the course. Please try again later.", action_key=getattr(query, 'data', None))
         
 # Main entry point for your bot (add handlers as needed)
 async def get_courses_by_category(user_id, category, page: int = 1, page_size: int = 20):
@@ -458,7 +899,7 @@ async def courses_callback(update: Update, context: CallbackContext):
     data = query.data
     db = await get_db()
     if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return
 
     try:
@@ -480,7 +921,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                 start = (page - 1) * page_size
                 display = all_courses[start:start + page_size]
                 if not display:
-                    await query.edit_message_text(f"No courses found on page {page}.")
+                    await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                     return
                 keyboard = [
                     [
@@ -497,7 +938,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                 if pagination:
                     keyboard.append(pagination)
 
-                await query.edit_message_text(text=f"All courses (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard))
+                await safe_edit_message(query, text=f"All courses (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
                 return
 
             # category + page
@@ -505,12 +946,12 @@ async def courses_callback(update: Update, context: CallbackContext):
             try:
                 page = int(parts[1])
             except Exception:
-                await query.edit_message_text("Invalid page number.")
+                await safe_edit_message(query, "Invalid page number.", action_key=getattr(query, 'data', None))
                 return
 
             category_doc = await db.categories.find_one({"name": category})
             if not category_doc or not category_doc.get('courses'):
-                await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
+                await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                 return
 
             page_size = PAGE_SIZE
@@ -518,7 +959,7 @@ async def courses_callback(update: Update, context: CallbackContext):
             courses = category_doc.get('courses', [])
             display = courses[start:start + page_size]
             if not display:
-                await query.edit_message_text(f"No courses found in category '{category}' on page {page}.")
+                await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                 return
 
             keyboard = [
@@ -536,12 +977,12 @@ async def courses_callback(update: Update, context: CallbackContext):
             if pagination:
                 keyboard.append(pagination)
 
-            await query.edit_message_text(text=f"Courses in category '{category}' (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard))
+            await safe_edit_message(query, text=f"Courses in category '{category}' (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
             return
 
         # legacy underscore format removed. Only `courses::` callbacks are supported.
-        await query.edit_message_text("Invalid pagination callback.")
+        await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, 'data', None))
         return
     except Exception as e:
         logger.error(f"Error handling courses callback: {e}")
-        await query.edit_message_text("An error occurred while fetching courses. Please try again later.")
+        await safe_edit_message(query, "An error occurred while fetching courses. Please try again later.", action_key=getattr(query, 'data', None))
