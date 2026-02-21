@@ -248,9 +248,13 @@ async def category_selected(update: Update, context: CallbackContext):
     try:
         # Save course inside the category document (push into categories.courses array)
         categories_coll = db['categories']
+        coach = context.user_data.get('course_coach')
+        course_doc = {"name": course_name, "link": course_link}
+        if coach:
+            course_doc['coach'] = coach
         update_result = await categories_coll.update_one(
             {"name": category_name},
-            {"$push": {"courses": {"name": course_name, "link": course_link}}}
+            {"$push": {"courses": course_doc}}
         )
         # Log the update result for debugging
         logger.info("[ADD-COURSE] update_result=%s", getattr(update_result, 'raw_result', update_result))
@@ -292,9 +296,13 @@ async def add_course_category(update: Update, context: CallbackContext):
     try:
         # Push the course into the category document (embedded array)
         categories_coll = db['categories']
+        coach = context.user_data.get('course_coach')
+        course_doc = {"name": course_name, "link": course_link}
+        if coach:
+            course_doc['coach'] = coach
         upd = await categories_coll.update_one(
             {"name": category_name},
-            {"$push": {"courses": {"name": course_name, "link": course_link}}}
+            {"$push": {"courses": course_doc}}
         )
         logger.info("[ADD-COURSE-alt] update_result=%s", getattr(upd, 'raw_result', upd))
         if upd.modified_count == 0:
