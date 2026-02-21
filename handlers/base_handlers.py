@@ -527,7 +527,14 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     # beside Home. If `category` is provided, include it as a breadcrumb
     # button as well for context.
     try:
-        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+        # Choose Home callback depending on origin: global should return to
+        # the first global courses page; category/coach should return to
+        # top-level categories (back_to_cats).
+        if origin_type == 'global':
+            home_cb = f"courses::1"
+        else:
+            home_cb = "back_to_cats"
+        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=home_cb)]
         if total_pages > 1 and page < total_pages:
             # build end callback depending on origin type
             if origin_type == 'category' and category:
@@ -1398,13 +1405,37 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 
             delete_cb = f"delete_ref::{delete_key}" if delete_key else "delete_ref::"
 
-            keyboard = [
-                [
-                    InlineKeyboardButton("🔙 Back", callback_data=back_cb),
-                    # Use a short delete_ref callback to avoid exceeding Telegram callback_data limits
-                    InlineKeyboardButton("Delete Course", callback_data=delete_cb)
-                ]
-            ]
+            # Build detail navigation: always show Back + Delete; when the
+            # course was opened from a category/coach (not global), also
+            # offer a Parent/Home button that returns to the parent folder
+            # (or to categories if no parent exists). This keeps global
+            # and category GUIs split logically.
+            nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+
+            extra_row = None
+            try:
+                if origin_type != 'global':
+                    # prefer showing the parent folder of the course's category
+                    if course_category:
+                        parent_doc = await db.categories.find_one({"name": course_category})
+                        if parent_doc:
+                            parent = parent_doc.get('parent')
+                            if parent:
+                                pdoc = await db.categories.find_one({"name": parent})
+                                ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                                extra_row = [InlineKeyboardButton("🏠 Parent", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
+                            else:
+                                extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
+                        else:
+                            extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
+                    else:
+                        extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
+            except Exception:
+                extra_row = None
+
+            keyboard = [nav_row]
+            if extra_row:
+                keyboard.append(extra_row)
             reply_markup = InlineKeyboardMarkup(keyboard)
             details = (
                 f"📚 **Course Details**\n\n"
