@@ -48,6 +48,7 @@ from handlers.bot_handlers import (
     generate_keyboard,
     delete_item,
     delete_category,
+    delete_category_start,
     handle_course_deletion,
     handle_cancel_delete_callback,
     delete_item_start,
@@ -70,6 +71,7 @@ from conversation_states import (
 )
 
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
+from handlers.delete_callbacks import handle_delete_ref, handle_delete_confirm, handle_delete_summary
 from handlers.delete_callbacks import handle_delete_ref
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 
@@ -114,6 +116,8 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
     application.add_handler(CommandHandler("categories", list_categories))
+    application.add_handler(CommandHandler("delete_category", delete_category_start))
+    application.add_handler(CommandHandler("delete_parent", delete_parent_start))
     # Note: `delete_category_start` not present; command removed until handler is added.
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
@@ -250,6 +254,18 @@ async def setup_handlers(application: Application):
         CallbackQueryHandler(
             handle_delete_ref,
             pattern=r"^delete_ref::",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_delete_confirm,
+            pattern=r"^delete_confirm::",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_delete_summary,
+            pattern=r"^delete_summary::",
         )
     )
     application.add_handler(
