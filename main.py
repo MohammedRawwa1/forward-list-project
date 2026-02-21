@@ -84,7 +84,7 @@ async def startup_event():
     # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
     loop = asyncio.get_event_loop()
     def _log_signal(sig):
-        logger.warning("Received shutdown signal: %s", sig)
+        logger.warning("Received shutdown signal: {}", sig)
     try:
         loop.add_signal_handler(signal.SIGTERM, lambda: _log_signal('SIGTERM'))
         loop.add_signal_handler(signal.SIGINT, lambda: _log_signal('SIGINT'))
