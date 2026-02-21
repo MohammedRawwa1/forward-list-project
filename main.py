@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from bot import create_application, setup_handlers
+from handlers.base_handlers import start_redis_retry_worker
 from database.mongo_handler import MongoDB
 
 load_dotenv()
@@ -73,6 +74,12 @@ async def startup_event():
 
     application.add_error_handler(global_error_handler)
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
+
+    # Start Redis-backed retry worker (if Redis configured)
+    try:
+        asyncio.create_task(start_redis_retry_worker(application))
+    except Exception:
+        logger.exception("Failed to start redis retry worker")
 
     # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
     loop = asyncio.get_event_loop()
