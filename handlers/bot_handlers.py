@@ -302,10 +302,15 @@ async def delete_item_start(update: Update, context: CallbackContext):
     db = await get_db()
     # Aggregate courses across all categories and present them with category-aware callbacks
     cats = await db.categories.find().to_list(length=None)
+    # Ensure deterministic, case-insensitive A→Z ordering of categories
+    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
     all_courses = []
     for cat in cats:
         for crs in cat.get('courses', []):
             all_courses.append({"name": crs.get('name'), "category": cat.get('name')})
+
+    # Sort all courses case-insensitively A→Z for deterministic display
+    all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
 
     if not all_courses:
         await update.message.reply_text("No courses to delete.")
