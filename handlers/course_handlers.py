@@ -1,6 +1,6 @@
 from telegram.ext import ConversationHandler, MessageHandler, CommandHandler, CallbackQueryHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from conversation_states import ADD_NAME, ADD_LINK, ADD_CATEGORY
+from conversation_states import ADD_NAME, ADD_LINK, ADD_CATEGORY, ADD_PARENT, ADD_COACH
 from handlers.db_connection import get_db
 from pymongo.errors import PyMongoError
 import logging
@@ -11,16 +11,35 @@ from handlers.base_handlers import safe_edit_message
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Conversation states
-NAME, LINK, CATEGORY = range(3)
+# Conversation states are defined in conversation_states.py
 
 async def setup_course_handlers(application):
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add", add_course_start)],
         states={
-            ADD_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name)],
-            ADD_LINK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link)],
-            # use a distinct callback prefix for add-flow to avoid clashes with global category handlers
+            # First: pick a parent/top-level category
+            ADD_PARENT: [CallbackQueryHandler(parent_selected, pattern=r"^addparent::")],
+
+            # Then: pick a coach (buttons) or enter one manually (text)
+            ADD_COACH: [
+                CallbackQueryHandler(coach_selected, pattern=r"^addcoach::"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, coach_manual_entry),
+                MessageHandler(filters.Regex(r'^/cancel$'), cancel),
+            ],
+
+            # Then: course name (text) — include explicit cancel matcher so /cancel always works
+            ADD_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name),
+                MessageHandler(filters.Regex(r'^/cancel$'), cancel),
+            ],
+
+            # Then: course link (text)
+            ADD_LINK: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link),
+                MessageHandler(filters.Regex(r'^/cancel$'), cancel),
+            ],
+
+            # Legacy: allow selecting an arbitrary category at the end if needed
             ADD_CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^addcat_")]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
@@ -35,8 +54,30 @@ async def start(update: Update, context: CallbackContext):
     
 # course_handlers.py
 async def add_course_start(update: Update, context: CallbackContext):
-    await update.message.reply_text("Enter the name of the course:")
-    return ADD_NAME
+    """Start add flow: prompt the user to pick a parent/top-level category.
+
+    If no top-level parents exist, fall back to asking for the course name.
+    """
+    try:
+        db = await get_db()
+        parents = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+        parents = sorted(parents, key=lambda c: (c.get('name') or '').lower())
+    except Exception:
+        parents = []
+
+    if not parents:
+        # No parents to choose from — continue with legacy flow (ask name)
+        await update.message.reply_text("Enter the name of the course:")
+        return ADD_NAME
+
+    keyboard = []
+    # Allow top-level (no parent) explicitly
+    keyboard.append([InlineKeyboardButton("(Add to top-level)", callback_data="addparent::")])
+    for p in parents:
+        keyboard.append([InlineKeyboardButton(p.get('name'), callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}")])
+
+    await update.message.reply_text("Choose a parent category for the new course:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return ADD_PARENT
 
 # ----------  add_course_name  ----------
 async def add_course_name(update: Update, context: CallbackContext):
@@ -61,31 +102,125 @@ async def add_course_link(update: Update, context: CallbackContext):
         return ADD_LINK
 
     context.user_data['course_link'] = link
-
     logger.info(f"[ADD] Course link received: {link}")
 
-    # Check if there are categories available
+    # Determine where to save the course: prefer an explicit parent chosen earlier
+    parent = context.user_data.get('course_parent')
+    coach = context.user_data.get('course_coach')
+
     try:
         db = await get_db()
+        if db is None:
+            await update.message.reply_text("❗️ Could not connect to the database. Try again later.")
+            return ConversationHandler.END
+        categories_coll = db['categories']
+
+        # If a parent was selected, save into that parent category
+        if parent is not None:
+            update_result = await categories_coll.update_one(
+                {"name": parent},
+                {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link, "coach": coach}}}
+            )
+            logger.info("[ADD-COURSE] saved to parent=%s result=%s", parent, getattr(update_result, 'raw_result', update_result))
+            if update_result.modified_count == 0:
+                await update.message.reply_text(f"Error: Parent category '{parent}' not found. Create it first.")
+                return ConversationHandler.END
+
+            await update.message.reply_text(f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}")
+            return ConversationHandler.END
+
+        # Fallback: ask the user to pick a category (legacy behavior)
         cats = await db.categories.find().to_list(length=None)
-        # Ensure deterministic, case-insensitive A→Z ordering for category selection
         cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+        if not cats:
+            await update.message.reply_text("No categories available. Create one first with /create_category")
+            return ConversationHandler.END
+
+        keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"addcat_{urllib.parse.quote_plus(c['name'])}")] for c in cats]
+        await update.message.reply_text("Pick a category for the course:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return ADD_CATEGORY
+
     except Exception as e:
-        logger.error("DB error in add_course_link: %s", e)
-        await update.message.reply_text("❗️ Could not connect to the database. Try again later.")
+        logger.error("Error saving course link: %s", e)
+        await update.message.reply_text("An error occurred while saving the course. Please try again later.")
         return ConversationHandler.END
 
-    if not cats:
-        await update.message.reply_text("No categories available. Create one first with /create_category")
-        return ConversationHandler.END
 
-    # Send category selection keyboard (use `addcat_` prefix to target this conversation)
-    keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"addcat_{urllib.parse.quote_plus(c['name'])}")] for c in cats]
-    await update.message.reply_text(
-        "Pick a category for the course:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    return ADD_CATEGORY
+async def parent_selected(update: Update, context: CallbackContext):
+    """Callback when a parent is chosen. Presents coach choices next."""
+    query = update.callback_query
+    await query.answer()
+    encoded = query.data.split("::", 1)[1]
+    parent = urllib.parse.unquote_plus(encoded) if encoded else None
+    # store chosen parent (None means add to top-level)
+    context.user_data['course_parent'] = parent
+
+    # Prefer showing child categories as coach options when coaches are
+    # modeled as category documents. This matches the user's workflow where
+    # `/create_category` creates coaches.
+    try:
+        db = await get_db()
+        # find child categories of the selected parent
+        if parent:
+            child_cats = await db.categories.find({"parent": parent}).to_list(length=None)
+        else:
+            child_cats = []
+    except Exception:
+        child_cats = []
+
+    keyboard = []
+    if child_cats:
+        for child in sorted(child_cats, key=lambda c: (c.get('name') or '').lower()):
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
+        # Also allow manual entry or no coach
+        keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
+        keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+    else:
+        # Fallback: derive coaches from existing course 'coach' fields
+        try:
+            cats = await db.categories.find({"$or": [{"name": parent}, {"parent": parent}] }).to_list(length=None) if parent else await db.categories.find().to_list(length=None)
+            coaches_set = set()
+            for c in cats:
+                for crs in c.get('courses', []):
+                    if crs.get('coach'):
+                        coaches_set.add(crs.get('coach'))
+        except Exception:
+            coaches_set = set()
+
+        coaches = sorted(list(coaches_set))
+        for coach in coaches:
+            keyboard.append([InlineKeyboardButton(coach, callback_data=f"addcoach::{urllib.parse.quote_plus(coach)}")])
+        keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
+        keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+
+    await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+    return ADD_COACH
+
+
+async def coach_selected(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    encoded = query.data.split("::", 1)[1]
+    if encoded == "__manual__":
+        # Ask for manual entry
+        await query.message.reply_text("Send the coach name (text):")
+        return ADD_COACH
+
+    coach = urllib.parse.unquote_plus(encoded) if encoded else None
+    context.user_data['course_coach'] = coach
+    # Proceed to ask for course name
+    await query.message.reply_text("Enter the name of the course:")
+    return ADD_NAME
+
+
+async def coach_manual_entry(update: Update, context: CallbackContext):
+    coach = update.message.text.strip()
+    if not coach:
+        await update.message.reply_text("Coach name cannot be empty — try again.")
+        return ADD_COACH
+    context.user_data['course_coach'] = coach
+    await update.message.reply_text("Enter the name of the course:")
+    return ADD_NAME
         
 async def category_selected(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
