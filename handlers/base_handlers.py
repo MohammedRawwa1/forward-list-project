@@ -1170,6 +1170,11 @@ async def handle_category_name(update: Update, context: CallbackContext):
 
         result = await coll.insert_one(doc)
         logger.info(f"[CAT-INSERT-DONE] _id={result.inserted_id}")
+        # Explicit success logs for parent vs child categories
+        if not parent:
+            logger.info(f"[CAT-INSERT-PARENT] Created top-level parent category '{category_name}' _id={result.inserted_id}")
+        else:
+            logger.info(f"[CAT-INSERT-CHILD] Created category '{category_name}' under parent '{parent}' _id={result.inserted_id}")
         await update.message.reply_text(f"Category ‘{category_name}’ saved ✔")
         return ConversationHandler.END
     except DuplicateKeyError:
