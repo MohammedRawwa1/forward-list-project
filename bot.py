@@ -14,6 +14,7 @@ from handlers.base_handlers import (
     list_coaches,
     list_categories,
     create_category,
+    create_parent,
     handle_create_category_parent,
     get_courses_by_category,
     courses_callback,
@@ -116,6 +117,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("cancel", cancel))
+        application.add_handler(CommandHandler("create_parent", create_parent))
 
     # ---------- callbacks ----------
     # `del_menu_` callback handler not present; skip registration.
