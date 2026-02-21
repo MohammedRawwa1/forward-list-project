@@ -510,7 +510,9 @@ async def list_categories(update: Update, context: CallbackContext):
     """Show every category as an inline button that opens its courses."""
     try:
         db = await get_db()
-        categories = await db.categories.find().sort("name", 1).to_list(length=None)
+        categories = await db.categories.find().to_list(length=None)
+        # Ensure deterministic, case-insensitive A→Z ordering for display
+        categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
         if not categories:
             await update.message.reply_text("No categories available. Use /create_category to create one.")
             return
@@ -534,6 +536,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
         return
 
     courses = category_doc.get('courses', [])
+    # Ensure deterministic, case-insensitive A→Z ordering for display
+    courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
     # Build compact keyboard: left button opens link, right button shows details
     keyboard = [
         [
@@ -553,7 +557,9 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
     await query.answer()
     try:
         db = await get_db()
-        categories = await db.categories.find().sort("name", 1).to_list(length=None)
+        categories = await db.categories.find().to_list(length=None)
+        # Ensure deterministic, case-insensitive A→Z ordering for display
+        categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
         if not categories:
             await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
             return
@@ -628,6 +634,8 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             return
 
         courses = category_doc.get('courses', [])
+        # Ensure deterministic, case-insensitive A→Z ordering for pagination/display
+        courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
         start = (page - 1) * page_size
         display = courses[start:start + page_size]
 
@@ -886,6 +894,8 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         if not category_doc or not category_doc.get('courses'):
             return []
         courses = category_doc.get('courses', [])
+        # Sort courses case-insensitively A→Z for deterministic pagination
+        courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
         start = (page - 1) * page_size
         return courses[start:start + page_size]
     except Exception as e:
@@ -916,6 +926,9 @@ async def courses_callback(update: Update, context: CallbackContext):
                 for cat in cats:
                     for crs in cat.get('courses', []):
                         all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+
+                # Sort all courses case-insensitively A→Z to provide deterministic ordering
+                all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
 
                 page_size = PAGE_SIZE
                 start = (page - 1) * page_size
@@ -957,6 +970,8 @@ async def courses_callback(update: Update, context: CallbackContext):
             page_size = PAGE_SIZE
             start = (page - 1) * page_size
             courses = category_doc.get('courses', [])
+            # Ensure deterministic, case-insensitive A→Z ordering for category pages
+            courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
             display = courses[start:start + page_size]
             if not display:
                 await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
