@@ -495,13 +495,15 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
             InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], origin_type, page))
         ])
 
-    # Back (only on pages > 1)
+    # Home / Back (only on pages > 1)
     if page > 1:
         if origin_type == 'category' and category:
+            back_text = "🔙 Back"
             back_cb = f"courses::{urllib.parse.quote_plus(category)}::1"
         else:
+            back_text = "🏠 Home"
             back_cb = "courses::1"
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
+        keyboard.append([InlineKeyboardButton(back_text, callback_data=back_cb)])
 
     # Pagination
     pagination_buttons = []
