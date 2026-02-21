@@ -87,8 +87,8 @@ def is_valid_category_name(category_name: str):
 
 
 # ---------- application factory ----------
-       application.add_handler(
-        CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::")
+    application.add_handler(
+    CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::")
     )
 
     async def create_application():
