@@ -902,14 +902,16 @@ async def showcat_handler(update: Update, context: CallbackContext):
             else:
                 continue
             keyboard.append([InlineKeyboardButton(t_name, callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}")])
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+        # Back to this category view
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}")])
         await safe_edit_message(query, f"{cat_name} — Select a type:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
     # If we found coaches, show them; otherwise fall back to showing courses in this category
     if coaches:
         keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach.get('slug') or urllib.parse.quote_plus(coach.get('name'))}")] for coach in coaches]
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+        # Back to this category view
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}")])
         await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -927,7 +929,14 @@ async def showcat_handler(update: Update, context: CallbackContext):
         for crs in courses
     ]
     keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    # Back to parent if available, otherwise top-level categories
+    parent = category_doc.get('parent')
+    if parent:
+        pdoc = await db.categories.find_one({"name": parent})
+        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+    else:
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await safe_edit_message(query, f"Courses in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
 
 
@@ -937,7 +946,8 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
     await query.answer()
     try:
         db = await get_db()
-        categories = await db.categories.find().to_list(length=None)
+        # list only top-level categories (no parent)
+        categories = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
         # Ensure deterministic, case-insensitive A→Z ordering for display
         categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
         if not categories:
@@ -1120,6 +1130,14 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
     # Ask for the name via a simple text prompt
     await query.message.reply_text(prompt)
     return CREATE_CAT_NAME
+
+
+async def create_parent(update: Update, context: CallbackContext):
+    """Create a top-level parent category (explicit command)."""
+    # mark that the new category should be top-level
+    context.user_data['new_cat_parent'] = None
+    await update.message.reply_text("Enter the new parent category name:")
+    return CREATE_CAT_NAME
     
 async def handle_category_name(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
@@ -1167,10 +1185,18 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     """List courses in the chosen category – each course button is a direct URL."""
     query = update.callback_query
     await query.answer()
-    encoded = query.data.replace("category_", "", 1)
-    cat_name = urllib.parse.unquote_plus(encoded)
+    data = query.data
+    if data.startswith("category::"):
+        encoded = data.split("::", 1)[1]
+        cat_path = urllib.parse.unquote_plus(encoded)
+    else:
+        encoded = data.replace("category_", "", 1)
+        cat_path = urllib.parse.unquote_plus(encoded)
     db = await get_db()
-    category_doc = await db.categories.find_one({"name": cat_name})
+    # resolve by path then name
+    category_doc = await db.categories.find_one({"path": cat_path})
+    if not category_doc:
+        category_doc = await db.categories.find_one({"name": cat_path})
     if not category_doc or not category_doc.get('courses'):
         await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
         return
@@ -1181,8 +1207,14 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         [InlineKeyboardButton(crs["name"], url=crs["link"])]
         for crs in courses
     ]
-    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
-    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(category_doc.get('name'))}")])
+    parent = category_doc.get('parent')
+    if parent:
+        pdoc = await db.categories.find_one({"name": parent})
+        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+    else:
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await safe_edit_message(query, f'📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     
 async def handle_course_selection(update: Update, context: CallbackContext):
