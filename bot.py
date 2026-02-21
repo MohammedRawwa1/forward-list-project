@@ -44,6 +44,7 @@ from handlers.bot_handlers import (
     handle_course_deletion,
     handle_cancel_delete_callback,
     delete_item_start,
+    delete_all_data_start,
     confirm_delete_all,
     cancel_delete_all_data,
     initiate_delete_item,
