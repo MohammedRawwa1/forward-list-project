@@ -24,19 +24,16 @@ async def setup_course_handlers(application):
             ADD_COACH: [
                 CallbackQueryHandler(coach_selected, pattern=r"^addcoach::"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, coach_manual_entry),
-                MessageHandler(filters.Regex(r'^/cancel$'), cancel),
             ],
 
             # Then: course name (text) — include explicit cancel matcher so /cancel always works
             ADD_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name),
-                MessageHandler(filters.Regex(r'^/cancel$'), cancel),
             ],
 
             # Then: course link (text)
             ADD_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link),
-                MessageHandler(filters.Regex(r'^/cancel$'), cancel),
             ],
 
             # Legacy: allow selecting an arbitrary category at the end if needed
@@ -335,8 +332,30 @@ async def add_course_category(update: Update, context: CallbackContext):
 
 async def cancel(update: Update, context: CallbackContext) -> int:
     """Cancel the current operation."""
-    await update.message.reply_text("Operation canceled.")
-    context.user_data.clear()  # Clear user data
+    try:
+        if getattr(update, 'message', None) is not None:
+            await update.message.reply_text("Operation canceled.")
+        elif getattr(update, 'callback_query', None) is not None:
+            cq = update.callback_query
+            try:
+                await cq.answer()
+            except Exception:
+                pass
+            try:
+                await safe_edit_message(cq, "Operation canceled.", action_key=getattr(cq, 'data', None))
+            except Exception:
+                try:
+                    await cq.message.reply_text("Operation canceled.")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    # Clear any stored conversation data
+    try:
+        if context and getattr(context, 'user_data', None) is not None:
+            context.user_data.clear()
+    except Exception:
+        pass
     return ConversationHandler.END
 
 # Utility function to check valid URL format
