@@ -142,11 +142,12 @@ async def setup_handlers(application: Application):
     application.add_handler(
         CallbackQueryHandler(handle_category_selection, pattern=r"^category::")
     )
-    application.add_handler(
-        CallbackQueryHandler(show_coach_handler, pattern=r"^coach_")
-    )
+    # Register the more specific coach-in-category handler before the generic coach handler
     application.add_handler(
         CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_coach_handler, pattern=r"^coach_")
     )
     application.add_handler(
         CallbackQueryHandler(showtype_handler, pattern=r"^showtype::")
@@ -192,7 +193,8 @@ async def setup_handlers(application: Application):
             entry_points=[CommandHandler("create_category", create_category), CommandHandler("create_parent", create_parent)],
             states={
                 CREATE_CAT_PARENT: [
-                    CallbackQueryHandler(handle_create_category_parent, pattern=r"^createcat_parent::")
+                    CallbackQueryHandler(handle_create_category_parent, pattern=r"^createcat_parent::"),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_create_category_parent_text),
                 ],
                 CREATE_CAT_NAME: [
                     MessageHandler(
