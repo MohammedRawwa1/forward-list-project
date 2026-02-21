@@ -520,8 +520,16 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if pagination_buttons:
         keyboard.append(pagination_buttons)
 
-    # prepend breadcrumb to text
+    # Prepend breadcrumb buttons row (Home and optional category)
     try:
+        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+        if category:
+            # category may be a name or path; use showcat:: which resolves both
+            breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
+        # insert at top
+        keyboard.insert(0, breadcrumb_buttons)
+
+        # prepend breadcrumb text for visual context
         bc = " / ".join(breadcrumb)
         text = f"{bc}\n\n{text}"
     except Exception:
@@ -570,13 +578,17 @@ async def list_categories(update: Update, context: CallbackContext):
     """Show every category as an inline button that opens its courses."""
     try:
         db = await get_db()
-        categories = await db.categories.find().to_list(length=None)
+        # show only top-level categories (no parent) for the command
+        categories = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
         # Ensure deterministic, case-insensitive A→Z ordering for display
         categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
         if not categories:
             await update.message.reply_text("No categories available. Use /create_category to create one.")
             return
-        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{urllib.parse.quote_plus(cat['name'])}")] for cat in categories]
+        keyboard = [
+            [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")]
+            for cat in categories
+        ]
         await update.message.reply_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Error listing categories: {e}")
@@ -584,38 +596,9 @@ async def list_categories(update: Update, context: CallbackContext):
 
 
 async def list_coaches(update: Update, context: CallbackContext):
-    """List coaches (creators). Falls back to category names or embedded course coach fields if no `coaches` collection."""
-    try:
-        db = await get_db()
-        # Try dedicated coaches collection first
-        coaches = []
-        try:
-            if hasattr(db, 'coaches'):
-                coaches = await db.coaches.find().to_list(length=None)
-        except Exception:
-            coaches = []
-
-        if not coaches:
-            # Fallback: derive coaches from category names (legacy) or from embedded course 'coach' field
-            cats = await db.categories.find().to_list(length=None)
-            # If categories appear to be coach names (legacy), use them
-            # Otherwise, scan embedded courses for a 'coach' field
-            derived = set()
-            for cat in cats:
-                # if courses exist and have a 'coach' field, prefer that
-                for crs in cat.get('courses', []):
-                    if crs.get('coach'):
-                        derived.add(crs.get('coach'))
-                # also include category name as fallback coach label
-                derived.add(cat.get('name'))
-            coaches = [{'name': c, 'slug': urllib.parse.quote_plus(c)} for c in sorted(derived, key=lambda s: (s or '').lower())]
-
-        # Build keyboard
-        keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_{urllib.parse.quote_plus(coach.get('slug') or coach.get('name'))}")] for coach in coaches]
-        await update.message.reply_text("Tap a coach to see their courses:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        logger.exception("Error listing coaches: %s", e)
-        await update.message.reply_text("An unexpected error occurred. Please try again later.")
+    """Redirect /coaches to the categories view so users browse: categories -> coaches -> courses."""
+    # Present categories first (so coaches are shown inside a category)
+    await list_categories(update, context)
 
 
 async def show_coach_handler(update: Update, context: CallbackContext):
@@ -675,13 +658,16 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     data = query.data
-    parts = data.split("::", 2)
-    if len(parts) != 3:
+    parts = data.split("::")
+    # Accept either: coach_in_cat::{category}::{coach_slug}
+    # Or: coach_in_cat::{category}::{coach_slug}::{type_slug}
+    if len(parts) < 3:
         await safe_edit_message(query, "Invalid coach callback.", action_key=getattr(query, 'data', None))
         return
-    _, enc_cat, enc_coach = parts
-    category = urllib.parse.unquote_plus(enc_cat)
-    coach_slug = urllib.parse.unquote_plus(enc_coach)
+    # parts[0] == 'coach_in_cat'
+    category = urllib.parse.unquote_plus(parts[1])
+    coach_slug = urllib.parse.unquote_plus(parts[2])
+    type_slug = urllib.parse.unquote_plus(parts[3]) if len(parts) >= 4 else None
 
     db = await get_db()
     if db is None:
@@ -708,11 +694,20 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
 
         coach_courses = []
         for crs in category_doc.get('courses', []):
+            # If a type filter was provided, only include courses matching that type
+            if type_slug:
+                # try fields 'type' or 'category_type'
+                c_type = crs.get('type') or crs.get('category_type') or crs.get('categoryType')
+                if not c_type:
+                    continue
+                # match slugified/type name
+                if urllib.parse.quote_plus(str(c_type)) != type_slug:
+                    continue
             if crs.get('coach'):
                 if crs.get('coach') == coach_name:
                     coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": category})
         # Fallback: if no explicit coach fields, maybe the category itself was used as coach (legacy)
-        if not coach_courses:
+        if not coach_courses and not type_slug:
             for crs in category_doc.get('courses', []):
                 # if category name equals selected coach_name (legacy), include
                 if (category or '') == coach_name:
@@ -732,11 +727,21 @@ async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
     await query.answer()
-    encoded = query.data.split("_", 1)[1]
-    cat_name = urllib.parse.unquote_plus(encoded)
+    # Expect callback_data: showcat::{path_or_name}
+    encoded = query.data.split("::", 1)[1]
+    cat_path = urllib.parse.unquote_plus(encoded)
     db = await get_db()
-    # Read category document and its embedded courses array
-    category_doc = await db.categories.find_one({"name": cat_name})
+    # Try to resolve by `path` first, then by `name` for legacy docs
+    category_doc = await db.categories.find_one({"path": cat_path})
+    if not category_doc:
+        category_doc = await db.categories.find_one({"name": cat_path})
+    if not category_doc:
+        await safe_edit_message(query, f'Category “{cat_path}” not found.', action_key=getattr(query, 'data', None))
+        return
+
+    # category display name and path
+    cat_name = category_doc.get('name')
+    cat_path = category_doc.get('path') or cat_name
     if not category_doc:
         await safe_edit_message(query, f'Category “{cat_name}” not found.', action_key=getattr(query, 'data', None))
         return
@@ -762,6 +767,53 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 derived[slug] = coach_name
         # If still empty, we will fallback to showing the courses directly later
         coaches = [{'name': v, 'slug': k} for k, v in derived.items()]
+
+    # First: show any child categories (sub-categories)
+    try:
+        children = await db.categories.find({"parent": cat_name}).to_list(length=None)
+    except Exception:
+        children = []
+
+    if children:
+        # show child categories first
+        keyboard = []
+        for child in sorted(children, key=lambda c: (c.get('name') or '').lower()):
+            child_path = child.get('path') or child.get('name')
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
+        # add up/back button to parent or top-level
+        parent = category_doc.get('parent')
+        if parent:
+            # find parent's path
+            pdoc = await db.categories.find_one({"name": parent})
+            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+        await safe_edit_message(query, f"{cat_path} — Subcategories:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        return
+
+    # If the category doc contains a nested 'types' (category_type) level, show types first
+    type_keys = None
+    for key in ('types', 'category_types', 'subtypes', 'category_type'):
+        if category_doc.get(key):
+            type_keys = key
+            break
+
+    if type_keys:
+        # Build type buttons; each type entry may be a string or dict with 'name'
+        types_list = category_doc.get(type_keys) or []
+        keyboard = []
+        for t in types_list:
+            if isinstance(t, str):
+                t_name = t
+            elif isinstance(t, dict):
+                t_name = t.get('name') or t.get('type')
+            else:
+                continue
+            keyboard.append([InlineKeyboardButton(t_name, callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+        await safe_edit_message(query, f"{cat_name} — Select a type:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        return
 
     # If we found coaches, show them; otherwise fall back to showing courses in this category
     if coaches:
@@ -800,7 +852,10 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
         if not categories:
             await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
             return
-        keyboard = [[InlineKeyboardButton(cat["name"], callback_data=f"showcat_{urllib.parse.quote_plus(cat['name'])}")] for cat in categories]
+        keyboard = [
+            [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")]
+            for cat in categories
+        ]
         await safe_edit_message(query, "Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error returning to categories: {e}")
@@ -943,7 +998,36 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
 
 logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
-    await update.message.reply_text("Enter the new category name:")
+    # Present existing categories as optional parents
+    db = await get_db()
+    cats = []
+    try:
+        cats = await db.categories.find().sort("name", 1).to_list(length=None)
+    except Exception:
+        cats = []
+
+    keyboard = []
+    keyboard.append([InlineKeyboardButton("(Top-level)", callback_data=f"createcat_parent::")])
+    for cat in cats:
+        keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}")])
+    await update.message.reply_text("Select a parent category (or choose Top-level):", reply_markup=InlineKeyboardMarkup(keyboard))
+    return CREATE_CAT_PARENT
+
+
+async def handle_create_category_parent(update: Update, context: CallbackContext):
+    """Callback handler to choose a parent for a new category."""
+    query = update.callback_query
+    await query.answer()
+    encoded = query.data.split("::", 1)[1]
+    parent = urllib.parse.unquote_plus(encoded) if encoded else None
+    # Store chosen parent in user_data for the following name prompt
+    context.user_data['new_cat_parent'] = parent
+    if parent:
+        prompt = f"Enter the new category name (parent: {parent}):"
+    else:
+        prompt = "Enter the new top-level category name:"
+    # Ask for the name via a simple text prompt
+    await query.message.reply_text(prompt)
     return CREATE_CAT_NAME
     
 async def handle_category_name(update: Update, context: CallbackContext):
@@ -960,11 +1044,22 @@ async def handle_category_name(update: Update, context: CallbackContext):
         return CREATE_CAT_NAME
 
     try:
-        db = await MongoDB.get_db()          # yes, import MongoDB here
+        db = await get_db()
         logger.info(f"[CAT-DB] using database: {db.name}")
         coll = db['categories']
         logger.info(f"[CAT-INSERT] about to insert {category_name!r}")
-        result = await coll.insert_one({"name": category_name, "created_by": user_id})
+
+        # Check for a chosen parent stored in user_data
+        parent = context.user_data.pop('new_cat_parent', None)
+        doc = {"name": category_name, "created_by": user_id}
+        if parent:
+            # try to resolve parent's path if present
+            parent_doc = await db.categories.find_one({"name": parent})
+            parent_path = parent_doc.get('path') if parent_doc and parent_doc.get('path') else parent
+            doc['parent'] = parent
+            doc['path'] = f"{parent_path}/{category_name}"
+
+        result = await coll.insert_one(doc)
         logger.info(f"[CAT-INSERT-DONE] _id={result.inserted_id}")
         await update.message.reply_text(f"Category ‘{category_name}’ saved ✔")
         return ConversationHandler.END
