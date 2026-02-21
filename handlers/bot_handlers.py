@@ -89,16 +89,44 @@ async def delete_item(user_id, item_name, items_key, db):
 async def delete_category(user_id, category_name, db):
     """Delete a category and all its associated courses."""
     try:
-        result = await db.users.update_one(
-            {"user_id": user_id},
-            {"$pull": {"categories": category_name, "courses": {"category": category_name}}},
-        )
-        if result.modified_count > 0:
-            logger.info(f"Category '{category_name}' deleted successfully for user {user_id}.")
-            return True
+        # Prefer the shared `categories` collection when present (new schema).
+        if hasattr(db, 'categories') or 'categories' in getattr(db, '__dict__', {}):
+            # Recursively collect this category and all descendants
+            to_delete = set()
+            stack = [category_name]
+            while stack:
+                curr = stack.pop()
+                if curr in to_delete:
+                    continue
+                to_delete.add(curr)
+                children = await db['categories'].find({"parent": curr}).to_list(length=None)
+                for ch in children:
+                    name = ch.get('name')
+                    if name and name not in to_delete:
+                        stack.append(name)
+            if to_delete:
+                res = await db['categories'].delete_many({"name": {"$in": list(to_delete)}})
+                if getattr(res, 'deleted_count', 0) > 0:
+                    logger.info(f"Category '{category_name}' and its descendants deleted for user {user_id}.")
+                    return True
+                else:
+                    logger.warning(f"Category '{category_name}' not found in categories collection for user {user_id}.")
+                    return False
+            else:
+                logger.warning(f"Nothing to delete for category '{category_name}'.")
+                return False
         else:
-            logger.warning(f"Category '{category_name}' not found for user {user_id}.")
-            return False
+            # Fallback: legacy per-user schema stored in `users` collection
+            result = await db.users.update_one(
+                {"user_id": user_id},
+                {"$pull": {"categories": category_name, "courses": {"category": category_name}}},
+            )
+            if result.modified_count > 0:
+                logger.info(f"Category '{category_name}' deleted successfully for user {user_id}.")
+                return True
+            else:
+                logger.warning(f"Category '{category_name}' not found for user {user_id}.")
+                return False
     except Exception as e:
         logger.error(f"Error deleting category '{category_name}' for user {user_id}: {e}")
         return False
@@ -325,6 +353,47 @@ async def delete_item_start(update: Update, context: CallbackContext):
         "Choose the course you want to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    
+
+async def delete_category_start(update: Update, context: CallbackContext):
+    """Show top-level categories with delete buttons to trigger deletion."""
+    db = await get_db()
+    if db is None:
+        await update.message.reply_text("Error: Unable to connect to the database.")
+        return
+    try:
+        # By default this command lists ALL categories. Use /delete_parent to list only top-level parents.
+        cats = await db['categories'].find().to_list(length=None)
+        cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+        if not cats:
+            await update.message.reply_text("No categories available to delete.")
+            return
+        keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"delete_category_{urllib.parse.quote_plus(cat.get('name'))}")] for cat in cats]
+        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+        await update.message.reply_text("Choose a parent/top-level category to delete:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.exception("Error listing categories for deletion: %s", e)
+        await update.message.reply_text("An error occurred. Please try again later.")
+
+
+async def delete_parent_start(update: Update, context: CallbackContext):
+    """Show top-level parent categories for deletion."""
+    db = await get_db()
+    if db is None:
+        await update.message.reply_text("Error: Unable to connect to the database.")
+        return
+    try:
+        cats = await db['categories'].find({"parent": {"$exists": False}}).to_list(length=None)
+        cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+        if not cats:
+            await update.message.reply_text("No parent categories available to delete.")
+            return
+        keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"delete_category_{urllib.parse.quote_plus(cat.get('name'))}")] for cat in cats]
+        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+        await update.message.reply_text("Choose a parent category to delete:", reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.exception("Error listing parent categories for deletion: %s", e)
+        await update.message.reply_text("An error occurred. Please try again later.")
             
 async def delete_all_data_start(update: Update, context: CallbackContext):
     """Start the delete-all-data confirmation conversation."""
