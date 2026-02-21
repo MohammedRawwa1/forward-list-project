@@ -15,12 +15,14 @@ from handlers.base_handlers import (
     handle_category_name,
     handle_category_selection,
 )
-from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
+from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion, handle_delete_ref, handle_delete_confirm
 __all__ += [
     "handle_categories_pagination",
     "handle_back_to_cats",
     "handle_category_deletion",
     "handle_item_deletion",
+    "handle_delete_ref",
+    "handle_delete_confirm",
 ]
 # course-handlers
 from handlers.course_handlers import (
@@ -42,6 +44,8 @@ from handlers.bot_handlers import (
     generate_keyboard,
     delete_item,
     delete_category,
+    delete_category_start,
+    delete_parent_start,
     handle_course_deletion,
     handle_cancel_delete_callback,
     delete_item_start,
