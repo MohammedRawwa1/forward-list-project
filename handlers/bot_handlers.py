@@ -11,6 +11,7 @@ from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
 import difflib
+from handlers.base_handlers import safe_edit_message
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
     # Delete the course from the database
     db = await get_db()
     if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return
 
     try:
@@ -137,7 +138,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
             )
             logger.info("[DEL-COURSE] pull result=%s", getattr(result, 'raw_result', result))
             if result.modified_count > 0:
-                await query.edit_message_text(f"Course '{course_name}' deleted successfully from '{cat_name}'! 🎉")
+                await safe_edit_message(query, f"Course '{course_name}' deleted successfully from '{cat_name}'! 🎉", action_key=getattr(query, 'data', None))
             else:
                 # Log category document for debugging
                 category_doc = await db['categories'].find_one({"name": cat_name})
@@ -149,7 +150,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
                     close = difflib.get_close_matches(course_name, names, n=5, cutoff=0.6)
                     if close:
                         logger.info("[DEL-COURSE] close matches for '%s' in '%s': %s", course_name, cat_name, close)
-                await query.edit_message_text(f"Course '{course_name}' not found in category '{cat_name}'.")
+                await safe_edit_message(query, f"Course '{course_name}' not found in category '{cat_name}'.", action_key=getattr(query, 'data', None))
         else:
             # If category not provided, try to pull from any category that contains it
             result = await db['categories'].update_one(
@@ -158,7 +159,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
             )
             logger.info("[DEL-COURSE] pull-any result=%s", getattr(result, 'raw_result', result))
             if result.modified_count > 0:
-                await query.edit_message_text(f"Course '{course_name}' deleted successfully! 🎉")
+                await safe_edit_message(query, f"Course '{course_name}' deleted successfully! 🎉", action_key=getattr(query, 'data', None))
             else:
                 # dump categories containing similar names for debugging
                 cats = await db['categories'].find().to_list(length=None)
@@ -177,10 +178,10 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
                     logger.warning("[DEL-COURSE] no exact candidates; fuzzy close matches: %s", close)
                 else:
                     logger.info("[DEL-COURSE] exact candidates found (unexpected): %s", candidates)
-                await query.edit_message_text(f"Course '{course_name}' not found.")
+                await safe_edit_message(query, f"Course '{course_name}' not found.", action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error deleting course '{course_name}': {e}")
-        await query.edit_message_text("An error occurred while deleting the course. Please try again later.")
+            await safe_edit_message(query, "An error occurred while deleting the course. Please try again later.", action_key=getattr(query, 'data', None))
         
 # Generic function for handling item deletion confirmation
 async def handle_deletion_confirmation(update: Update, context: CallbackContext, item_type: str, item_name: str):
@@ -195,9 +196,9 @@ async def handle_deletion_confirmation(update: Update, context: CallbackContext,
         deleted = await delete_category(update.effective_user.id, item_name, db)
 
     if deleted:
-        await query.edit_message_text(f"{item_type.capitalize()} '{item_name}' deleted successfully! 🎉")
+        await safe_edit_message(query, f"{item_type.capitalize()} '{item_name}' deleted successfully! 🎉", action_key=getattr(query, 'data', None))
     else:
-        await query.edit_message_text(f"Could not find {item_type} '{item_name}'. 😔")
+        await safe_edit_message(query, f"Could not find {item_type} '{item_name}'. 😔", action_key=getattr(query, 'data', None))
         
 async def handle_deletion_selection(update: Update, context: CallbackContext, item_type: str, items_key: str):
     """General handler for deletion selection (courses, categories)."""
@@ -209,7 +210,7 @@ async def handle_deletion_selection(update: Update, context: CallbackContext, it
     try:
         user = await db.users.find_one({"user_id": user_id})
         if not user or not user.get(items_key):
-            await query.edit_message_text(f"You have no {item_type}s to delete.")
+            await safe_edit_message(query, f"You have no {item_type}s to delete.", action_key=getattr(query, 'data', None))
             return
 
         items = user[items_key]
@@ -219,17 +220,17 @@ async def handle_deletion_selection(update: Update, context: CallbackContext, it
         ]
 
         if not keyboard:
-            await query.edit_message_text(f"You have no {item_type}s to delete.")
+            await safe_edit_message(query, f"You have no {item_type}s to delete.", action_key=getattr(query, 'data', None))
             return
 
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(f"Select the {item_type} you want to delete:", reply_markup=reply_markup)
+        await safe_edit_message(query, f"Select the {item_type} you want to delete:", reply_markup=reply_markup, action_key=getattr(query, 'data', None))
 
     except Exception as e:
         logger.error(f"Error handling {item_type} deletion selection for user {user_id}: {e}", exc_info=True)
-        await query.edit_message_text(f"An error occurred while retrieving your {item_type}s for deletion.")
+        await safe_edit_message(query, f"An error occurred while retrieving your {item_type}s for deletion.", action_key=getattr(query, 'data', None))
 
 async def delete_all_data(user_id, db):
     """Delete all categories and courses for a user."""
@@ -263,7 +264,7 @@ async def delete_course_menu(update: Update, context: CallbackContext):
     # fetch category document and list its courses
     category_doc = await db.categories.find_one({"name": cat_name})
     if not category_doc or not category_doc.get('courses'):
-        await query.edit_message_text("Nothing to delete.")
+        await safe_edit_message(query, "Nothing to delete.", action_key=getattr(query, 'data', None))
         return
 
     courses = category_doc.get('courses', [])
@@ -274,14 +275,12 @@ async def delete_course_menu(update: Update, context: CallbackContext):
         for crs in courses
     ]
     keyboard.append([InlineKeyboardButton("Cancel", callback_data=f"category_{urllib.parse.quote_plus(cat_name)}")])
-    await query.edit_message_text(
-        "Choose the course you want to delete:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await safe_edit_message(query, "Choose the course you want to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
 async def delete_category_start(update: Update, context: CallbackContext):
     """Show inline buttons with *all* categories that exist in DB."""
     db = await get_db()
-    categories = await db.categories.find().distinct("name")          # ← real list
+    docs = await db.categories.find().sort("name", 1).to_list(length=None)
+    categories = [d.get('name') for d in docs]
     if not categories:
         await update.message.reply_text("You have no categories to delete.")
         return
@@ -303,7 +302,7 @@ async def handle_confirm_delete_callback(update: Update, context: CallbackContex
     await query.answer()
     data = query.data
     if not data.startswith("confirm_delete_"):
-        await query.edit_message_text("Invalid confirmation callback.")
+        await safe_edit_message(query, "Invalid confirmation callback.", action_key=getattr(query, 'data', None))
         return
     payload = data.replace("confirm_delete_", "", 1)
     # Expect format: {item_type}::{encoded_name}
@@ -313,7 +312,7 @@ async def handle_confirm_delete_callback(update: Update, context: CallbackContex
         item_name = urllib.parse.unquote_plus(enc_name)
         await handle_deletion_confirmation(update, context, item_type, item_name)
     else:
-        await query.edit_message_text("Invalid confirmation payload.")
+        await safe_edit_message(query, "Invalid confirmation payload.", action_key=getattr(query, 'data', None))
 
 
 async def handle_cancel_delete_callback(update: Update, context: CallbackContext):
@@ -323,19 +322,19 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
     data = query.data
     # simple cancel without args
     if data == "cancel_delete":
-        await query.edit_message_text("Deletion canceled.")
+        await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, 'data', None))
         return
     if not data.startswith("cancel_delete_"):
-        await query.edit_message_text("Invalid cancel callback.")
+        await safe_edit_message(query, "Invalid cancel callback.", action_key=getattr(query, 'data', None))
         return
     payload = data.replace("cancel_delete_", "", 1)
     parts = payload.split("::", 1)
-    if len(parts) == 2:
-        item_type, enc_name = parts
-        item_name = urllib.parse.unquote_plus(enc_name)
-        await query.edit_message_text(f"Deletion of {item_type} '{item_name}' canceled.")
+        if len(parts) == 2:
+            item_type, enc_name = parts
+            item_name = urllib.parse.unquote_plus(enc_name)
+            await safe_edit_message(query, f"Deletion of {item_type} '{item_name}' canceled.", action_key=getattr(query, 'data', None))
     else:
-        await query.edit_message_text("Deletion canceled.")
+        await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, 'data', None))
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
@@ -379,7 +378,7 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
         db = await get_db()  # Await the database connection
         if db is None:
             logger.error(f"Database connection failed for user {user_id}.")
-            await query.edit_message_text("Error: Unable to connect to the database. Please try again later.")
+            await safe_edit_message(query, "Error: Unable to connect to the database. Please try again later.", action_key=getattr(query, 'data', None))
             return ConversationHandler.END
 
         # Perform the deletion of categories (courses embedded inside will be removed)
@@ -387,13 +386,13 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
 
         if result.deleted_count > 0:
             logger.info(f"All categories deleted successfully for user {user_id}.")
-            await query.edit_message_text("All categories and their embedded courses have been deleted. 😞")
+            await safe_edit_message(query, "All categories and their embedded courses have been deleted. 😞", action_key=getattr(query, 'data', None))
         else:
             logger.warning(f"No categories found to delete for user {user_id}.")
-            await query.edit_message_text("No categories found to delete. 😞")
+            await safe_edit_message(query, "No categories found to delete. 😞", action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error confirming delete all data for user {user_id}: {e}", exc_info=True)
-        await query.edit_message_text("An error occurred while deleting all data. Please try again later.")
+        await safe_edit_message(query, "An error occurred while deleting all data. Please try again later.", action_key=getattr(query, 'data', None))
     
     return ConversationHandler.END
     
@@ -401,7 +400,7 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
 async def cancel_delete_all_data(update: Update, context: CallbackContext) -> int:
     """Cancel the deletion of all user data."""
     await update.callback_query.answer()
-    await update.callback_query.edit_message_text("Deletion of all data has been canceled.")
+    await safe_edit_message(update.callback_query, "Deletion of all data has been canceled.", action_key=getattr(update.callback_query, 'data', None))
     return ConversationHandler.END
 
 async def initiate_delete_item(update: Update, context: CallbackContext, item_type: str, item_name: str):
@@ -420,4 +419,4 @@ async def initiate_delete_item(update: Update, context: CallbackContext, item_ty
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Edit the message to prompt for confirmation
-    await query.edit_message_text(confirmation_message, reply_markup=reply_markup)
+    await safe_edit_message(query, confirmation_message, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
