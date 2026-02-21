@@ -117,10 +117,27 @@ async def add_course_link(update: Update, context: CallbackContext):
 
         # If a parent was selected, save into that parent category
         if parent is not None:
-            update_result = await categories_coll.update_one(
-                {"name": parent},
-                {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link, "coach": coach}}}
-            )
+            # If a coach was selected and there exists a child category for that coach,
+            # save the course inside that child (coach) category document. Otherwise
+            # save into the parent and tag with the coach field.
+            if coach:
+                child_doc = await db['categories'].find_one({"name": coach, "parent": parent})
+                if child_doc:
+                    update_result = await categories_coll.update_one(
+                        {"name": coach, "parent": parent},
+                        {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link}}}
+                    )
+                    logger.info("[ADD-COURSE] saved to child coach=%s under parent=%s result=%s", coach, parent, getattr(update_result, 'raw_result', update_result))
+                else:
+                    update_result = await categories_coll.update_one(
+                        {"name": parent},
+                        {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link, "coach": coach}}}
+                    )
+            else:
+                update_result = await categories_coll.update_one(
+                    {"name": parent},
+                    {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link}}}
+                )
             logger.info("[ADD-COURSE] saved to parent=%s result=%s", parent, getattr(update_result, 'raw_result', update_result))
             if update_result.modified_count == 0:
                 await update.message.reply_text(f"Error: Parent category '{parent}' not found. Create it first.")
