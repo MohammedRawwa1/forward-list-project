@@ -117,7 +117,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("cancel", cancel))
-        application.add_handler(CommandHandler("create_parent", create_parent))
+    application.add_handler(CommandHandler("create_parent", create_parent))
 
     # ---------- callbacks ----------
     # `del_menu_` callback handler not present; skip registration.
