@@ -6,6 +6,7 @@ from pymongo.errors import PyMongoError
 import logging
 import re
 import urllib.parse
+from handlers.base_handlers import safe_edit_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -98,13 +99,13 @@ async def category_selected(update: Update, context: CallbackContext):
     course_link = context.user_data.get('course_link')
 
     if not course_name or not course_link:
-        await query.edit_message_text("Error: Course data is missing. Please try again.")
+        await safe_edit_message(query, "Error: Course data is missing. Please try again.", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
 
     # Connect to the database
     db = await get_db()
     if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
 
     try:
@@ -120,19 +121,20 @@ async def category_selected(update: Update, context: CallbackContext):
         if update_result.modified_count == 0:
             # Category not found
             logger.warning("[ADD-COURSE] Category not found: %s", category_name)
-            await query.edit_message_text(f"Error: Category '{category_name}' not found. Create it first.")
+            await safe_edit_message(query, f"Error: Category '{category_name}' not found. Create it first.", action_key=getattr(query, 'data', None))
             return ConversationHandler.END
 
         # Send a confirmation message
-        await query.edit_message_text(
+        msg = (
             f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉\n"
             f"Course Link: {course_link}"
         )
+        await safe_edit_message(query, msg, action_key=getattr(query, 'data', None))
         return ConversationHandler.END
 
     except Exception as e:
         logger.error(f"Error saving course: {e}")
-        await query.edit_message_text("An error occurred while saving the course. Please try again later.")
+        await safe_edit_message(query, "An error occurred while saving the course. Please try again later.", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
         
 async def add_course_category(update: Update, context: CallbackContext):
@@ -147,7 +149,7 @@ async def add_course_category(update: Update, context: CallbackContext):
 
     db = await get_db()  # Await the database connection
     if db is None:
-        await query.edit_message_text("Error: Unable to connect to the database.")
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
 
     try:
@@ -159,14 +161,14 @@ async def add_course_category(update: Update, context: CallbackContext):
         )
         logger.info("[ADD-COURSE-alt] update_result=%s", getattr(upd, 'raw_result', upd))
         if upd.modified_count == 0:
-            await query.edit_message_text(f"Error: Category '{category_name}' not found. Create it first.")
+            await safe_edit_message(query, f"Error: Category '{category_name}' not found. Create it first.", action_key=getattr(query, 'data', None))
             return ConversationHandler.END
 
-        await query.edit_message_text(f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉")
+        await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
     except PyMongoError as e:
         logger.error(f"Error adding course: {e}")
-        await query.edit_message_text("An error occurred while adding the course. Please try again later.")
+        await safe_edit_message(query, "An error occurred while adding the course. Please try again later.", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
 
 async def cancel(update: Update, context: CallbackContext) -> int:
@@ -201,7 +203,7 @@ async def error_handler(update, context):
             except Exception:
                 pass
             try:
-                await cq.edit_message_text("An unexpected error occurred. Please try again later.")
+                await safe_edit_message(cq, "An unexpected error occurred. Please try again later.", action_key=getattr(cq, 'data', None))
             except Exception:
                 pass
     except Exception:
