@@ -326,6 +326,22 @@ async def delete_item_start(update: Update, context: CallbackContext):
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
             
+async def delete_all_data_start(update: Update, context: CallbackContext):
+    """Start the delete-all-data confirmation conversation."""
+    # Prompt user with confirmation buttons; ConversationHandler expects DELETE_ALL state
+    keyboard = [
+        [InlineKeyboardButton("Yes, delete all", callback_data="confirm_delete_all")],
+        [InlineKeyboardButton("No, cancel", callback_data="cancel_delete_all")],
+    ]
+    await update.message.reply_text(
+        "Are you sure you want to delete ALL categories and courses? This cannot be undone.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    try:
+        from conversation_states import DELETE_ALL
+        return DELETE_ALL
+    except Exception:
+        return None
 # Handle confirmation of deleting all data
 async def confirm_delete_all(update: Update, context: CallbackContext):
     """Confirm and delete all categories and courses."""
