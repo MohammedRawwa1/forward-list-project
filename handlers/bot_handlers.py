@@ -181,7 +181,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
                 await safe_edit_message(query, f"Course '{course_name}' not found.", action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error deleting course '{course_name}': {e}")
-            await safe_edit_message(query, "An error occurred while deleting the course. Please try again later.", action_key=getattr(query, 'data', None))
+        await safe_edit_message(query, "An error occurred while deleting the course. Please try again later.", action_key=getattr(query, 'data', None))
         
 # Generic function for handling item deletion confirmation
 async def handle_deletion_confirmation(update: Update, context: CallbackContext, item_type: str, item_name: str):
