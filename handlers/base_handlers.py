@@ -1,7 +1,7 @@
 from telegram.ext import CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import logging
-from conversation_states import CREATE_CAT_NAME
+from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT
 from handlers.db_connection import get_db  # Importing get_db from db_connection.py
 from database.mongo_handler import MongoDB  # Import MongoDB
 import re  # For URL validation
@@ -522,16 +522,18 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
     # Prepend breadcrumb buttons row (Home and optional category)
     try:
-        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
-        if category:
-            # category may be a name or path; use showcat:: which resolves both
-            breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
-        # insert at top
-        keyboard.insert(0, breadcrumb_buttons)
+        # Don't show parent/home breadcrumb for global course listings
+        if origin_type != 'global':
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+            if category:
+                # category may be a name or path; use showcat:: which resolves both
+                breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
+            # insert at top
+            keyboard.insert(0, breadcrumb_buttons)
 
-        # prepend breadcrumb text for visual context
-        bc = " / ".join(breadcrumb)
-        text = f"{bc}\n\n{text}"
+            # prepend breadcrumb text for visual context
+            bc = " / ".join(breadcrumb)
+            text = f"{bc}\n\n{text}"
     except Exception:
         pass
 
