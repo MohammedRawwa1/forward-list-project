@@ -40,19 +40,13 @@ from handlers.bot_handlers import (
     generate_pagination_keyboard,
     generate_keyboard,
     delete_item,
+    delete_category,
     handle_course_deletion,
-    handle_deletion_confirmation,
-    handle_deletion_selection,
-    delete_all_data,
-    delete_all_data_start,
+    handle_cancel_delete_callback,
     delete_item_start,
-    delete_category_start,
     confirm_delete_all,
     cancel_delete_all_data,
     initiate_delete_item,
-    delete_course_menu,
-    handle_confirm_delete_callback,
-    handle_cancel_delete_callback,
 )
 
 from conversation_states import (
@@ -111,13 +105,13 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
     application.add_handler(CommandHandler("categories", list_categories))
-    application.add_handler(CommandHandler("delete_category", delete_category_start))
+    # Note: `delete_category_start` not present; command removed until handler is added.
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
     application.add_handler(CommandHandler("cancel", cancel))
 
     # ---------- callbacks ----------
-    application.add_handler(CallbackQueryHandler(delete_course_menu, pattern="^del_menu_"))
+    # `del_menu_` callback handler not present; skip registration.
     application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
     application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
     application.add_handler(CallbackQueryHandler(handle_categories_pagination, pattern=r"^categories_(prev|next)_\d+$"))
@@ -128,7 +122,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course::"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_ref::"))
     # confirm/cancel per-item handlers
-    application.add_handler(CallbackQueryHandler(handle_confirm_delete_callback, pattern=r"^confirm_delete"))
+    # Per-item confirm handler not implemented; keep cancel handler which exists
     application.add_handler(CallbackQueryHandler(handle_cancel_delete_callback, pattern=r"^cancel_delete"))
     application.add_handler(CallbackQueryHandler(handle_back_to_cats, pattern=r"^back_to_cats$"))
     application.add_handler(CallbackQueryHandler(handle_course_deletion, pattern=r"^delete_course_"))
