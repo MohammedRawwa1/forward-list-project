@@ -469,6 +469,51 @@ logger = logging.getLogger(__name__)
 MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
 PAGE_SIZE = 10  # Default number of items per page for pagination
 
+
+def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None):
+    """Builds the text and InlineKeyboardMarkup for a courses page.
+
+    Returns (text, InlineKeyboardMarkup) or (None, None) when no items.
+    """
+    if not all_courses:
+        return None, None
+    page_size = PAGE_SIZE
+    start = (page - 1) * page_size
+    display = all_courses[start:start + page_size]
+    if not display:
+        return None, None
+
+    if origin_type == 'category' and category:
+        text = f"Courses in category '{category}' (page {page}):"
+    else:
+        text = f"Here are the available courses (page {page}):"
+
+    keyboard = []
+    for c in display:
+        keyboard.append([
+            InlineKeyboardButton(c['name'], url=c.get('link')),
+            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], origin_type, page))
+        ])
+
+    # Back (only on pages > 1)
+    if page > 1:
+        if origin_type == 'category' and category:
+            back_cb = f"courses::{urllib.parse.quote_plus(category)}::1"
+        else:
+            back_cb = "courses::1"
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
+
+    # Pagination
+    pagination_buttons = []
+    if start > 0:
+        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page-1}"))
+    if len(all_courses) > start + page_size:
+        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page+1}"))
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
+
+    return text, InlineKeyboardMarkup(keyboard)
+
 # Input Validation for Category Name
 def validate_category_name(category_name: str):
     """Validates the category name."""
@@ -586,32 +631,16 @@ async def list_courses(update: Update, context: CallbackContext):
             for crs in cat.get('courses', []):
                 all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
 
+        # Sort all courses case-insensitively A→Z for deterministic ordering
+        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+
         if all_courses:
-            start = (page - 1) * page_size
-            display = all_courses[start:start + page_size]
-
-            course_list_text = "\n".join([f"📚 {c['name']}" for c in display])
-            keyboard = [
-                [
-                    InlineKeyboardButton(c['name'], url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], 'global', page))
-                ]
-                for c in display
-            ]
-            # Always return to the global courses list (page 1)
-            back_cb = "courses::1"
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
-
-            pagination_buttons = []
-            if start > 0:
-                pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}"))
-            if len(all_courses) > start + page_size:
-                pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}"))
-            if pagination_buttons:
-                keyboard.append(pagination_buttons)
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(f"Here are the available courses (page {page}):", reply_markup=reply_markup)
+            # Build unified page UI
+            text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global')
+            if not text:
+                await update.message.reply_text("No courses available.")
+                return
+            await update.message.reply_text(text, reply_markup=reply_markup)
         else:
             await update.message.reply_text("No courses available.")
     except Exception as e:
@@ -930,28 +959,11 @@ async def courses_callback(update: Update, context: CallbackContext):
                 # Sort all courses case-insensitively A→Z to provide deterministic ordering
                 all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
 
-                page_size = PAGE_SIZE
-                start = (page - 1) * page_size
-                display = all_courses[start:start + page_size]
-                if not display:
+                text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global')
+                if not text:
                     await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                     return
-                keyboard = [
-                    [
-                        InlineKeyboardButton(c['name'], url=c.get('link')),
-                        InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(c['category'], c['name'], 'global', page))
-                    ]
-                    for c in display
-                ]
-                pagination = []
-                if start > 0:
-                    pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}"))
-                if len(all_courses) > start + page_size:
-                    pagination.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}"))
-                if pagination:
-                    keyboard.append(pagination)
-
-                await safe_edit_message(query, text=f"All courses (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+                await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                 return
 
             # category + page
@@ -968,31 +980,14 @@ async def courses_callback(update: Update, context: CallbackContext):
                 return
 
             page_size = PAGE_SIZE
-            start = (page - 1) * page_size
+            # Ensure deterministic ordering then build UI via shared helper
             courses = category_doc.get('courses', [])
-            # Ensure deterministic, case-insensitive A→Z ordering for category pages
             courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-            display = courses[start:start + page_size]
-            if not display:
+            text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category)
+            if not text:
                 await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                 return
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(c['name'], url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category, c['name'], 'category', page))
-                ]
-                for c in display
-            ]
-            pagination = []
-            if start > 0:
-                pagination.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{urllib.parse.quote_plus(category)}::{page-1}"))
-            if len(courses) > start + page_size:
-                pagination.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category)}::{page+1}"))
-            if pagination:
-                keyboard.append(pagination)
-
-            await safe_edit_message(query, text=f"Courses in category '{category}' (page {page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+            await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
             return
 
         # legacy underscore format removed. Only `courses::` callbacks are supported.
