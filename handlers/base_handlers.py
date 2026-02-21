@@ -522,27 +522,30 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     except Exception:
         total_pages = page
 
-    # Prepare breadcrumb/home row; when not a global listing we'll show
-    # a Home button and, when there are multiple pages and we're not on
-    # the last page, an End button beside Home.
+    # Prepare breadcrumb/home row: always show Home; when there are
+    # multiple pages and we're not on the last page, show an End button
+    # beside Home. If `category` is provided, include it as a breadcrumb
+    # button as well for context.
     try:
-        if origin_type != 'global':
-            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
-            if total_pages > 1 and page < total_pages:
-                # build end callback depending on origin type
-                if origin_type == 'category' and category:
-                    end_cb = f"courses::{urllib.parse.quote_plus(category)}::{total_pages}"
-                else:
-                    end_cb = f"courses::{total_pages}"
-                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
-            if category:
-                breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
-            # insert at top
-            keyboard.insert(0, breadcrumb_buttons)
+        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+        if total_pages > 1 and page < total_pages:
+            # build end callback depending on origin type
+            if origin_type == 'category' and category:
+                end_cb = f"courses::{urllib.parse.quote_plus(category)}::{total_pages}"
+            else:
+                end_cb = f"courses::{total_pages}"
+            breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
+        if category:
+            breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
+        # insert at top
+        keyboard.insert(0, breadcrumb_buttons)
 
-            # prepend breadcrumb text for visual context
+        # prepend breadcrumb text for visual context when available
+        try:
             bc = " / ".join(breadcrumb)
             text = f"{bc}\n\n{text}"
+        except Exception:
+            pass
     except Exception:
         pass
 
