@@ -507,20 +507,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
             InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(course_cat, c['name'], origin_type, page))
         ])
 
-    # Home / Back (only on pages > 1)
-    if page > 1:
-        if origin_type == 'category' and category:
-            back_text = "🔙 Back"
-            back_cb = f"courses::{urllib.parse.quote_plus(category)}::1"
-        else:
-            back_text = "🏠 Home"
-            back_cb = "courses::1"
-        # Build breadcrumb/home row and optionally include an "End" button
-        # which jumps to the last page when multiple pages exist.
-        # We'll compute total_pages below and, if needed, add the End button.
-        keyboard.append([InlineKeyboardButton(back_text, callback_data=back_cb)])
-
-    # Pagination
+    # Pagination controls (Previous / Next)
     pagination_buttons = []
     if start > 0:
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page-1}"))
@@ -529,39 +516,26 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if pagination_buttons:
         keyboard.append(pagination_buttons)
 
-    # Add an "End" button which jumps to the last page when there are
-    # more pages than the current one. Compute total pages from the
-    # full list length and page size.
+    # Compute total pages for End button placement
     try:
         total_pages = math.ceil(len(all_courses) / page_size)
     except Exception:
         total_pages = page
 
-    if total_pages > 1 and page < total_pages:
-        if origin_type == 'category' and category:
-            end_cb = f"courses::{urllib.parse.quote_plus(category)}::{total_pages}"
-        else:
-            end_cb = f"courses::{total_pages}"
-        # Place End button near the top if breadcrumb/home row exists,
-        # otherwise add it as its own row below pagination.
-        if page > 1:
-            # try to append End to the last inserted breadcrumb/home row
-            try:
-                # last breadcrumb is at index 0 when inserted earlier
-                if keyboard:
-                    keyboard[0].append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
-            except Exception:
-                keyboard.append([InlineKeyboardButton("⏭️ End", callback_data=end_cb)])
-        else:
-            keyboard.append([InlineKeyboardButton("⏭️ End", callback_data=end_cb)])
-
-    # Prepend breadcrumb buttons row (Home and optional category)
+    # Prepare breadcrumb/home row; when not a global listing we'll show
+    # a Home button and, when there are multiple pages and we're not on
+    # the last page, an End button beside Home.
     try:
-        # Don't show parent/home breadcrumb for global course listings
         if origin_type != 'global':
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+            if total_pages > 1 and page < total_pages:
+                # build end callback depending on origin type
+                if origin_type == 'category' and category:
+                    end_cb = f"courses::{urllib.parse.quote_plus(category)}::{total_pages}"
+                else:
+                    end_cb = f"courses::{total_pages}"
+                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
             if category:
-                # category may be a name or path; use showcat:: which resolves both
                 breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
             # insert at top
             keyboard.insert(0, breadcrumb_buttons)
@@ -571,6 +545,8 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
             text = f"{bc}\n\n{text}"
     except Exception:
         pass
+
+    # (Breadcrumb row inserted above with Home/End when applicable)
 
     return text, InlineKeyboardMarkup(keyboard)
 
@@ -1068,6 +1044,21 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page+1}"))
         if pagination_buttons:
             keyboard.append(pagination_buttons)
+        # Compute total pages and add breadcrumb row with Home and End when applicable
+        try:
+            total_pages = math.ceil(len(courses) / page_size)
+        except Exception:
+            total_pages = page
+
+        try:
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+            if total_pages > 1 and page < total_pages:
+                end_cb = f"courses::{urllib.parse.quote_plus(category_name)}::{total_pages}"
+                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
+            breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}"))
+            keyboard.insert(0, breadcrumb_buttons)
+        except Exception:
+            pass
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):", reply_markup=reply_markup)
@@ -1083,9 +1074,10 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
     await query.answer()
 
     # Extract the action and page number from the callback data
-    data = query.data.split('_')
-    action = data[1]  # "prev" or "next"
-    page = int(data[2])  # Page number
+    # For this deployment we prefer a full (non-paginated) categories list.
+    # Redirect to the full `list_categories` view instead of DB-side pagination.
+    await list_categories(update, context)
+    return
 
     db = await get_db()
     if db is None:
