@@ -8,6 +8,7 @@ from handlers.base_handlers import (
     get_courses_by_category,
     courses_callback,
     handle_categories_pagination,
+    showtype_handler,
     showcat_handler,
     handle_back_to_cats,
     handle_course_selection,
@@ -69,3 +70,4 @@ from conversation_states import (
 # ----------  new helpers  ----------
 from handlers.base_handlers import showcat_handler
 __all__ += ["showcat_handler"]
+
