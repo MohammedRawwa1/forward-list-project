@@ -11,6 +11,7 @@ from telegram.ext import (
 from handlers.base_handlers import (
     help,
     list_courses,
+    list_coaches,
     list_categories,
     create_category,
     get_courses_by_category,
@@ -86,6 +87,7 @@ def is_valid_category_name(category_name: str):
 
 
 # ---------- application factory ----------
+        application.add_handler(CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::"))
 async def create_application():
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:
@@ -105,6 +107,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
+    application.add_handler(CommandHandler("coaches", list_coaches))
     application.add_handler(CommandHandler("categories", list_categories))
     # Note: `delete_category_start` not present; command removed until handler is added.
     application.add_handler(CommandHandler("addthumb", add_thumb))
@@ -119,6 +122,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses::"))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
     application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category::"))
+    application.add_handler(CallbackQueryHandler(show_coach_handler, pattern=r"^coach_"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course::"))
     application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_ref::"))
