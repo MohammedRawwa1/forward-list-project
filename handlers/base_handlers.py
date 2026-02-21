@@ -1105,7 +1105,8 @@ async def create_category(update: Update, context: CallbackContext):
     db = await get_db()
     cats = []
     try:
-        cats = await db.categories.find().sort("name", 1).to_list(length=None)
+        # Show only top-level parent categories for parent selection
+        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).to_list(length=None)
     except Exception:
         cats = []
 
@@ -1131,6 +1132,23 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
         prompt = "Enter the new top-level category name:"
     # Ask for the name via a simple text prompt
     await query.message.reply_text(prompt)
+    return CREATE_CAT_NAME
+
+
+async def handle_create_category_parent_text(update: Update, context: CallbackContext):
+    """Allow users to type a parent category name instead of pressing a button.
+
+    Stores chosen parent in `context.user_data['new_cat_parent']` and prompts
+    for the new category name (same as the callback-based flow).
+    """
+    parent = update.message.text.strip() or None
+    if parent:
+        context.user_data['new_cat_parent'] = parent
+        prompt = f"Enter the new category name (parent: {parent}):"
+    else:
+        context.user_data['new_cat_parent'] = None
+        prompt = "Enter the new top-level category name:"
+    await update.message.reply_text(prompt)
     return CREATE_CAT_NAME
 
 
