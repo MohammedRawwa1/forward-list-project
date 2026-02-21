@@ -14,6 +14,7 @@ from handlers.base_handlers import (
     list_coaches,
     list_categories,
     create_category,
+    handle_create_category_parent,
     get_courses_by_category,
     courses_callback,
     handle_categories_pagination,
@@ -58,6 +59,7 @@ from conversation_states import (
     ADD_LINK,
     ADD_CATEGORY,
     CREATE_CAT_NAME,
+    CREATE_CAT_PARENT,
     DELETE_ALL,
     CONFIRM_DELETE,
     CANCEL_DELETE,
@@ -108,7 +110,6 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
-    application.add_handler(CommandHandler("coaches", list_coaches))
     application.add_handler(CommandHandler("categories", list_categories))
     # Note: `delete_category_start` not present; command removed until handler is added.
     application.add_handler(CommandHandler("addthumb", add_thumb))
@@ -140,6 +141,12 @@ async def setup_handlers(application: Application):
     )
     application.add_handler(
         CallbackQueryHandler(show_coach_handler, pattern=r"^coach_")
+    )
+    application.add_handler(
+        CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(showtype_handler, pattern=r"^showtype::")
     )
     application.add_handler(
         CallbackQueryHandler(handle_course_selection, pattern=r"^course_")
@@ -181,12 +188,15 @@ async def setup_handlers(application: Application):
         ConversationHandler(
             entry_points=[CommandHandler("create_category", create_category)],
             states={
+                CREATE_CAT_PARENT: [
+                    CallbackQueryHandler(handle_create_category_parent, pattern=r"^createcat_parent::")
+                ],
                 CREATE_CAT_NAME: [
                     MessageHandler(
                         filters.TEXT & ~filters.COMMAND,
                         handle_category_name,
                     )
-                ]
+                ],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
         )
@@ -237,7 +247,7 @@ async def setup_handlers(application: Application):
         )
     )
     application.add_handler(
-        CallbackQueryHandler(showcat_handler, pattern=r"^showcat_")
+        CallbackQueryHandler(showcat_handler, pattern=r"^showcat::")
     )
 
     # ---------- thumbnails ----------
