@@ -515,6 +515,9 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         else:
             back_text = "🏠 Home"
             back_cb = "courses::1"
+        # Build breadcrumb/home row and optionally include an "End" button
+        # which jumps to the last page when multiple pages exist.
+        # We'll compute total_pages below and, if needed, add the End button.
         keyboard.append([InlineKeyboardButton(back_text, callback_data=back_cb)])
 
     # Pagination
@@ -525,6 +528,32 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page+1}"))
     if pagination_buttons:
         keyboard.append(pagination_buttons)
+
+    # Add an "End" button which jumps to the last page when there are
+    # more pages than the current one. Compute total pages from the
+    # full list length and page size.
+    try:
+        total_pages = math.ceil(len(all_courses) / page_size)
+    except Exception:
+        total_pages = page
+
+    if total_pages > 1 and page < total_pages:
+        if origin_type == 'category' and category:
+            end_cb = f"courses::{urllib.parse.quote_plus(category)}::{total_pages}"
+        else:
+            end_cb = f"courses::{total_pages}"
+        # Place End button near the top if breadcrumb/home row exists,
+        # otherwise add it as its own row below pagination.
+        if page > 1:
+            # try to append End to the last inserted breadcrumb/home row
+            try:
+                # last breadcrumb is at index 0 when inserted earlier
+                if keyboard:
+                    keyboard[0].append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
+            except Exception:
+                keyboard.append([InlineKeyboardButton("⏭️ End", callback_data=end_cb)])
+        else:
+            keyboard.append([InlineKeyboardButton("⏭️ End", callback_data=end_cb)])
 
     # Prepend breadcrumb buttons row (Home and optional category)
     try:
@@ -936,7 +965,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         ]
         for crs in courses
     ]
-    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(cat_name)}")])
+    # Delete is only available from the course Details view.
     # Back to parent if available, otherwise top-level categories
     parent = category_doc.get('parent')
     if parent:
@@ -1262,7 +1291,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         [InlineKeyboardButton(crs["name"], url=crs["link"])]
         for crs in courses
     ]
-    keyboard.append([InlineKeyboardButton("🗑 Delete a course", callback_data=f"del_menu_{urllib.parse.quote_plus(category_doc.get('name'))}")])
+    # Delete is only available from the course Details view.
     parent = category_doc.get('parent')
     if parent:
         pdoc = await db.categories.find_one({"name": parent})
