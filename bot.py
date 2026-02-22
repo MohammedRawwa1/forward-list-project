@@ -48,7 +48,6 @@ from handlers.bot_handlers import (
     generate_keyboard,
     delete_item,
     delete_category,
-    delete_parent_start,
     delete_category_start,
     handle_course_deletion,
     handle_cancel_delete_callback,
