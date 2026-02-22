@@ -61,7 +61,6 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
     except Exception:
         # Environment may not support creating background tasks; ignore.
         pass
-                            return None
 def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int, origin_context: str = None) -> str:
     # Compute a concrete back callback so details can always return to the
     # exact originating UI (category/coach/global) without guessing.
