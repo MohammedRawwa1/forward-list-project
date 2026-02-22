@@ -334,7 +334,16 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     """Cancel the current operation."""
     try:
         if getattr(update, 'message', None) is not None:
-            await update.message.reply_text("Operation canceled.")
+            # If the user issued /cancel as a reply to a bot message (e.g., an inline confirm),
+            # prefer editing that message to remove buttons and show the cancellation.
+            reply_to = getattr(update.message, 'reply_to_message', None)
+            if reply_to is not None and getattr(reply_to, 'message_id', None) is not None:
+                try:
+                    await reply_to.edit_text("Operation canceled.")
+                except Exception:
+                    await update.message.reply_text("Operation canceled.")
+            else:
+                await update.message.reply_text("Operation canceled.")
         elif getattr(update, 'callback_query', None) is not None:
             cq = update.callback_query
             try:
