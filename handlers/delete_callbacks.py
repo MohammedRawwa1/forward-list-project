@@ -101,25 +101,10 @@ async def handle_delete_ref(update: Update, context: CallbackContext):
     except Exception:
         db = None
 
-    buttons = []
-    # Delete course option
-    buttons.append(InlineKeyboardButton("🗑️ Delete course", callback_data=f"delete_confirm::course::{key}"))
-    # Delete category option (if category present)
-    if cat:
-        buttons.append(InlineKeyboardButton("🗑️ Delete category", callback_data=f"delete_summary::category::{key}"))
-        # Determine if category has a parent so we can offer parent deletion
-        parent_name = None
-        try:
-            if db is not None:
-                cat_doc = await db['categories'].find_one({"name": cat})
-                parent_name = cat_doc.get('parent') if cat_doc else None
-        except Exception:
-            parent_name = None
-        if parent_name:
-            buttons.append(InlineKeyboardButton("🗑️ Delete parent (and children)", callback_data=f"delete_summary::parent::{key}"))
-
-    # Add cancel button
-    buttons.append(InlineKeyboardButton("Cancel", callback_data=f"cancel_delete::{key}"))
+    # Only offer deleting the single course from Details view. Other destructive
+    # actions (category/parent) are available through separate admin commands.
+    buttons = [InlineKeyboardButton("🗑️ Delete course", callback_data=f"delete_confirm::course::{key}"),
+               InlineKeyboardButton("Cancel", callback_data=f"cancel_delete::{key}")]
 
     # Layout: two columns where sensible
     kb = []
@@ -337,7 +322,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             msg = (
                 f"You are about to delete category '{cat}' and {cat_count - 1 if cat_count>0 else 0} descendant categories,\n"
                 f"removing {course_count} course(s) in total.\n\n"
-                f"Affected categories (showing {len(preview)}):\n{preview_lines}"
+                f"Affected categories (showing {len(preview_entries)}):\n{preview_lines}"
                 + (f"\n... and {remaining} more" if remaining else "")
                 + "\n\nProceed?"
             )
@@ -408,7 +393,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             msg = (
                 f"You are about to delete parent '{parent_name}' and {cat_count - 1 if cat_count>0 else 0} descendant categories,\n"
                 f"removing {course_count} course(s) in total.\n\n"
-                f"Affected categories (showing {len(preview)}):\n{preview_lines}"
+                f"Affected categories (showing {len(preview_entries)}):\n{preview_lines}"
                 + (f"\n... and {remaining} more" if remaining else "")
                 + "\n\nProceed?"
             )
