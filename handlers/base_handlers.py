@@ -54,7 +54,7 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
             except Exception:
                 pass
         except Exception:
-            logger.exception("Error in schedule_close_inline_message worker")
+            logger.error("Error in schedule_close_inline_message worker")
 
     try:
         asyncio.create_task(_worker())
@@ -94,7 +94,7 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
 
             return
     except Exception:
-        logger.exception("Failed to persist callback payload to Redis")
+        logger.error("Failed to persist callback payload to Redis")
 
     # Fallback to MongoDB
     try:
@@ -110,7 +110,7 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
             pass
         await db.callback_refs.update_one({"_id": key}, {"$set": {"payload": payload, "expireAt": expire_at}}, upsert=True)
     except Exception:
-        logger.exception("Failed to persist callback payload to MongoDB")
+        logger.error("Failed to persist callback payload to MongoDB")
 
 
 async def _resolve_callback_payload(key: str):
@@ -133,7 +133,7 @@ async def _resolve_callback_payload(key: str):
                 CALLBACK_MAP[key] = payload
                 return payload
     except Exception:
-        logger.exception("Failed to read callback payload from Redis")
+        logger.error("Failed to read callback payload from Redis")
 
     # MongoDB fallback
     try:
@@ -147,7 +147,7 @@ async def _resolve_callback_payload(key: str):
                 CALLBACK_MAP[key] = payload
                 return payload
     except Exception:
-        logger.exception("Failed to read callback payload from MongoDB")
+        logger.error("Failed to read callback payload from MongoDB")
 
     return None
 
@@ -306,7 +306,7 @@ def _schedule_retry(query, text, reply_markup=None, action_key=None, delay=1, ma
                 logger.warning("RetryAfter while retrying; will retry in %s seconds", wait)
                 continue
             except Exception as e:
-                logger.exception("Retry loop error: %s", e)
+                logger.error("Retry loop error: %s", e)
                 break
         # cleanup
         _RETRY_QUEUE.pop(key, None)
@@ -367,7 +367,7 @@ async def _redis_schedule_retry(chat_id, message_id, text, reply_markup, execute
         except Exception:
             pass
     except Exception:
-        logger.exception("Failed to schedule retry in Redis")
+        logger.error("Failed to schedule retry in Redis")
 
 async def schedule_retry_via_redis_or_local(query, text, reply_markup=None, delay=1):
     # Try Redis-based scheduling first
@@ -379,7 +379,7 @@ async def schedule_retry_via_redis_or_local(query, text, reply_markup=None, dela
             await _redis_schedule_retry(chat_id, message_id, text, reply_markup, when)
             return
     except Exception:
-        logger.exception("schedule_retry_via_redis_or_local failed")
+        logger.error("schedule_retry_via_redis_or_local failed")
     # Fallback: use in-process scheduler
     _schedule_retry(query, text, reply_markup=reply_markup, delay=delay)
 
@@ -412,9 +412,9 @@ async def _process_redis_retry_item(application, raw_member: str):
                 await _redis.incr('metrics:retry_failed')
             except Exception:
                 pass
-            logger.exception("Retry execution failed for payload %s", payload)
+            logger.error("Retry execution failed for payload %s", payload)
     except Exception:
-        logger.exception("Failed to process redis retry item: %s", raw_member)
+        logger.error("Failed to process redis retry item: %s", raw_member)
 
 
 async def start_redis_retry_worker(application):
@@ -442,7 +442,7 @@ async def start_redis_retry_worker(application):
                         await _process_redis_retry_item(application, raw)
                 await asyncio.sleep(0)
             except Exception:
-                logger.exception("Redis retry worker encountered an error")
+                logger.error("Redis retry worker encountered an error")
                 await asyncio.sleep(2)
 
     asyncio.create_task(_worker())
@@ -500,7 +500,7 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
         if isinstance(e, BadRequest) and ("Message is not modified" in msg or "message is not modified" in msg):
             logger.debug("Edit skipped: message not modified")
             return True
-        logger.exception("Error editing message: %s", e)
+        logger.error("Error editing message: %s", e)
         try:
             await query.message.reply_text(text)
         except Exception:
@@ -523,10 +523,10 @@ async def safe_answer(query, text: str = None):
             logger.debug("Ignoring expired callback query: %s", m)
             return False
         # If it's a different BadRequest, re-raise so callers can handle/log as needed
-        logger.exception("BadRequest when answering callback: %s", e)
+        logger.error("BadRequest when answering callback: %s", e)
         return False
     except Exception:
-        logger.exception("Unexpected error when answering callback")
+        logger.error("Unexpected error when answering callback")
         return False
 
 # Enable logging
@@ -743,7 +743,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             return
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
     except Exception as e:
-        logger.exception("Error showing coach courses: %s", e)
+        logger.error("Error showing coach courses: %s", e)
         await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
 
 
@@ -814,7 +814,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             return
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
     except Exception as e:
-        logger.exception("Error fetching coach courses in category: %s", e)
+        logger.error("Error fetching coach courses in category: %s", e)
         await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
 
 async def showtype_handler(update: Update, context: CallbackContext):
@@ -901,7 +901,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
         )
 
     except Exception as e:
-        logger.exception("Error showing type courses: %s", e)
+        logger.error("Error showing type courses: %s", e)
         await safe_edit_message(
             query,
             "An unexpected error occurred. Please try again later.",
@@ -1518,7 +1518,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             if parent:
                                 pdoc = await db.categories.find_one({"name": parent})
                                 ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                extra_row = [InlineKeyboardButton("🏠 Main Categories", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
+                                extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
                             else:
                                 extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
                         else:
