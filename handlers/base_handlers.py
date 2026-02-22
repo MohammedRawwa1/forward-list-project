@@ -601,16 +601,26 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
     keyboard = []
     for c in display:
-        # Determine course's category: prefer explicit field on item, else use
-        # the `category` argument passed to this page builder (for embedded
-        # course documents inside a category).
-        course_cat = c.get('category') if isinstance(c, dict) else None
-        if not course_cat:
-            course_cat = category
-        keyboard.append([
-            InlineKeyboardButton(c['name'], url=c.get('link')),
-            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(course_cat, c['name'], origin_type, page))
-        ])
+        try:
+            # Determine course's category: prefer explicit field on item,
+            # else use the `category` argument passed to this page builder.
+            course_cat = c.get('category') if isinstance(c, dict) else None
+            if not course_cat:
+                course_cat = category
+            name = c.get('name') if isinstance(c, dict) else None
+            link = c.get('link') if isinstance(c, dict) else None
+            if not name:
+                logger.debug("build_courses_page: skipping course without name: %s", repr(c))
+                continue
+            # details callback may omit back token if too long; _make_course_ref handles that
+            details_cb = _make_course_ref(course_cat, name, origin_type, page)
+            keyboard.append([
+                InlineKeyboardButton(name, url=link),
+                InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
+            ])
+        except Exception as e:
+            logger.error("build_courses_page: error building row for course %s: %s", repr(c), e)
+            continue
 
     # Pagination controls (Previous / Next)
     pagination_buttons = []
@@ -1488,6 +1498,14 @@ async def handle_course_selection(update: Update, context: CallbackContext):
         if not payload:
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
+
+        # Debug tracing: show raw data, resolved key, appended back token and payload summary
+        try:
+            logger.debug("handle_course_selection: raw_query_data=%s key=%s appended_back=%s payload_back=%s payload_keys=%s origin_type=%s origin_page=%s",
+                         data, key, appended_back, payload.get('back_cb'), list(payload.keys()) if isinstance(payload, dict) else None,
+                         payload.get('origin_type'), payload.get('origin_page'))
+        except Exception:
+            logger.debug("handle_course_selection: debug log failed for payload tracing")
         cat_name = payload.get("category")
         course_name = payload.get("name")
         origin_type = payload.get("origin_type")
