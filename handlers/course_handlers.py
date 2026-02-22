@@ -130,6 +130,12 @@ async def add_course_link(update: Update, context: CallbackContext):
                         {"name": parent},
                         {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link, "coach": coach}}}
                     )
+                    # Fetch and log updated category for debugging: ensure new course appears
+                    try:
+                        updated_cat = await categories_coll.find_one({"name": parent})
+                        logger.info("[ADD-COURSE] parent=%s now has %d courses: %s", parent, len(updated_cat.get('courses', [])), [c.get('name') for c in updated_cat.get('courses', [])])
+                    except Exception:
+                        logger.debug("[ADD-COURSE] unable to fetch updated category %s for logging", parent)
             else:
                 update_result = await categories_coll.update_one(
                     {"name": parent},
@@ -140,7 +146,16 @@ async def add_course_link(update: Update, context: CallbackContext):
                 await update.message.reply_text(f"Error: Parent category '{parent}' not found. Create it first.")
                 return ConversationHandler.END
 
-            await update.message.reply_text(f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}")
+            # Offer a quick button to view the category where the course was added
+            if coach and child_doc:
+                view_cat = coach
+            else:
+                view_cat = parent
+            if view_cat:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=f"showcat::{urllib.parse.quote_plus(view_cat)}")]])
+                await update.message.reply_text(f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}", reply_markup=kb)
+            else:
+                await update.message.reply_text(f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}")
             return ConversationHandler.END
 
         # Fallback: ask the user to pick a category (legacy behavior)
@@ -284,7 +299,12 @@ async def category_selected(update: Update, context: CallbackContext):
             f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉\n"
             f"Course Link: {course_link}"
         )
-        await safe_edit_message(query, msg, action_key=getattr(query, 'data', None))
+        # Add a button so the user can view the updated category immediately
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}")]])
+            await safe_edit_message(query, msg, reply_markup=kb, action_key=getattr(query, 'data', None))
+        except Exception:
+            await safe_edit_message(query, msg, action_key=getattr(query, 'data', None))
         return ConversationHandler.END
 
     except Exception as e:
@@ -323,7 +343,11 @@ async def add_course_category(update: Update, context: CallbackContext):
             await safe_edit_message(query, f"Error: Category '{category_name}' not found. Create it first.", action_key=getattr(query, 'data', None))
             return ConversationHandler.END
 
-        await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", action_key=getattr(query, 'data', None))
+        try:
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}")]])
+            await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", reply_markup=kb, action_key=getattr(query, 'data', None))
+        except Exception:
+            await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", action_key=getattr(query, 'data', None))
         return ConversationHandler.END
     except PyMongoError as e:
         logger.error(f"Error adding course: {e}")
