@@ -24,7 +24,27 @@ from telegram.error import RetryAfter, BadRequest
 CALLBACK_MAP = {}
 
 # How long to keep an interactive inline keyboard session open (seconds)
-GUI_SESSION_TTL = int(os.getenv("GUI_SESSION_TTL", "300"))
+def _parse_ttl(value, default=300):
+    if value is None or str(value).strip() == "":
+        return default
+    s = str(value).strip()
+    try:
+        if s.isdigit():
+            return int(s)
+        m = re.match(r"^(\d+)([smhd])$", s, re.I)
+        if m:
+            n = int(m.group(1))
+            unit = m.group(2).lower()
+            mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+            return n * mult
+        return int(float(s))
+    except Exception:
+        return default
+
+
+GUI_SESSION_TTL = _parse_ttl(os.getenv("GUI_SESSION_TTL", "300"), 300)
+logger = logging.getLogger(__name__)
+logger.info("GUI_SESSION_TTL=%s seconds (env=%r)", GUI_SESSION_TTL, os.getenv("GUI_SESSION_TTL"))
 
 
 def schedule_close_inline_message(message, delay: int = None, notice: str = "(Session closed due to inactivity)"):
