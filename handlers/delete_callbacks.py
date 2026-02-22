@@ -4,14 +4,14 @@ from database.mongo_handler import MongoDB
 import re
 import urllib.parse
 import logging
-from handlers.base_handlers import safe_edit_message, _resolve_callback_payload
+from handlers.base_handlers import safe_edit_message, _resolve_callback_payload, safe_answer
 import json
 logger = logging.getLogger(__name__)
 
 # ----------  delete category  ----------
 async def handle_category_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     # everything after "delete_category_"
     cat = query.data.split("_", 2)[2]
     cat = urllib.parse.unquote_plus(cat)
@@ -52,7 +52,7 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
 # ----------  delete single item  ----------
 async def handle_item_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     logger.info("[DEL-ITEM] callback data=%s", query.data)
     # Support new format: delete_item::category::course or legacy delete_item_{course}
     data = query.data
@@ -86,7 +86,7 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
 async def handle_delete_ref(update: Update, context: CallbackContext):
     """Handle delete_ref::<key> callbacks by resolving the payload from CALLBACK_MAP."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     key = data.split("::", 1)[1] if "::" in data else data
     payload = await _resolve_callback_payload(key)
@@ -126,7 +126,7 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
     Callback format: delete_confirm::{action}::{key}
     """
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     parts = data.split("::", 2)
     if len(parts) != 3:
@@ -253,7 +253,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
     action: 'category' or 'parent'
     """
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     parts = data.split("::", 2)
     if len(parts) != 3:
