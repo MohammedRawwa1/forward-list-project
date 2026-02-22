@@ -514,19 +514,25 @@ async def safe_answer(query, text: str = None):
     Returns True if answered (or no-op), False if ignored due to being too old.
     """
     try:
-        await safe_answer(query, text=text) if text is not None else await safe_answer(query)
+        if text is not None:
+            await query.answer(text=text)
+        else:
+            await query.answer()
         return True
     except BadRequest as e:
         m = str(e)
         # Telegram returns BadRequest for expired callback queries — ignore those.
-        if "Query is too old" in m or "query id is invalid" in m or "Query is too old".lower() in m.lower():
+        if "Query is too old" in m or "query id is invalid" in m or "query id is invalid".lower() in m.lower():
             logger.debug("Ignoring expired callback query: %s", m)
             return False
-        # If it's a different BadRequest, re-raise so callers can handle/log as needed
+        # Treat other benign BadRequest messages quietly when possible
+        if "message is not modified" in m.lower():
+            logger.debug("Ignoring 'message is not modified' while answering callback")
+            return True
         logger.error("BadRequest when answering callback: %s", e)
         return False
-    except Exception:
-        logger.error("Unexpected error when answering callback")
+    except Exception as e:
+        logger.error("Unexpected error when answering callback: %s", e)
         return False
 
 # Enable logging
