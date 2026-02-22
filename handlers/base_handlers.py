@@ -1012,7 +1012,23 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # Fallback: show courses if no coaches found
     courses = category_doc.get('courses', [])
     if not courses:
-        await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
+        # Offer a Back button so the user stays in the browsing flow instead
+        # of being dropped out with a plain message.
+        parent = category_doc.get('parent')
+        keyboard = []
+        if parent:
+            pdoc = await db.categories.find_one({"name": parent})
+            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+        else:
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+
+        await safe_edit_message(
+            query,
+            f'Category “{cat_name}” is empty.\nUse /add to populate it.',
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            action_key=getattr(query, 'data', None),
+        )
         return
     courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
     keyboard = [
@@ -1502,7 +1518,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             if parent:
                                 pdoc = await db.categories.find_one({"name": parent})
                                 ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                extra_row = [InlineKeyboardButton("🏠 Parent", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
+                                extra_row = [InlineKeyboardButton("🏠 Main Categories", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
                             else:
                                 extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
                         else:
