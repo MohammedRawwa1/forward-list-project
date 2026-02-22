@@ -73,7 +73,6 @@ from conversation_states import (
 
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
 from handlers.delete_callbacks import handle_delete_ref, handle_delete_confirm, handle_delete_summary
-from handlers.delete_callbacks import handle_delete_ref
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 
 from dotenv import load_dotenv
@@ -122,7 +121,8 @@ async def setup_handlers(application: Application):
     # Note: `delete_category_start` not present; command removed until handler is added.
     application.add_handler(CommandHandler("addthumb", add_thumb))
     application.add_handler(CommandHandler("delthumb", del_thumb))
-    application.add_handler(CommandHandler("cancel", cancel))
+    # Global /cancel handler is registered after conversations so ConversationHandler
+    # fallbacks get first chance to handle the command.
     # Note: `create_parent` is handled via the ConversationHandler below
 
     # ---------- callbacks ----------
@@ -193,6 +193,10 @@ async def setup_handlers(application: Application):
 
     # ---------- conversations ----------
     await setup_course_handlers(application)
+
+    # Register a global /cancel after conversations are registered so that
+    # ConversationHandler fallbacks handle /cancel first when active.
+    application.add_handler(CommandHandler("cancel", cancel))
 
     application.add_handler(
         ConversationHandler(
