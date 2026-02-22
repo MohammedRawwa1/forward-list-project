@@ -14,13 +14,53 @@ import hashlib
 import json
 import time
 import asyncio
+import os
 # How long to persist callback refs (seconds). Default: 7 days.
 CALLBACK_REF_TTL = int(os.getenv("CALLBACK_REF_TTL", str(7 * 24 * 3600)))
 import math
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, BadRequest
 
 # In-memory mapping for short callback ids -> payload
 CALLBACK_MAP = {}
+
+# How long to keep an interactive inline keyboard session open (seconds)
+GUI_SESSION_TTL = int(os.getenv("GUI_SESSION_TTL", "300"))
+
+
+def schedule_close_inline_message(message, delay: int = None, notice: str = "(Session closed due to inactivity)"):
+    """Schedule removal of inline keyboard from a sent Message after `delay` seconds.
+
+    This prefers editing the message to remove `reply_markup` and append a short notice.
+    Runs in background via asyncio.create_task.
+    """
+    if delay is None:
+        delay = GUI_SESSION_TTL
+
+    async def _worker():
+        await asyncio.sleep(delay)
+        try:
+            orig = getattr(message, 'text', None) or getattr(message, 'caption', None) or ''
+            # Try removing inline keyboard first
+            try:
+                await message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            # Then try to append a short notice so user knows it's closed
+            try:
+                new_text = (orig or '')
+                if notice:
+                    new_text = new_text + "\n\n" + notice
+                await message.edit_text(new_text)
+            except Exception:
+                pass
+        except Exception:
+            logger.exception("Error in schedule_close_inline_message worker")
+
+    try:
+        asyncio.create_task(_worker())
+    except Exception:
+        # Environment may not support creating background tasks; ignore.
+        pass
 
 def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int) -> str:
     payload = {"category": category, "name": name, "origin_type": origin_type, "origin_page": origin_page}
@@ -426,7 +466,7 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
         key = action_key or getattr(query, 'data', None) or 'callback'
         if user_id and _is_debounced(user_id, key, debounce_interval):
             try:
-                await query.answer()
+                await safe_answer(query)
             except Exception:
                 pass
             return False
@@ -438,7 +478,7 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
             logger.info("Rate limit: scheduling retry in %s seconds for key=%s", wait, key)
             await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
             try:
-                await query.answer(text=f"Too many requests. Retrying in {wait}s.")
+                await safe_answer(query, text=f"Too many requests. Retrying in {wait}s.")
             except Exception:
                 pass
             return False
@@ -450,16 +490,43 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
         logger.warning("Flood control exceeded. scheduling retry in %s seconds", wait)
         await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
         try:
-            await query.answer(text=f"Too many requests. Will retry in {wait}s.")
+            await safe_answer(query, text=f"Too many requests. Will retry in {wait}s.")
         except Exception:
             pass
         return False
     except Exception as e:
+        # Handle common benign BadRequest cases specially to avoid noisy stacktraces
+        msg = str(e)
+        if isinstance(e, BadRequest) and ("Message is not modified" in msg or "message is not modified" in msg):
+            logger.debug("Edit skipped: message not modified")
+            return True
         logger.exception("Error editing message: %s", e)
         try:
             await query.message.reply_text(text)
         except Exception:
             pass
+        return False
+
+
+async def safe_answer(query, text: str = None):
+    """Safely answer a CallbackQuery, ignoring expired/old-query errors.
+
+    Returns True if answered (or no-op), False if ignored due to being too old.
+    """
+    try:
+        await safe_answer(query, text=text) if text is not None else await safe_answer(query)
+        return True
+    except BadRequest as e:
+        m = str(e)
+        # Telegram returns BadRequest for expired callback queries — ignore those.
+        if "Query is too old" in m or "query id is invalid" in m or "Query is too old".lower() in m.lower():
+            logger.debug("Ignoring expired callback query: %s", m)
+            return False
+        # If it's a different BadRequest, re-raise so callers can handle/log as needed
+        logger.exception("BadRequest when answering callback: %s", e)
+        return False
+    except Exception:
+        logger.exception("Unexpected error when answering callback")
         return False
 
 # Enable logging
@@ -582,7 +649,7 @@ async def help(update: Update, context: CallbackContext):
         "/add - Start the process of adding a new course\n"
         "/courses - View your saved courses\n"
         "/delete_course - Delete a specific course\n"
-        "/delete_category - Delete a category and all its associated courses\n"
+        "/delete_category - Delete a coach/child category and its courses (not parent folders)\n"
         "/delete_all_data - Deletes both courses and categories (don't use this lightly!)\n\n"
         "📚 **Category Management**:\n"
         "/categories - List all available categories\n"
@@ -612,7 +679,11 @@ async def list_categories(update: Update, context: CallbackContext):
             [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")]
             for cat in categories
         ]
-        await update.message.reply_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
+        msg = await update.message.reply_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
+        try:
+            schedule_close_inline_message(msg)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Error listing categories: {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
@@ -627,7 +698,7 @@ async def list_coaches(update: Update, context: CallbackContext):
 async def show_coach_handler(update: Update, context: CallbackContext):
     """Show courses for a selected coach. Supports coaches stored in a `coaches` collection or derived from categories/courses."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     encoded = query.data.split("_", 1)[1]
     coach_slug = urllib.parse.unquote_plus(encoded)
 
@@ -679,7 +750,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
 async def show_coach_in_category(update: Update, context: CallbackContext):
     """Handle coach selection within a specific category: coach_in_cat::{category}::{coach_slug}"""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     parts = data.split("::")
     # Accept either: coach_in_cat::{category}::{coach_slug}
@@ -753,7 +824,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
     showtype::{category}::{type_name}
     """
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     data = query.data.split("::")
     if len(data) < 3:
@@ -840,7 +911,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
 async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     # Expect callback_data: showcat::{path_or_name}
     encoded = query.data.split("::", 1)[1]
     cat_path = urllib.parse.unquote_plus(encoded)
@@ -966,7 +1037,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
 async def handle_back_to_cats(update: Update, context: CallbackContext):
     """Handle the 🔙 Back callback and show the categories list."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     try:
         db = await get_db()
         # list only top-level categories (no parent)
@@ -1011,7 +1082,11 @@ async def list_courses(update: Update, context: CallbackContext):
             if not text:
                 await update.message.reply_text("No courses available.")
                 return
-            await update.message.reply_text(text, reply_markup=reply_markup)
+            msg = await update.message.reply_text(text, reply_markup=reply_markup)
+            try:
+                schedule_close_inline_message(msg)
+            except Exception:
+                pass
         else:
             await update.message.reply_text("No courses available.")
     except Exception as e:
@@ -1071,7 +1146,11 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             pass
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):", reply_markup=reply_markup)
+        msg = await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):", reply_markup=reply_markup)
+        try:
+            schedule_close_inline_message(msg)
+        except Exception:
+            pass
         
     except Exception as e:
         logger.error(f"Error listing courses for category '{category_name}': {e}")
@@ -1081,7 +1160,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
 
 async def handle_categories_pagination(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     # Extract the action and page number from the callback data
     # For this deployment we prefer a full (non-paginated) categories list.
@@ -1158,7 +1237,7 @@ async def create_category(update: Update, context: CallbackContext):
 async def handle_create_category_parent(update: Update, context: CallbackContext):
     """Callback handler to choose a parent for a new category."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     encoded = query.data.split("::", 1)[1]
     parent = urllib.parse.unquote_plus(encoded) if encoded else None
     # Store chosen parent in user_data for the following name prompt
@@ -1270,7 +1349,7 @@ async def handle_category_name(update: Update, context: CallbackContext):
 async def handle_category_selection(update: Update, context: CallbackContext):
     """List courses in the chosen category – each course button is a direct URL."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     if data.startswith("category::"):
         encoded = data.split("::", 1)[1]
@@ -1306,7 +1385,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
 async def handle_course_selection(update: Update, context: CallbackContext):
     """Handle the selection of a course from the buttons."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     data = query.data
     # Support short refs: course_ref::<key> -> lookup payload in CALLBACK_MAP
@@ -1474,7 +1553,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
 async def courses_callback(update: Update, context: CallbackContext):
     """Handle the courses callback and display courses based on pagination."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     db = await get_db()
     if db is None:
