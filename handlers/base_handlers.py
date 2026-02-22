@@ -1079,6 +1079,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     # Fallback: show courses if no coaches found
     courses = category_doc.get('courses', [])
+    logger.info("showcat_handler: category=%s courses_count=%s", cat_name, len(courses))
     if not courses:
         # Offer a Back button so the user stays in the browsing flow instead
         # of being dropped out with a plain message.
@@ -1099,13 +1100,17 @@ async def showcat_handler(update: Update, context: CallbackContext):
         )
         return
     courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-    keyboard = [
-        [
-            InlineKeyboardButton(crs["name"], url=crs.get("link")),
-            InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(cat_name, crs['name'], 'category', 1))
-        ]
-        for crs in courses
-    ]
+    keyboard = []
+    for crs in courses:
+        try:
+            details_cb = _make_course_ref(cat_name, crs['name'], 'category', 1)
+            logger.debug("showcat_handler: course=%s details_cb=%s", crs.get('name'), details_cb)
+            keyboard.append([
+                InlineKeyboardButton(crs["name"], url=crs.get('link')),
+                InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
+            ])
+        except Exception as e:
+            logger.error("showcat_handler: failed to build button for course %s: %s", repr(crs), e)
     # Delete is only available from the course Details view.
     # Back to parent if available, otherwise top-level categories
     parent = category_doc.get('parent')
