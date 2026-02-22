@@ -23,6 +23,7 @@ __all__ += [
     "handle_item_deletion",
     "handle_delete_ref",
     "handle_delete_confirm",
+    "handle_delete_summary",
 ]
 # course-handlers
 from handlers.course_handlers import (
@@ -49,6 +50,7 @@ from handlers.bot_handlers import (
     handle_course_deletion,
     handle_cancel_delete_callback,
     delete_item_start,
+    delete_all_data_start,
     confirm_delete_all,
     cancel_delete_all_data,
     initiate_delete_item,
