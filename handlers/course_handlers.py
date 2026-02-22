@@ -6,7 +6,7 @@ from pymongo.errors import PyMongoError
 import logging
 import re
 import urllib.parse
-from handlers.base_handlers import safe_edit_message
+from handlers.base_handlers import safe_edit_message, safe_answer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ async def add_course_link(update: Update, context: CallbackContext):
 async def parent_selected(update: Update, context: CallbackContext):
     """Callback when a parent is chosen. Presents coach choices next."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     encoded = query.data.split("::", 1)[1]
     parent = urllib.parse.unquote_plus(encoded) if encoded else None
     # store chosen parent (None means add to top-level)
@@ -213,7 +213,7 @@ async def parent_selected(update: Update, context: CallbackContext):
 
 async def coach_selected(update: Update, context: CallbackContext):
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     encoded = query.data.split("::", 1)[1]
     if encoded == "__manual__":
         # Ask for manual entry
@@ -239,7 +239,7 @@ async def coach_manual_entry(update: Update, context: CallbackContext):
 async def category_selected(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     # Extract category name from callback data using the add-flow prefix
     encoded = query.data.split('_', 1)[1]
@@ -295,7 +295,7 @@ async def category_selected(update: Update, context: CallbackContext):
 async def add_course_category(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     # Support callback data formats and allow underscores in names
     category_name = query.data.split('_', 1)[1]
