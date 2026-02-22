@@ -62,20 +62,35 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
         # Environment may not support creating background tasks; ignore.
         pass
 
-def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int) -> str:
+def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int, origin_context: str = None) -> str:
     # Compute a concrete back callback so details can always return to the
     # exact originating UI (category/coach/global) without guessing.
-    if origin_type == 'category' and category:
-        back_cb = f"courses::category::{urllib.parse.quote_plus(str(category))}::{origin_page}"
-    elif origin_type == 'coach' and category:
-        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(category))}::{origin_page}"
+    if origin_type == 'category':
+        target = origin_context or category
+        back_cb = f"courses::category::{urllib.parse.quote_plus(str(target))}::{origin_page}"
+    elif origin_type == 'coach':
+        target = origin_context or category
+        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(target))}::{origin_page}"
     else:
         back_cb = f"courses::global::{origin_page}"
 
-    payload = {"category": category, "name": name, "origin_type": origin_type, "origin_page": origin_page, "back_cb": back_cb}
+    payload = {
+        "category": category,
+        "name": name,
+        "origin_type": origin_type,
+        "origin_page": origin_page,
+        "origin_context": origin_context,
+        "back_cb": back_cb,
+    }
     # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
     key = _store_callback_payload(payload)
-    return f"course_ref::{key}"
+    # Append an encoded back callback to the returned callback_data so the
+    # Details view can use it directly without resolving the stored payload.
+    try:
+        enc = urllib.parse.quote_plus(back_cb)
+        return f"course_ref::{key}::back::{enc}"
+    except Exception:
+        return f"course_ref::{key}"
 
 
 def _store_callback_payload(payload: dict) -> str:
@@ -1450,7 +1465,18 @@ async def handle_course_selection(update: Update, context: CallbackContext):
     course_name = None
 
     if data.startswith("course_ref::"):
-        key = data.split("::", 1)[1]
+        # Support appended back token: course_ref::<key>::back::<encoded_back_cb>
+        rest = data[len("course_ref::"):]
+        appended_back = None
+        if "::back::" in rest:
+            key, enc_back = rest.split("::back::", 1)
+            try:
+                appended_back = urllib.parse.unquote_plus(enc_back)
+            except Exception:
+                appended_back = enc_back
+        else:
+            key = rest
+
         payload = await _resolve_callback_payload(key)
         if not payload:
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
@@ -1462,8 +1488,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             origin_page = int(payload.get("origin_page", 1))
         except Exception:
             origin_page = 1
-        # Prefer explicit back callback from the saved payload if available
-        saved_back_cb = payload.get('back_cb')
+        # Prefer an explicit appended back token, otherwise fall back to saved payload
+        saved_back_cb = appended_back or payload.get('back_cb')
     else:
         # Expect callback format: course::{category}::{course}
         data = data.replace("course::", "", 1)
