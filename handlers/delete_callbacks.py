@@ -318,10 +318,30 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                 if doc:
                     course_count += len(doc.get('courses', []))
 
+            # Prepare preview of affected category names (truncate to first 10)
+            preview_limit = 10
+            entries = []
+            for n in to_delete:
+                try:
+                    doc = await db['categories'].find_one({"name": n})
+                    cnt = len(doc.get('courses', [])) if doc else 0
+                except Exception:
+                    cnt = 0
+                entries.append((n, cnt))
+            # Sort by course count ascending, then name A→Z
+            entries_sorted = sorted(entries, key=lambda x: (x[1], x[0].lower()))
+            preview_entries = entries_sorted[:preview_limit]
+            remaining = max(0, len(entries_sorted) - len(preview_entries))
+            preview_lines = "\n".join(f"- {name} ({cnt} course{'s' if cnt!=1 else ''})" for name, cnt in preview_entries) if preview_entries else "(none)"
+
             msg = (
                 f"You are about to delete category '{cat}' and {cat_count - 1 if cat_count>0 else 0} descendant categories,\n"
-                f"removing {course_count} course(s) in total.\n\nProceed?"
+                f"removing {course_count} course(s) in total.\n\n"
+                f"Affected categories (showing {len(preview)}):\n{preview_lines}"
+                + (f"\n... and {remaining} more" if remaining else "")
+                + "\n\nProceed?"
             )
+
             kb = [
                 [InlineKeyboardButton("Yes, delete", callback_data=f"delete_confirm::category::{key}")],
                 [InlineKeyboardButton("Cancel", callback_data=f"cancel_delete::{key}")],
@@ -369,10 +389,30 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                 if doc:
                     course_count += len(doc.get('courses', []))
 
+            # Prepare preview of affected category names (truncate to first 10)
+            preview_limit = 10
+            entries = []
+            for n in to_delete:
+                try:
+                    doc = await db['categories'].find_one({"name": n})
+                    cnt = len(doc.get('courses', [])) if doc else 0
+                except Exception:
+                    cnt = 0
+                entries.append((n, cnt))
+            # Sort by course count ascending, then name A→Z
+            entries_sorted = sorted(entries, key=lambda x: (x[1], x[0].lower()))
+            preview_entries = entries_sorted[:preview_limit]
+            remaining = max(0, len(entries_sorted) - len(preview_entries))
+            preview_lines = "\n".join(f"- {name} ({cnt} course{'s' if cnt!=1 else ''})" for name, cnt in preview_entries) if preview_entries else "(none)"
+
             msg = (
                 f"You are about to delete parent '{parent_name}' and {cat_count - 1 if cat_count>0 else 0} descendant categories,\n"
-                f"removing {course_count} course(s) in total.\n\nProceed?"
+                f"removing {course_count} course(s) in total.\n\n"
+                f"Affected categories (showing {len(preview)}):\n{preview_lines}"
+                + (f"\n... and {remaining} more" if remaining else "")
+                + "\n\nProceed?"
             )
+
             kb = [
                 [InlineKeyboardButton("Yes, delete", callback_data=f"delete_confirm::parent::{key}")],
                 [InlineKeyboardButton("Cancel", callback_data=f"cancel_delete::{key}")],
