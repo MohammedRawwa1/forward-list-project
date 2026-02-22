@@ -88,7 +88,14 @@ def _make_course_ref(category: str, name: str, origin_type: str, origin_page: in
     # Details view can use it directly without resolving the stored payload.
     try:
         enc = urllib.parse.quote_plus(back_cb)
-        return f"course_ref::{key}::back::{enc}"
+        candidate = f"course_ref::{key}::back::{enc}"
+        # Telegram callback_data must be <= 64 bytes. Don't append the
+        # back token if it would exceed that limit; fall back to stored ref.
+        if len(candidate.encode('utf-8')) <= 64:
+            return candidate
+        else:
+            logger.debug("_make_course_ref: back token omitted due to length (%d bytes)", len(candidate.encode('utf-8')))
+            return f"course_ref::{key}"
     except Exception:
         return f"course_ref::{key}"
 
