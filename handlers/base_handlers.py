@@ -1501,9 +1501,9 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     break
 
         if course:
-            logger.debug("handle_course_selection: origin_type=%s origin_page=%s course_category=%s cat_name=%s", origin_type, origin_page, course_category, cat_name)
             # Determine canonical category for this course (prefer explicit field)
             course_category = course.get('category') if isinstance(course, dict) else None
+            logger.debug("handle_course_selection: origin_type=%s origin_page=%s course_category=%s cat_name=%s", origin_type, origin_page, course_category, cat_name)
             if not course_category:
                 course_category = cat_name
 
