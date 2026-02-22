@@ -289,40 +289,34 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
     query = update.callback_query
     await query.answer()
     data = query.data
-
-    if data == "cancel_delete":
-        await safe_edit_message(
-            query,
-            "Deletion canceled.",
-            action_key=getattr(query, "data", None),
-        )
+    # Accept a variety of cancel formats so all cancel buttons behave nicely.
+    if data in ("cancel", "cancel_delete", "cancel_delete_all", "cancel_delete_all_data"):
+        await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
         return
 
-    if not data.startswith("cancel_delete_"):
-        await safe_edit_message(
-            query,
-            "Invalid cancel callback.",
-            action_key=getattr(query, "data", None),
-        )
-        return
+    # Normalize payload prefixes created by different flows: "cancel_delete_..." or "cancel_delete::..."
+    payload = data
+    for prefix in ("cancel_delete_", "cancel_delete::"):
+        if payload.startswith(prefix):
+            payload = payload[len(prefix):]
+            break
 
-    payload = data.replace("cancel_delete_", "", 1)
     parts = payload.split("::", 1)
-
     if len(parts) == 2:
         item_type, enc_name = parts
-        item_name = urllib.parse.unquote_plus(enc_name)
+        try:
+            item_name = urllib.parse.unquote_plus(enc_name)
+        except Exception:
+            item_name = enc_name
         await safe_edit_message(
             query,
             f"Deletion of {item_type} '{item_name}' canceled.",
             action_key=getattr(query, "data", None),
         )
-    else:
-        await safe_edit_message(
-            query,
-            "Deletion canceled.",
-            action_key=getattr(query, "data", None),
-        )
+        return
+
+    # Fallback: just show a friendly cancel message instead of an "Invalid" one.
+    await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
@@ -373,13 +367,17 @@ async def delete_category_start(update: Update, context: CallbackContext):
             try:
                 payload = {'category': name, 'name': name}
                 key = _store_callback_payload(payload)
-                cb = f"delete_summary::parent::{key}"
+                # Use "category" action so category deletions show the summary flow.
+                cb = f"delete_summary::category::{key}"
             except Exception:
                 cb = f"delete_category_{urllib.parse.quote_plus(name)}"
             keyboard.append([InlineKeyboardButton(name, callback_data=cb)])
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
-        await update.message.reply_text("Choose a parent category to delete (summary will be shown):", reply_markup=InlineKeyboardMarkup(keyboard))
-        await update.message.reply_text("Choose a coach/category to delete (parents are not listed):", reply_markup=InlineKeyboardMarkup(keyboard))
+        # Present only the coach/category list (parents are not listed here).
+        await update.message.reply_text(
+            "Choose a coach/category to delete (parents are not listed):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
     except Exception as e:
         logger.exception("Error listing categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
