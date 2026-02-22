@@ -63,7 +63,16 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
         pass
 
 def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int) -> str:
-    payload = {"category": category, "name": name, "origin_type": origin_type, "origin_page": origin_page}
+    # Compute a concrete back callback so details can always return to the
+    # exact originating UI (category/coach/global) without guessing.
+    if origin_type == 'category' and category:
+        back_cb = f"courses::category::{urllib.parse.quote_plus(str(category))}::{origin_page}"
+    elif origin_type == 'coach' and category:
+        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(category))}::{origin_page}"
+    else:
+        back_cb = f"courses::global::{origin_page}"
+
+    payload = {"category": category, "name": name, "origin_type": origin_type, "origin_page": origin_page, "back_cb": back_cb}
     # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
     key = _store_callback_payload(payload)
     return f"course_ref::{key}"
@@ -1453,6 +1462,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             origin_page = int(payload.get("origin_page", 1))
         except Exception:
             origin_page = 1
+        # Prefer explicit back callback from the saved payload if available
+        saved_back_cb = payload.get('back_cb')
     else:
         # Expect callback format: course::{category}::{course}
         data = data.replace("course::", "", 1)
@@ -1507,20 +1518,24 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             if not course_category:
                 course_category = cat_name
 
-            # Build Back callback based on originating view if provided
-            if origin_type == 'category' and origin_page:
-                back_target = course_category or cat_name or '1'
-                back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
-                logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
-            elif origin_type == 'coach' and origin_page:
-                back_target = course_category or cat_name or '1'
-                back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
-                logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
-            elif origin_type == 'global' and origin_page:
-                back_cb = f"courses::global::{origin_page}"
+            # Build Back callback: prefer explicit saved back_cb, otherwise
+            # compute from origin_type/origin_page as a fallback.
+            if saved_back_cb:
+                back_cb = saved_back_cb
             else:
-                # default fallback: global page 1
-                back_cb = "courses::global::1"
+                if origin_type == 'category' and origin_page:
+                    back_target = course_category or cat_name or '1'
+                    back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                    logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
+                elif origin_type == 'coach' and origin_page:
+                    back_target = course_category or cat_name or '1'
+                    back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                    logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
+                elif origin_type == 'global' and origin_page:
+                    back_cb = f"courses::global::{origin_page}"
+                else:
+                    # default fallback: global page 1
+                    back_cb = "courses::global::1"
 
             # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
