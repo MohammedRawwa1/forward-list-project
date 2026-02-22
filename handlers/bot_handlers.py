@@ -11,7 +11,7 @@ from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
 import difflib
-from handlers.base_handlers import safe_edit_message
+from handlers.base_handlers import safe_edit_message, _store_callback_payload
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -362,15 +362,24 @@ async def delete_category_start(update: Update, context: CallbackContext):
         await update.message.reply_text("Error: Unable to connect to the database.")
         return
     try:
-        # By default this command lists ALL categories. Use /delete_parent to list only top-level parents.
-        cats = await db['categories'].find().to_list(length=None)
+        # List only child categories (coaches). Parent/top-level folders are not shown here.
+        cats = await db['categories'].find({"parent": {"$exists": True}}).to_list(length=None)
         cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
         if not cats:
-            await update.message.reply_text("No categories available to delete.")
-            return
-        keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"delete_category_{urllib.parse.quote_plus(cat.get('name'))}")] for cat in cats]
+            await update.message.reply_text("No coach categories available to delete.")
+        keyboard = []
+        for cat in cats:
+            name = cat.get('name')
+            try:
+                payload = {'category': name, 'name': name}
+                key = _store_callback_payload(payload)
+                cb = f"delete_summary::parent::{key}"
+            except Exception:
+                cb = f"delete_category_{urllib.parse.quote_plus(name)}"
+            keyboard.append([InlineKeyboardButton(name, callback_data=cb)])
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
-        await update.message.reply_text("Choose a parent/top-level category to delete:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Choose a parent category to delete (summary will be shown):", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text("Choose a coach/category to delete (parents are not listed):", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.exception("Error listing categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
