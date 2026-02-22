@@ -11,7 +11,7 @@ from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
 import difflib
-from handlers.base_handlers import safe_edit_message, _store_callback_payload
+from handlers.base_handlers import safe_edit_message, _store_callback_payload, safe_answer
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ async def delete_category(user_id, category_name, db):
 async def handle_course_deletion(update: Update, context: CallbackContext):
     """Handle the deletion of a course."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     logger.info("[DEL-COURSE] callback data=%s", query.data)
 
     data = query.data
@@ -287,7 +287,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
 async def handle_cancel_delete_callback(update: Update, context: CallbackContext):
     """Handle cancel_delete_{type}::{encoded_name} and simple cancel_delete callbacks."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
     data = query.data
     # Accept a variety of cancel formats so all cancel buttons behave nicely.
     if data in ("cancel", "cancel_delete", "cancel_delete_all", "cancel_delete_all_data"):
@@ -422,7 +422,7 @@ async def delete_all_data_start(update: Update, context: CallbackContext):
 async def confirm_delete_all(update: Update, context: CallbackContext):
     """Confirm and delete all categories and courses."""
     query = update.callback_query
-    await query.answer()  # Acknowledge the callback query
+    await safe_answer(query)  # Acknowledge the callback query
 
     user_id = update.effective_user.id
 
@@ -451,14 +451,14 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
 # Cancel deletion of all user data
 async def cancel_delete_all_data(update: Update, context: CallbackContext) -> int:
     """Cancel the deletion of all user data."""
-    await update.callback_query.answer()
+    await safe_answer(update.callback_query)
     await safe_edit_message(update.callback_query, "Deletion of all data has been canceled.", action_key=getattr(update.callback_query, 'data', None))
     return ConversationHandler.END
 
 async def initiate_delete_item(update: Update, context: CallbackContext, item_type: str, item_name: str):
     """Initiate the deletion of a specific item (course or category) by asking for confirmation."""
     query = update.callback_query
-    await query.answer()
+    await safe_answer(query)
 
     # Construct the confirmation message
     confirmation_message = f"Are you sure you want to delete the {item_type} '{item_name}'? This action cannot be undone. ⚠️"
