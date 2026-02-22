@@ -557,6 +557,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if not display:
         return None, None
 
+    logger.debug("build_courses_page called: origin_type=%s category=%s page=%s total=%s", origin_type, category, page, len(all_courses) if hasattr(all_courses, '__len__') else 'unknown')
     if origin_type == 'category' and category:
         text = f"Courses in category '{category}' (page {page}):"
         breadcrumb = ["Home", "categories", category]
@@ -583,9 +584,21 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     # Pagination controls (Previous / Next)
     pagination_buttons = []
     if start > 0:
-        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{page-1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page-1}"))
+        if origin_type == 'category' and category:
+            prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page-1}"
+        elif origin_type == 'coach' and category:
+            prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page-1}"
+        else:
+            prev_cb = f"courses::global::{page-1}"
+        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
     if len(all_courses) > start + page_size:
-        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{page+1}" if origin_type != 'category' else f"courses::{urllib.parse.quote_plus(category)}::{page+1}"))
+        if origin_type == 'category' and category:
+            next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page+1}"
+        elif origin_type == 'coach' and category:
+            next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page+1}"
+        else:
+            next_cb = f"courses::global::{page+1}"
+        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
     if pagination_buttons:
         keyboard.append(pagination_buttons)
 
@@ -600,20 +613,29 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     # beside Home. If `category` is provided, include it as a breadcrumb
     # button as well for context.
     try:
-        # Choose Home callback depending on origin: global should return to
-        # the first global courses page; category/coach should return to
-        # top-level categories (back_to_cats).
+        # Choose Home callback depending on origin: global pages go to
+        # explicit `courses::global::<page>` callbacks; category pages
+        # use `courses::category::<category>::<page>` so the handler can
+        # unambiguously route the request.
         if origin_type == 'global':
-            home_cb = f"courses::1"
+            home_cb = f"courses::global::1"
+        elif origin_type == 'category' and category:
+            home_cb = f"courses::category::{urllib.parse.quote_plus(category)}::1"
+        elif origin_type == 'coach' and category:
+            home_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::1"
         else:
             home_cb = "back_to_cats"
         breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=home_cb)]
         if total_pages > 1 and page < total_pages:
             # build end callback depending on origin type
             if origin_type == 'category' and category:
-                end_cb = f"courses::{urllib.parse.quote_plus(category)}::{total_pages}"
+                end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
+            elif origin_type == 'global':
+                end_cb = f"courses::global::{total_pages}"
+            elif origin_type == 'coach' and category:
+                end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
             else:
-                end_cb = f"courses::{total_pages}"
+                end_cb = f"courses::global::{total_pages}"
             breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
         if category:
             breadcrumb_buttons.append(InlineKeyboardButton(category, callback_data=f"showcat::{urllib.parse.quote_plus(category)}"))
@@ -743,7 +765,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
 
         # Sort and render using existing helper
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
-        text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='coach')
+        text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='coach', category=coach_name)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}'.", action_key=getattr(query, 'data', None))
             return
@@ -1146,9 +1168,11 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
 
         pagination_buttons = []
         if start > 0:
-            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page-1}"))
+            prev_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{page-1}"
+            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
         if len(courses) > start + page_size:
-            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::{urllib.parse.quote_plus(category_name)}::{page+1}"))
+            next_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{page+1}"
+            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
         if pagination_buttons:
             keyboard.append(pagination_buttons)
         # Compute total pages and add breadcrumb row with Home and End when applicable
@@ -1160,7 +1184,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         try:
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
             if total_pages > 1 and page < total_pages:
-                end_cb = f"courses::{urllib.parse.quote_plus(category_name)}::{total_pages}"
+                end_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"
                 breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
             breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}"))
             keyboard.insert(0, breadcrumb_buttons)
@@ -1477,6 +1501,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     break
 
         if course:
+            logger.debug("handle_course_selection: origin_type=%s origin_page=%s course_category=%s cat_name=%s", origin_type, origin_page, course_category, cat_name)
             # Determine canonical category for this course (prefer explicit field)
             course_category = course.get('category') if isinstance(course, dict) else None
             if not course_category:
@@ -1485,12 +1510,17 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             # Build Back callback based on originating view if provided
             if origin_type == 'category' and origin_page:
                 back_target = course_category or cat_name or '1'
-                back_cb = f"courses::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
+            elif origin_type == 'coach' and origin_page:
+                back_target = course_category or cat_name or '1'
+                back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
             elif origin_type == 'global' and origin_page:
-                back_cb = f"courses::{origin_page}"
+                back_cb = f"courses::global::{origin_page}"
             else:
                 # default fallback: global page 1
-                back_cb = "courses::1"
+                back_cb = "courses::global::1"
 
             # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
@@ -1577,6 +1607,7 @@ async def courses_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
     data = query.data
+    logger.debug("courses_callback invoked with data=%s", data)
     db = await get_db()
     if db is None:
         await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
@@ -1587,49 +1618,104 @@ async def courses_callback(update: Update, context: CallbackContext):
         if data.startswith("courses::"):
             payload = data.replace("courses::", "", 1)
             parts = payload.split("::")
-            if len(parts) == 1:
-                # global page
-                page = int(parts[0])
-                # flatten all courses
-                cats = await db.categories.find().to_list(length=None)
-                all_courses = []
-                for cat in cats:
-                    for crs in cat.get('courses', []):
-                        all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
 
-                # Sort all courses case-insensitively A→Z to provide deterministic ordering
-                all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
-
-                text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global')
-                if not text:
-                    await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
-                    return
-                await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
-                return
-
-            # category + page
-            category = urllib.parse.unquote_plus(parts[0])
+            # New explicit formats:
+            #  - courses::global::<page>
+            #  - courses::category::<category>::<page>
+            #  - courses::coach::<coach_slug>::<page>
+            # Legacy fallback: courses::<page> or courses::<category>::<page>
             try:
-                page = int(parts[1])
-            except Exception:
-                await safe_edit_message(query, "Invalid page number.", action_key=getattr(query, 'data', None))
-                return
+                if parts[0] in ("global", "category", "coach"):
+                    kind = parts[0]
+                    if kind == "global":
+                        page = int(parts[1])
+                        # flatten all courses
+                        cats = await db.categories.find().to_list(length=None)
+                        all_courses = []
+                        for cat in cats:
+                            for crs in cat.get('courses', []):
+                                all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+                        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global')
+                        if not text:
+                            await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
+                            return
+                        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                        return
 
-            category_doc = await db.categories.find_one({"name": category})
-            if not category_doc or not category_doc.get('courses'):
-                await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
-                return
+                    if kind == "category":
+                        category = urllib.parse.unquote_plus(parts[1])
+                        page = int(parts[2])
+                        category_doc = await db.categories.find_one({"name": category})
+                        if not category_doc or not category_doc.get('courses'):
+                            await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
+                            return
+                        courses = category_doc.get('courses', [])
+                        courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
+                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category)
+                        if not text:
+                            await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
+                            return
+                        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                        return
 
-            page_size = PAGE_SIZE
-            # Ensure deterministic ordering then build UI via shared helper
-            courses = category_doc.get('courses', [])
-            courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-            text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category)
-            if not text:
-                await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
+                    if kind == "coach":
+                        coach_slug = urllib.parse.unquote_plus(parts[1])
+                        page = int(parts[2])
+                        # derive coach courses similar to show_coach_handler
+                        cats = await db.categories.find().to_list(length=None)
+                        coach_courses = []
+                        coach_name = coach_slug
+                        for cat in cats:
+                            for crs in cat.get('courses', []):
+                                if crs.get('coach') == coach_name:
+                                    coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+                        coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
+                        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name)
+                        if not text:
+                            await safe_edit_message(query, f"No courses found for coach '{coach_name}' on page {page}.", action_key=getattr(query, 'data', None))
+                            return
+                        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                        return
+                else:
+                    # legacy fallback handling
+                    if len(parts) == 1:
+                        page = int(parts[0])
+                        cats = await db.categories.find().to_list(length=None)
+                        all_courses = []
+                        for cat in cats:
+                            for crs in cat.get('courses', []):
+                                all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+                        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global')
+                        if not text:
+                            await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
+                            return
+                        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                        return
+                    # legacy category + page
+                    category = urllib.parse.unquote_plus(parts[0])
+                    try:
+                        page = int(parts[1])
+                    except Exception:
+                        await safe_edit_message(query, "Invalid page number.", action_key=getattr(query, 'data', None))
+                        return
+                    category_doc = await db.categories.find_one({"name": category})
+                    if not category_doc or not category_doc.get('courses'):
+                        await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
+                        return
+                    courses = category_doc.get('courses', [])
+                    courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
+                    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category)
+                    if not text:
+                        await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
+                        return
+                    await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                    return
+            except Exception as e:
+                logger.error(f"Error parsing courses callback: {e}")
+                await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, 'data', None))
                 return
-            await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
-            return
 
         # legacy underscore format removed. Only `courses::` callbacks are supported.
         await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, 'data', None))
