@@ -724,8 +724,9 @@ def validate_category_name(category_name: str):
     if len(category_name) < 3 or len(category_name) > MAX_CATEGORY_NAME_LENGTH:
         return f"Category name must be between 3 and {MAX_CATEGORY_NAME_LENGTH} characters."
     
-    if not is_valid_category_name(category_name):
-        return "Category name can only contain letters, numbers, spaces, and hyphens. 😓"
+    # Allow most printable characters; only reject control characters / newlines
+    if any(c in category_name for c in "\r\n"):
+        return "Category name cannot contain newlines or control characters."
     
     return None
     
@@ -1391,12 +1392,12 @@ async def handle_category_name(update: Update, context: CallbackContext):
     category_name = update.message.text.strip()
     logger.info(f"[CAT-INSERT-START] name={category_name!r} uid={user_id}")
 
-    # --- single validator (delete any other validate_category_name) ---
-    if not category_name or len(category_name) < 3 or len(category_name) > 30:
-        await update.message.reply_text("Name must be 3-30 chars.")
+    # --- single validator (allow special chars; only restrict control/newline chars) ---
+    if not category_name or len(category_name) < 3 or len(category_name) > MAX_CATEGORY_NAME_LENGTH:
+        await update.message.reply_text(f"Name must be 3-{MAX_CATEGORY_NAME_LENGTH} chars.")
         return CREATE_CAT_NAME
-    if not re.match(r"^[a-zA-Z0-9\s\-]+$", category_name):
-        await update.message.reply_text("Only letters, numbers, space, hyphen.")
+    if any(c in category_name for c in "\r\n"):
+        await update.message.reply_text("Category name cannot contain newlines or control characters.")
         return CREATE_CAT_NAME
 
     try:
