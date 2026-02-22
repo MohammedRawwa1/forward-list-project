@@ -92,7 +92,18 @@ logger = logging.getLogger(__name__)
 
 # ---------- helpers ----------
 def is_valid_category_name(category_name: str):
-    return bool(re.match(r"^[a-zA-Z0-9\s\-]+$", category_name))
+    """Allow broader set of printable characters in category/parent names.
+
+    Reject only newlines and control characters. Length limits are enforced
+    by `validate_category_name` in `base_handlers.py`.
+    """
+    if not category_name:
+        return False
+    # disallow control characters / newlines
+    if any(c in category_name for c in "\r\n"):
+        return False
+    # permit most printable characters (trim surrounding whitespace)
+    return True
 
 
 # ---------- application factory ----------
