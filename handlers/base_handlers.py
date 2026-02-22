@@ -1602,17 +1602,16 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 
             delete_cb = f"delete_ref::{delete_key}" if delete_key else "delete_ref::"
 
-            # Build detail navigation: always show Back + Delete; when the
-            # course was opened from a category/coach (not global), also
-            # offer a Parent/Home button that returns to the parent folder
-            # (or to categories if no parent exists). This keeps global
-            # and category GUIs split logically.
-            nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
-
-            extra_row = None
-            try:
-                if origin_type != 'global':
-                    # prefer showing the parent folder of the course's category
+            # Build detail navigation. If opened from a category, remove the
+            # Back button (it previously routed to the global /courses GUI)
+            # and instead show a row with Coaches + All Categories.
+            if origin_type == 'category':
+                nav_row = [InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                extra_row = []
+                try:
+                    # Coaches are represented as child categories under the
+                    # parent/topic. If this course's category is a coach (i.e.
+                    # a child), link to its parent so the user sees all coaches.
                     if course_category:
                         parent_doc = await db.categories.find_one({"name": course_category})
                         if parent_doc:
@@ -1620,19 +1619,40 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             if parent:
                                 pdoc = await db.categories.find_one({"name": parent})
                                 ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
+                                extra_row.append(InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}"))
+                                logger.debug("handle_course_selection: coaches button -> parent=%s ppath=%s", parent, ppath)
+                    # Always include All Categories button next to Coaches (or alone)
+                    extra_row.append(InlineKeyboardButton("📚 All Categories", callback_data="back_to_cats"))
+                except Exception:
+                    # Fallback: show only All Categories
+                    extra_row = [InlineKeyboardButton("All Categories", callback_data="back_to_cats")]
+                # ensure extra_row is a single keyboard row
+                keyboard = [nav_row, extra_row]
+            else:
+                # default behavior: show Back + Delete and an optional home/parent row
+                nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                extra_row = None
+                try:
+                    if origin_type != 'global':
+                        if course_category:
+                            parent_doc = await db.categories.find_one({"name": course_category})
+                            if parent_doc:
+                                parent = parent_doc.get('parent')
+                                if parent:
+                                    pdoc = await db.categories.find_one({"name": parent})
+                                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                                    extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
+                                else:
+                                    extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
                             else:
                                 extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
                         else:
                             extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
-                    else:
-                        extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
-            except Exception:
-                extra_row = None
-
-            keyboard = [nav_row]
-            if extra_row:
-                keyboard.append(extra_row)
+                except Exception:
+                    extra_row = None
+                keyboard = [nav_row]
+                if extra_row:
+                    keyboard.append(extra_row)
             reply_markup = InlineKeyboardMarkup(keyboard)
             details = (
                 f"📚 **Course Details**\n\n"
