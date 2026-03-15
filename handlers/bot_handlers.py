@@ -63,7 +63,8 @@ async def generate_keyboard(user_id, items, callback_pattern, page=1, page_size=
         pagination_buttons = await generate_pagination_keyboard(
             items_list, page, page_size, callback_pattern
         )
-        keyboard.append(pagination_buttons)
+        if pagination_buttons:
+            keyboard.append(pagination_buttons)
 
         return InlineKeyboardMarkup(keyboard)
 
@@ -327,62 +328,73 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
     await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
 
 
-async def delete_item_start(update: Update, context: CallbackContext):
-    """Show every course in the DB as inline buttons."""
+async def delete_item_start(update: Update, context: CallbackContext, page: int = 1, page_size: int = 5):
+    """Show courses as inline buttons with pagination."""
 
     db = await get_db()
+    if db is None:
+        await update.message.reply_text("Error: Unable to connect to the database.")
+        return
 
+    # Fetch all categories with their courses
     cats = await db.categories.find().to_list(length=None)
 
-    # Sort categories safely
-    cats = sorted(
-        cats,
-        key=lambda c: normalize_name(c.get("name"))
-    )
-
+    # Flatten courses with category names
     all_courses = []
-
     for cat in cats:
         category_name = (cat.get("name") or "").strip()
-
-        for crs in cat.get("courses", []):
+        for crs in cat.get("courses") or []:  # handle None
             course_name = (crs.get("name") or "").strip()
-
             all_courses.append({
                 "name": course_name,
                 "category": category_name
             })
 
     # Sort courses alphabetically
-    all_courses = sorted(
-        all_courses,
-        key=lambda c: normalize_name(c.get("name"))
-    )
+    all_courses = sorted(all_courses, key=lambda c: (c["category"].casefold(), c["name"].casefold()))
 
     if not all_courses:
         await update.message.reply_text("No courses to delete.")
         return
 
-    keyboard = []
+    # Pagination slicing
+    start_index = (page - 1) * page_size
+    end_index = start_index + page_size
+    paginated_courses = all_courses[start_index:end_index]
 
-    for c in all_courses:
-        cat = urllib.parse.quote_plus(c["category"])
-        name = urllib.parse.quote_plus(c["name"])
+    keyboard = [
+        [InlineKeyboardButton(
+            f"{c['category']} → {c['name']}",
+            callback_data=f"delete_item::{urllib.parse.quote_plus(c['category'])}::{urllib.parse.quote_plus(c['name'])}"
+        )]
+        for c in paginated_courses
+    ]
 
-        keyboard.append([
-            InlineKeyboardButton(
-                c["name"],
-                callback_data=f"delete_item::{cat}::{name}"
-            )
-        ])
+    # Pagination buttons
+    pagination_buttons = []
+    if page > 1:
+        pagination_buttons.append(
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_item_page_{page-1}")
+        )
+    pagination_buttons.append(
+        InlineKeyboardButton("🏠 Home", callback_data="home")
+    )
+    if end_index < len(all_courses):
+        pagination_buttons.append(
+            InlineKeyboardButton("➡️ Next", callback_data=f"delete_item_page_{page+1}")
+        )
 
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)  # single row of pagination buttons
+
+    # Cancel button at the end
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
     await update.message.reply_text(
-        "Choose the course you want to delete:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )    
-
+        f"Choose a course to delete (page {page}/{(len(all_courses)-1)//page_size + 1}):",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
 async def delete_category_start(update: Update, context: CallbackContext):
     """Show categories with delete buttons."""
     db = await get_db()
