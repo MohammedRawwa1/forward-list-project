@@ -142,15 +142,16 @@ async def delete_category(user_id, category_name, db):
 
 
 async def handle_course_deletion(update: Update, context: CallbackContext):
-    """Handle the deletion of a course."""
+    """Handle the deletion of a course or empty category."""
     query = update.callback_query
     await safe_answer(query)
-    logger.info("[DEL-COURSE] callback data=%s", query.data)
+    user_id = update.effective_user.id
+    logger.info("[DEL-COURSE] user_id=%s callback data=%s", user_id, query.data)
 
     data = query.data
     cat_name = None
     course_name = None
-
+    
     if data.startswith("delete_item::") or data.startswith("delete_course::"):
         payload = data.split("::", 1)[1]
         parts = payload.split("::", 1)
@@ -192,11 +193,28 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
         )
 
         if cat_name:
+            if course_name == "(empty)":
+                # Delete the empty category itself
+                deleted = await delete_category(user_id, cat_name, db)
+                if deleted:
+                    await safe_edit_message(
+                        query,
+                        f"Category '{cat_name}' deleted successfully! 🎉",
+                        action_key=getattr(query, "data", None),
+                    )
+                else:
+                    await safe_edit_message(
+                        query,
+                        f"Category '{cat_name}' could not be deleted.",
+                        action_key=getattr(query, "data", None),
+                    )
+                return
+
+            # Existing course deletion code
             result = await db["categories"].update_one(
                 {"name": cat_name},
                 {"$pull": {"courses": {"name": course_name}}},
             )
-
             logger.info("[DEL-COURSE] pull result=%s", getattr(result, "raw_result", result))
 
             if result.modified_count > 0:
