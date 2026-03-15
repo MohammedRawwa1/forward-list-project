@@ -340,10 +340,16 @@ async def delete_category_start(update: Update, context: CallbackContext):
             cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category_{encoded_name}"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
-        # Pagination nav
+        # Pagination nav — replace non-functional "Home" with an "End" button
         nav = []
-        # no previous on first page
-        nav.append(InlineKeyboardButton("🏠 Home", callback_data="home"))
+        total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+        last_page = max(1, total_pages)
+        # Add Previous only when applicable
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
+        # End button sends user to the last page
+        nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
+        # Next when there are more pages after this one
         if len(cats) > end:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
         if nav:
@@ -404,9 +410,11 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
+    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    last_page = max(1, total_pages)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data="home"))
+    nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
     if len(cats) > end:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
     if nav:
