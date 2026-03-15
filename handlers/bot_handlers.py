@@ -329,7 +329,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
             courses = cat.get("courses")
             display_name = f"{name} (empty)" if not courses else name
             encoded_name = urllib.parse.quote_plus(name)
-            cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category::{encoded_name}"
+            cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category_{encoded_name}"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
         # Pagination nav
@@ -386,7 +386,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         courses = cat.get("courses")
         display_name = f"{name} (empty)" if not courses else name
         encoded_name = urllib.parse.quote_plus(name)
-        cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category::{encoded_name}"
+        cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category_{encoded_name}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
