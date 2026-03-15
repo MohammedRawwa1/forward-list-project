@@ -35,7 +35,7 @@ async def generate_pagination_keyboard(items_list, page, page_size, callback_pat
     pagination_buttons.append(
         InlineKeyboardButton("🏠 Home", callback_data="home")
     )
-    if len(items_list) == page_size:
+    if len(items_list) > page * page_size:
         pagination_buttons.append(
             InlineKeyboardButton("➡️ Next", callback_data=f"page_{callback_pattern}_{page+1}")
         )
@@ -417,18 +417,24 @@ async def delete_category_start(update: Update, context: CallbackContext):
             name = (cat.get("name") or "").strip()
 
             parent = cat.get("parent")
-            is_parent = parent is None or parent == ""
 
-            display_name = f"{name} {'(parent)' if is_parent else ''}".strip()
-
+            if parent:
+                display_name = f"{parent} → {name}"
+            else:
+                display_name = f"{name} (parent)"
+            # Prepare callback data with parent included
             try:
-                payload = {"category": name, "name": name}
+                payload = {
+                    "category": name,
+                    "parent": parent
+                }
                 key = _store_callback_payload(payload)
                 cb = f"delete_summary::category::{key}"
             except Exception:
-                cb = f"delete_category_{urllib.parse.quote_plus(name)}"
-
-            keyboard.append(
+                encoded_name = urllib.parse.quote_plus(name)
+                encoded_parent = urllib.parse.quote_plus(parent or "")
+                cb = f"delete_category::{encoded_parent}::{encoded_name}" 
+                keyboard.append(
                 [InlineKeyboardButton(display_name, callback_data=cb)]
             )
 
@@ -472,17 +478,23 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         keyboard = []
 
         for cat in cats:
+
             name = (cat.get("name") or "").strip()
+            parent = cat.get("parent")
 
-            keyboard.append([
-                InlineKeyboardButton(
-                    name,
-                    callback_data=f"delete_category_{urllib.parse.quote_plus(name)}"
-                )
-            ])
+            if parent:
+                display_name = f"{parent} → {name}"
+            else:
+                display_name = f"{name} (parent)"
 
-        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+            encoded_name = urllib.parse.quote_plus(name)
+            encoded_parent = urllib.parse.quote_plus(parent or "")
 
+            cb = f"delete_category::{encoded_parent}::{encoded_name}"
+
+            keyboard.append(
+                [InlineKeyboardButton(display_name, callback_data=cb)]
+            )
         await update.message.reply_text(
             "Choose a parent category to delete:",
             reply_markup=InlineKeyboardMarkup(keyboard)
