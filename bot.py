@@ -212,6 +212,7 @@ async def setup_handlers(application: Application):
     application.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("create_category", create_category), CommandHandler("create_parent", create_parent)],
+            allow_reentry=True,
             states={
                 CREATE_CAT_PARENT: [
                     CallbackQueryHandler(handle_create_category_parent, pattern=r"^createcat_parent::"),
