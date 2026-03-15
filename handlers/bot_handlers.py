@@ -142,175 +142,70 @@ async def delete_category(user_id, category_name, db):
 
 
 async def handle_course_deletion(update: Update, context: CallbackContext):
-    """Handle the deletion of a course or empty category."""
+    """Handle deletion of courses or empty categories."""
     query = update.callback_query
     await safe_answer(query)
-    user_id = update.effective_user.id
-    logger.info("[DEL-COURSE] user_id=%s callback data=%s", user_id, query.data)
-
     data = query.data
-    cat_name = None
-    course_name = None
-    
-    if data.startswith("delete_item::") or data.startswith("delete_course::"):
-        payload = data.split("::", 1)[1]
-        parts = payload.split("::", 1)
-        if len(parts) == 2:
-            encoded_cat, encoded_course = parts
-            cat_name = urllib.parse.unquote_plus(encoded_cat)
-            course_name = urllib.parse.unquote_plus(encoded_course)
-        else:
-            course_name = urllib.parse.unquote_plus(payload)
-    else:
-        if data.startswith("delete_item_"):
-            data_old = data.replace("delete_item_", "", 1)
-        elif data.startswith("delete_course_"):
-            data_old = data.replace("delete_course_", "", 1)
-        else:
-            data_old = data.replace("delete_item_", "", 1)
-
-        parts_old = data_old.split("_", 1)
-        if len(parts_old) == 2:
-            cat_name = urllib.parse.unquote_plus(parts_old[0])
-            course_name = urllib.parse.unquote_plus(parts_old[1])
-        else:
-            course_name = urllib.parse.unquote_plus(data_old)
+    logger.info("[DEL-COURSE] callback data=%s", data)
 
     db = await get_db()
     if db is None:
-        await safe_edit_message(
-            query,
-            "Error: Unable to connect to the database.",
-            action_key=getattr(query, "data", None),
-        )
+        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
         return
 
     try:
-        logger.info(
-            "[DEL-COURSE] parsed cat_name=%s course_name=%s",
-            cat_name,
-            course_name,
-        )
-
-        if cat_name:
-            if course_name == "(empty)":
-                # Delete the empty category itself
-                deleted = await delete_category(user_id, cat_name, db)
-                if deleted:
-                    await safe_edit_message(
-                        query,
-                        f"Category '{cat_name}' deleted successfully! 🎉",
-                        action_key=getattr(query, "data", None),
-                    )
-                else:
-                    await safe_edit_message(
-                        query,
-                        f"Category '{cat_name}' could not be deleted.",
-                        action_key=getattr(query, "data", None),
-                    )
+        if data.startswith("delete_item::"):
+            # This is an empty category or a single course
+            parts = data.split("::", 2)
+            if len(parts) == 3:
+                cat_name = urllib.parse.unquote_plus(parts[1])
+                item_name = urllib.parse.unquote_plus(parts[2])
+            else:
+                await safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
                 return
 
-            # Existing course deletion code
-            result = await db["categories"].update_one(
-                {"name": cat_name},
-                {"$pull": {"courses": {"name": course_name}}},
-            )
-            logger.info("[DEL-COURSE] pull result=%s", getattr(result, "raw_result", result))
-
-            if result.modified_count > 0:
-                await safe_edit_message(
-                    query,
-                    f"Course '{course_name}' deleted successfully from '{cat_name}'! 🎉",
-                    action_key=getattr(query, "data", None),
-                )
-            else:
-                category_doc = await db["categories"].find_one({"name": cat_name})
-                logger.warning(
-                    "[DEL-COURSE] delete failed for '%s' in category '%s' — category_doc=%s",
-                    course_name,
-                    cat_name,
-                    category_doc,
-                )
-
-                if category_doc and category_doc.get("courses"):
-                    names = [c.get("name") for c in category_doc.get("courses", [])]
-                    logger.info(
-                        "[DEL-COURSE] available course names in category '%s': %s",
-                        cat_name,
-                        names,
-                    )
-                    close = difflib.get_close_matches(course_name, names, n=5, cutoff=0.6)
-                    if close:
-                        logger.info(
-                            "[DEL-COURSE] close matches for '%s' in '%s': %s",
-                            course_name,
-                            cat_name,
-                            close,
-                        )
-
-                await safe_edit_message(
-                    query,
-                    f"Course '{course_name}' not found in category '{cat_name}'.",
-                    action_key=getattr(query, "data", None),
-                )
-        else:
-            result = await db["categories"].update_one(
-                {"courses.name": course_name},
-                {"$pull": {"courses": {"name": course_name}}},
-            )
-
-            logger.info("[DEL-COURSE] pull-any result=%s", getattr(result, "raw_result", result))
-
-            if result.modified_count > 0:
-                await safe_edit_message(
-                    query,
-                    f"Course '{course_name}' deleted successfully! 🎉",
-                    action_key=getattr(query, "data", None),
-                )
-            else:
-                cats = await db["categories"].find().to_list(length=None)
-                candidates = []
-                for cat in cats:
-                    for crs in cat.get("courses", []):
-                        if crs.get("name") == course_name:
-                            candidates.append((cat.get("name"), crs.get("name")))
-
-                if not candidates:
-                    all_names = []
-                    for cat in cats:
-                        for crs in cat.get("courses", []):
-                            all_names.append((cat.get("name"), crs.get("name")))
-
-                    close = [
-                        (cn, nm)
-                        for cn, nm in all_names
-                        if difflib.get_close_matches(course_name, [nm], cutoff=0.6)
-                    ]
-                    logger.warning(
-                        "[DEL-COURSE] no exact candidates; fuzzy close matches: %s",
-                        close,
-                    )
+            # If item_name is "(empty)" → delete category
+            if item_name == "(empty)":
+                res = await db["categories"].delete_one({"name": cat_name})
+                if res.deleted_count > 0:
+                    await safe_edit_message(query, f"Empty category '{cat_name}' deleted successfully! 🎉", action_key=getattr(query, "data", None))
                 else:
-                    logger.info(
-                        "[DEL-COURSE] exact candidates found (unexpected): %s",
-                        candidates,
-                    )
+                    await safe_edit_message(query, f"Category '{cat_name}' not found.", action_key=getattr(query, "data", None))
+                return
 
-                await safe_edit_message(
-                    query,
-                    f"Course '{course_name}' not found.",
-                    action_key=getattr(query, "data", None),
-                )
+        elif data.startswith("delete_category::"):
+            # Deleting category with courses
+            parts = data.split("::", 1)
+            if len(parts) == 2:
+                cat_name = urllib.parse.unquote_plus(parts[1])
+            else:
+                await safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
+                return
 
-    except Exception as e:
-        logger.error(f"Error deleting course '{course_name}': {e}")
-        await safe_edit_message(
-            query,
-            "An error occurred while deleting the course. Please try again later.",
-            action_key=getattr(query, "data", None),
+        else:
+            await safe_edit_message(query, "Unknown deletion action.", action_key=getattr(query, "data", None))
+            return
+
+        # Delete the category or pull a course from it
+        result = await db["categories"].update_one(
+            {"name": cat_name},
+            {"$pull": {"courses": {"name": item_name}}} if item_name != "(empty)" else {}
         )
 
+        if result.modified_count > 0:
+            await safe_edit_message(query, f"Course '{item_name}' deleted successfully from '{cat_name}'! 🎉", action_key=getattr(query, "data", None))
+        else:
+            # Category exists but course not found or category was empty
+            cat_doc = await db["categories"].find_one({"name": cat_name})
+            if cat_doc is None:
+                await safe_edit_message(query, f"Category '{cat_name}' not found.", action_key=getattr(query, "data", None))
+            else:
+                await safe_edit_message(query, f"No course named '{item_name}' found in category '{cat_name}'.", action_key=getattr(query, "data", None))
 
+    except Exception as e:
+        logger.error(f"Error deleting course or category '{cat_name}': {e}", exc_info=True)
+        await safe_edit_message(query, "An error occurred while deleting. Please try again later.", action_key=getattr(query, "data", None))
+        
 async def handle_cancel_delete_callback(update: Update, context: CallbackContext):
     """Handle cancel_delete_{type}::{encoded_name} and simple cancel_delete callbacks."""
     query = update.callback_query
@@ -347,7 +242,7 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
-    """Show every course or empty category in the DB as inline buttons."""
+    """Show every course and empty category in the DB as inline buttons."""
     db = await get_db()
     cats = await db.categories.find().to_list(length=None)
 
@@ -358,7 +253,7 @@ async def delete_item_start(update: Update, context: CallbackContext):
 
     for cat in cats:
         category_name = (cat.get("name") or "").strip()
-        courses = cat.get("courses") or []
+        courses = cat.get("courses")
 
         if courses:
             # Add all courses
@@ -383,9 +278,11 @@ async def delete_item_start(update: Update, context: CallbackContext):
     for c in all_items:
         cat = urllib.parse.quote_plus(c["category"])
         name = urllib.parse.quote_plus(c["name"])
+        # Display differently if it's an empty folder
+        display_text = f"{c['category']} (empty)" if c["name"] == "(empty)" else f"{c['category']} → {c['name']}"
         keyboard.append([
             InlineKeyboardButton(
-                f"{c['category']} → {c['name']}" if c['name'] != "(empty)" else f"{c['category']} (empty)",
+                display_text,
                 callback_data=f"delete_item::{cat}::{name}"
             )
         ])
@@ -397,72 +294,48 @@ async def delete_item_start(update: Update, context: CallbackContext):
         "Choose the course or empty category you want to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-        
+                
 async def delete_category_start(update: Update, context: CallbackContext):
-    """Show categories with delete buttons."""
+    """Show all categories (including empty ones) for deletion without showing parent info."""
     db = await get_db()
 
     if db is None:
         await update.message.reply_text("Error: Unable to connect to the database.")
         return
-    
+
     try:
         cats = await db["categories"].find().to_list(length=None)
 
-        # Normalize and sort categories safely
-        cats = sorted(
-            cats,
-            key=lambda c: normalize_name(c.get("name"))
-        )
-
         if not cats:
-            await update.message.reply_text("No coach categories available to delete.")
+            await update.message.reply_text("No categories available to delete.")
             return
+
+        # Sort categories by name safely
+        cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
 
         keyboard = []
 
         for cat in cats:
-            logger.info(
-                "CAT -> name=%r parent=%r courses=%r",
-                cat.get("name"),
-                cat.get("parent"),
-                cat.get("courses")
-            )
-
             name = (cat.get("name") or "").strip()
+            courses = cat.get("courses")
+            # Show as empty if no courses
+            display_name = f"{name} (empty)" if not courses else name
+            encoded_name = urllib.parse.quote_plus(name)
+            cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category::{encoded_name}"
+            keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
-            parent = cat.get("parent")
-
-            if parent:
-                display_name = f"{parent} → {name}"
-            else:
-                display_name = f"{name} (parent)"
-            # Prepare callback data with parent included
-            try:
-                payload = {
-                    "category": name,
-                    "parent": parent
-                }
-                key = _store_callback_payload(payload)
-                cb = f"delete_summary::category::{key}"
-            except Exception:
-                encoded_name = urllib.parse.quote_plus(name)
-                encoded_parent = urllib.parse.quote_plus(parent or "")
-                cb = f"delete_category::{encoded_parent}::{encoded_name}" 
-                keyboard.append(
-                [InlineKeyboardButton(display_name, callback_data=cb)]
-            )
-
+        # Cancel button
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
         await update.message.reply_text(
-            "Choose a category to delete (parents are marked):",
+            "Choose a category to delete:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+
     except Exception as e:
         logger.exception("Error listing categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
-
+        
 async def delete_parent_start(update: Update, context: CallbackContext):
     """Show top-level parent categories for deletion."""
 
