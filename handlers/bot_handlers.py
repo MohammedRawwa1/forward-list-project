@@ -328,73 +328,58 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
     await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
 
 
-async def delete_item_start(update: Update, context: CallbackContext, page: int = 1, page_size: int = 5):
-    """Show courses as inline buttons with pagination."""
-
+async def delete_item_start(update: Update, context: CallbackContext):
+    """Show every course or empty category in the DB as inline buttons."""
     db = await get_db()
-    if db is None:
-        await update.message.reply_text("Error: Unable to connect to the database.")
-        return
-
-    # Fetch all categories with their courses
     cats = await db.categories.find().to_list(length=None)
 
-    # Flatten courses with category names
-    all_courses = []
+    # Sort categories safely
+    cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
+
+    all_items = []
+
     for cat in cats:
         category_name = (cat.get("name") or "").strip()
-        for crs in cat.get("courses") or []:  # handle None
-            course_name = (crs.get("name") or "").strip()
-            all_courses.append({
-                "name": course_name,
+        courses = cat.get("courses") or []
+
+        if courses:
+            # Add all courses
+            for crs in courses:
+                course_name = (crs.get("name") or "").strip()
+                all_items.append({
+                    "name": course_name,
+                    "category": category_name
+                })
+        else:
+            # No courses → treat as empty folder
+            all_items.append({
+                "name": "(empty)",
                 "category": category_name
             })
 
-    # Sort courses alphabetically
-    all_courses = sorted(all_courses, key=lambda c: (c["category"].casefold(), c["name"].casefold()))
-
-    if not all_courses:
-        await update.message.reply_text("No courses to delete.")
+    if not all_items:
+        await update.message.reply_text("No courses or categories to delete.")
         return
 
-    # Pagination slicing
-    start_index = (page - 1) * page_size
-    end_index = start_index + page_size
-    paginated_courses = all_courses[start_index:end_index]
+    keyboard = []
+    for c in all_items:
+        cat = urllib.parse.quote_plus(c["category"])
+        name = urllib.parse.quote_plus(c["name"])
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{c['category']} → {c['name']}" if c['name'] != "(empty)" else f"{c['category']} (empty)",
+                callback_data=f"delete_item::{cat}::{name}"
+            )
+        ])
 
-    keyboard = [
-        [InlineKeyboardButton(
-            f"{c['category']} → {c['name']}",
-            callback_data=f"delete_item::{urllib.parse.quote_plus(c['category'])}::{urllib.parse.quote_plus(c['name'])}"
-        )]
-        for c in paginated_courses
-    ]
-
-    # Pagination buttons
-    pagination_buttons = []
-    if page > 1:
-        pagination_buttons.append(
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_item_page_{page-1}")
-        )
-    pagination_buttons.append(
-        InlineKeyboardButton("🏠 Home", callback_data="home")
-    )
-    if end_index < len(all_courses):
-        pagination_buttons.append(
-            InlineKeyboardButton("➡️ Next", callback_data=f"delete_item_page_{page+1}")
-        )
-
-    if pagination_buttons:
-        keyboard.append(pagination_buttons)  # single row of pagination buttons
-
-    # Cancel button at the end
+    # Always append Cancel button
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
     await update.message.reply_text(
-        f"Choose a course to delete (page {page}/{(len(all_courses)-1)//page_size + 1}):",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "Choose the course or empty category you want to delete:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
-    
+        
 async def delete_category_start(update: Update, context: CallbackContext):
     """Show categories with delete buttons."""
     db = await get_db()
