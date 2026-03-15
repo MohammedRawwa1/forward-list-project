@@ -299,7 +299,11 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             cat_count = len(to_delete)
             course_count = 0
             for name in to_delete:
-                doc = await db['categories'].find_one({"name": name})
+                docs = await db['categories'].find({"name": {"$in": list(to_delete)}}).to_list(length=None)
+                doc_map = {d['name']: d for d in docs}
+                for n in to_delete:
+                    cnt = len(doc_map.get(n, {}).get('courses', []))
+                    entries.append((n, cnt))
                 if doc:
                     course_count += len(doc.get('courses', []))
 
