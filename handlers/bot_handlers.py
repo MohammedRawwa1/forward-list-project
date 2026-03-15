@@ -478,7 +478,6 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         keyboard = []
 
         for cat in cats:
-
             name = (cat.get("name") or "").strip()
             parent = cat.get("parent")
 
@@ -487,14 +486,23 @@ async def delete_parent_start(update: Update, context: CallbackContext):
             else:
                 display_name = f"{name} (parent)"
 
-            encoded_name = urllib.parse.quote_plus(name)
-            encoded_parent = urllib.parse.quote_plus(parent or "")
+            try:
+                payload = {
+                    "category": name,
+                    "parent": parent
+                }
+                key = _store_callback_payload(payload)
+                cb = f"delete_summary::category::{key}"
+            except Exception:
+                encoded_name = urllib.parse.quote_plus(name)
+                encoded_parent = urllib.parse.quote_plus(parent or "")
+                cb = f"delete_category::{encoded_parent}::{encoded_name}" 
 
-            cb = f"delete_category::{encoded_parent}::{encoded_name}"
+            keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
-            keyboard.append(
-                [InlineKeyboardButton(display_name, callback_data=cb)]
-            )
+        # Add a single Cancel button at the end
+        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+
         await update.message.reply_text(
             "Choose a parent category to delete:",
             reply_markup=InlineKeyboardMarkup(keyboard)
@@ -503,7 +511,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
     except Exception as e:
         logger.exception("Error listing parent categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
-                    
+                                
 async def delete_all_data_start(update: Update, context: CallbackContext):
     """Start the delete-all-data confirmation conversation."""
     # Prompt user with confirmation buttons; ConversationHandler expects DELETE_ALL state
