@@ -307,7 +307,15 @@ async def delete_category_start(update: Update, context: CallbackContext):
         return
 
     try:
-        cats = await db["categories"].find().to_list(length=None)
+        # Only list child categories (those with a parent). Parent/top-level
+        # categories are managed via `/delete_parent` and should not appear
+        # in the `/delete_category` flow.
+        cats = await db["categories"].find({
+            "$and": [
+                {"parent": {"$exists": True}},
+                {"parent": {"$nin": [None, ""]}}
+            ]
+        }).to_list(length=None)
 
         if not cats:
             await update.message.reply_text("No categories available to delete.")
@@ -373,7 +381,13 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         await safe_edit_message(query, "Error: Unable to connect to the database.")
         return
 
-    cats = await db["categories"].find().to_list(length=None)
+    # Only page through child categories (exclude parents/top-level folders)
+    cats = await db["categories"].find({
+        "$and": [
+            {"parent": {"$exists": True}},
+            {"parent": {"$nin": [None, ""]}}
+        ]
+    }).to_list(length=None)
     cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
     page_size = int(context.bot_data.get('delete_cat_page_size', 20))
     start = (page - 1) * page_size
