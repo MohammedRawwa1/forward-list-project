@@ -5,7 +5,6 @@ import re
 import urllib.parse
 import logging
 from handlers.base_handlers import safe_edit_message, _resolve_callback_payload, safe_answer
-import json
 logger = logging.getLogger(__name__)
 
 # ----------  delete category  ----------
@@ -295,25 +294,18 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                     if name and name not in to_delete:
                         stack.append(name)
 
-            # count categories and courses
+            # count categories and courses (fetch docs once for efficiency)
             cat_count = len(to_delete)
-            course_count = 0
-            for name in to_delete:
-                docs = await db['categories'].find({"name": {"$in": list(to_delete)}}).to_list(length=None)
-                doc_map = {d['name']: d for d in docs}
-                for n in to_delete:
-                    cnt = len(doc_map.get(n, {}).get('courses', []))
-                    entries.append((n, cnt))
-                if doc:
-                    course_count += len(doc.get('courses', []))
+            docs = await db['categories'].find({"name": {"$in": list(to_delete)}}).to_list(length=None)
+            doc_map = {d.get('name'): d for d in docs}
+            course_count = sum(len(d.get('courses', [])) for d in docs)
 
             # Prepare preview of affected category names (truncate to first 10)
             preview_limit = 10
             entries = []
             for n in to_delete:
                 try:
-                    doc = await db['categories'].find_one({"name": n})
-                    cnt = len(doc.get('courses', [])) if doc else 0
+                    cnt = len(doc_map.get(n, {}).get('courses', []))
                 except Exception:
                     cnt = 0
                 entries.append((n, cnt))
