@@ -390,7 +390,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
     if db is None:
         await update.message.reply_text("Error: Unable to connect to the database.")
         return
-
+    
     try:
         cats = await db["categories"].find().to_list(length=None)
 
@@ -407,9 +407,18 @@ async def delete_category_start(update: Update, context: CallbackContext):
         keyboard = []
 
         for cat in cats:
+            logger.info(
+                "CAT -> name=%r parent=%r courses=%r",
+                cat.get("name"),
+                cat.get("parent"),
+                cat.get("courses")
+            )
+
             name = (cat.get("name") or "").strip()
 
-            is_parent = not cat.get("parent")
+            parent = cat.get("parent")
+            is_parent = parent is None or parent == ""
+
             display_name = f"{name} {'(parent)' if is_parent else ''}".strip()
 
             try:
@@ -429,7 +438,6 @@ async def delete_category_start(update: Update, context: CallbackContext):
             "Choose a category to delete (parents are marked):",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-
     except Exception as e:
         logger.exception("Error listing categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
@@ -444,9 +452,13 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         return
 
     try:
-        cats = await db["categories"].find(
-            {"parent": {"$exists": False}}
-        ).to_list(length=None)
+        cats = await db["categories"].find({
+            "$or": [
+                {"parent": {"$exists": False}},
+                {"parent": None},
+                {"parent": ""}
+            ]
+        }).to_list(length=None)
 
         cats = sorted(
             cats,
