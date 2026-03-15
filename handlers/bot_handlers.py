@@ -296,7 +296,10 @@ async def delete_item_start(update: Update, context: CallbackContext):
     )
                 
 async def delete_category_start(update: Update, context: CallbackContext):
-    """Show all categories (including empty ones) for deletion without showing parent info."""
+    """Show a paginated list of categories for deletion.
+
+    Uses `delete_category_page::<n>` callbacks to navigate pages.
+    """
     db = await get_db()
 
     if db is None:
@@ -313,16 +316,30 @@ async def delete_category_start(update: Update, context: CallbackContext):
         # Sort categories by name safely
         cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
 
-        keyboard = []
+        # Default page size (can be overridden in context.bot_data)
+        page_size = int(context.bot_data.get('delete_cat_page_size', 20))
+        page = 1
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_cats = cats[start:end]
 
-        for cat in cats:
+        keyboard = []
+        for cat in page_cats:
             name = (cat.get("name") or "").strip()
             courses = cat.get("courses")
-            # Show as empty if no courses
             display_name = f"{name} (empty)" if not courses else name
             encoded_name = urllib.parse.quote_plus(name)
             cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category::{encoded_name}"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
+
+        # Pagination nav
+        nav = []
+        # no previous on first page
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data="home"))
+        if len(cats) > end:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
+        if nav:
+            keyboard.append(nav)
 
         # Cancel button
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
@@ -335,6 +352,55 @@ async def delete_category_start(update: Update, context: CallbackContext):
     except Exception as e:
         logger.exception("Error listing categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
+
+
+async def handle_delete_category_page(update: Update, context: CallbackContext):
+    """Render a specific page of categories for deletion (callback).
+
+    Callback format: `delete_category_page::<page>`
+    """
+    query = update.callback_query
+    await safe_answer(query)
+    data = query.data
+    try:
+        _, page_s = data.split("::", 1)
+        page = int(page_s)
+    except Exception:
+        page = 1
+
+    db = await get_db()
+    if db is None:
+        await safe_edit_message(query, "Error: Unable to connect to the database.")
+        return
+
+    cats = await db["categories"].find().to_list(length=None)
+    cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
+    page_size = int(context.bot_data.get('delete_cat_page_size', 20))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_cats = cats[start:end]
+
+    keyboard = []
+    for cat in page_cats:
+        name = (cat.get("name") or "").strip()
+        courses = cat.get("courses")
+        display_name = f"{name} (empty)" if not courses else name
+        encoded_name = urllib.parse.quote_plus(name)
+        cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category::{encoded_name}"
+        keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data="home"))
+    if len(cats) > end:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
+    if nav:
+        keyboard.append(nav)
+
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+
+    await safe_edit_message(query, "Choose a category to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         
 async def delete_parent_start(update: Update, context: CallbackContext):
     """Show top-level parent categories for deletion."""
