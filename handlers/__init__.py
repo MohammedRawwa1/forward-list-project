@@ -46,6 +46,7 @@ from handlers.bot_handlers import (
     delete_item,
     delete_category,
     delete_category_start,
+    handle_delete_category_page,
     delete_parent_start,
     handle_course_deletion,
     handle_cancel_delete_callback,
