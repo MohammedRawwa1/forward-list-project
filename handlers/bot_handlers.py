@@ -357,7 +357,10 @@ async def delete_category_start(update: Update, context: CallbackContext):
         return
     try:
         # List only child categories (coaches). Parent/top-level folders are not shown here.
-        cats = await db['categories'].find({"parent": {"$exists": True}}).to_list(length=None)
+        # Some older or malformed documents may omit an explicit `parent` field
+        # but still use a `path` containing a slash. Include those by checking
+        # for either an existing `parent` or a `path` that contains '/'.
+        cats = await db['categories'].find({"$or": [{"parent": {"$exists": True}}, {"path": {"$regex": "/"}}]}).to_list(length=None)
         cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
         if not cats:
             await update.message.reply_text("No coach categories available to delete.")
