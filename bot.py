@@ -250,16 +250,18 @@ async def setup_handlers(application: Application):
     )
 
     # ---------- deletion (last so not shadowed) ----------
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_category_deletion,
-            pattern=r"^delete_category_",
-        )
-    )
+    # Register page handler before the generic delete handler so
+    # `delete_category_page::N` isn't captured by the generic pattern.
     application.add_handler(
         CallbackQueryHandler(
             handle_delete_category_page,
             pattern=r"^delete_category_page::\d+$",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_category_deletion,
+            pattern=r"^delete_category_",
         )
     )
     application.add_handler(
