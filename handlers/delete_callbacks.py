@@ -63,6 +63,16 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         if len(parts) == 2:
             cat = urllib.parse.unquote_plus(parts[0])
             item = urllib.parse.unquote_plus(parts[1])
+            # If the item is the special marker for empty folder, delete the
+            # category document instead of trying to pull a course.
+            if item == "(empty)":
+                res = await db['categories'].delete_one({"name": cat})
+                if getattr(res, 'deleted_count', 0) > 0:
+                    await safe_edit_message(query, f"Empty category '{cat}' deleted successfully! 🎉", action_key=getattr(query, 'data', None))
+                else:
+                    await safe_edit_message(query, f"Category '{cat}' not found. ❌", action_key=getattr(query, 'data', None))
+                return
+
             # remove from category embedded array
             res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
             if res.modified_count:
