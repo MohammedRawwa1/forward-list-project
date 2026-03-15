@@ -49,6 +49,7 @@ from handlers.bot_handlers import (
     delete_item,
     delete_category,
     delete_category_start,
+    handle_delete_category_page,
     delete_parent_start,
     handle_course_deletion,
     handle_cancel_delete_callback,
@@ -253,6 +254,12 @@ async def setup_handlers(application: Application):
         CallbackQueryHandler(
             handle_category_deletion,
             pattern=r"^delete_category_",
+        )
+    )
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_delete_category_page,
+            pattern=r"^delete_category_page::\d+$",
         )
     )
     application.add_handler(
