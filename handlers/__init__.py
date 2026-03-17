@@ -3,17 +3,23 @@ __all__ = []
 from handlers.base_handlers import (
     help,
     list_courses,
+    list_coaches,
     list_categories,
     create_category,
+    create_parent,
+    handle_create_category_parent,
+    handle_create_category_parent_text,
     get_courses_by_category,
     courses_callback,
     handle_categories_pagination,
     showtype_handler,
     showcat_handler,
-    handle_back_to_cats,
     handle_course_selection,
     handle_category_name,
     handle_category_selection,
+    handle_back_to_cats,
+    show_coach_handler,
+    show_coach_in_category,
 )
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion, handle_delete_ref, handle_delete_confirm
 __all__ += [
