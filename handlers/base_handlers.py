@@ -662,6 +662,49 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if pagination_buttons:
         keyboard.append(pagination_buttons)
 
+    # Defensive: ensure we don't exceed Telegram's inline keyboard button limits.
+    # Telegram limits ~100 buttons per message; be conservative and cap at 90.
+    try:
+        total_buttons = sum(len(r) for r in keyboard)
+    except Exception:
+        total_buttons = 0
+    MAX_BUTTONS = 90
+    if total_buttons > MAX_BUTTONS:
+        # Reduce the number of course rows shown to fit within MAX_BUTTONS.
+        # Each course row typically has 2 buttons; reserve some slots for nav/breadcrumb.
+        reserved = 6
+        max_course_buttons = max(1, MAX_BUTTONS - reserved)
+        max_course_rows = max_course_buttons // 2
+        # Recompute display to the smaller size and rebuild keyboard
+        display = all_courses[start:start + max_course_rows]
+        keyboard = []
+        for c in display:
+            try:
+                course_cat = c.get('category') if isinstance(c, dict) else None
+                if not course_cat:
+                    course_cat = category
+                name = c.get('name') if isinstance(c, dict) else None
+                link = c.get('link') if isinstance(c, dict) else None
+                if not name:
+                    continue
+                details_cb = _make_course_ref(course_cat, name, origin_type, page)
+                keyboard.append([
+                    InlineKeyboardButton(name, url=link),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
+                ])
+            except Exception:
+                continue
+        # Re-add a minimal pagination row if necessary
+        pagination_buttons = []
+        if start > 0:
+            prev_cb = f"courses::global::{page-1}" if origin_type == 'global' else prev_cb
+            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
+        if len(all_courses) > start + len(display):
+            next_cb = f"courses::global::{page+1}" if origin_type == 'global' else next_cb
+            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
+        if pagination_buttons:
+            keyboard.append(pagination_buttons)
+
     # Compute total pages for End button placement
     try:
         total_pages = math.ceil(len(all_courses) / page_size)
@@ -1073,23 +1116,30 @@ async def showcat_handler(update: Update, context: CallbackContext):
             child_path = child.get('path') or child.get('name')
             keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
 
-        # Navigation row (Previous / Next)
+        # Navigation row (Previous / End / Next)
         nav = []
         total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
         last_page = max(1, total_pages)
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page-1}"))
+
+        # Put End between Prev and Next; if on first page, place End at the left
+        if total_pages > 1:
+            end_btn = InlineKeyboardButton("⏭️ End", callback_data=f"showcat::{urllib.parse.quote_plus(cat_name)}::{last_page}")
+            if page == 1:
+                nav.insert(0, end_btn)
+            else:
+                nav.append(end_btn)
+
         if len(sorted_children) > end:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page+1}"))
+
         if nav:
             keyboard.append(nav)
 
-        # Breadcrumb / Home / End row (insert at top for context)
+        # Breadcrumb / Home row (insert at top for context)
         try:
-            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
-            if total_pages > 1 and page < total_pages:
-                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=f"showcat::{urllib.parse.quote_plus(cat_name)}::{last_page}"))
-            breadcrumb_buttons.append(InlineKeyboardButton(cat_name, callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}"))
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats"), InlineKeyboardButton(cat_name, callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}")]
             keyboard.insert(0, breadcrumb_buttons)
         except Exception:
             pass
