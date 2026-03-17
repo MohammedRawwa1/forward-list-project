@@ -591,7 +591,7 @@ logger = logging.getLogger(__name__)
 
 # Constants
 MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
-PAGE_SIZE = 10  # Default number of items per page for pagination
+PAGE_SIZE = 50  # Default number of items per page for pagination
 
 
 def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None):
@@ -737,6 +737,9 @@ async def help(update: Update, context: CallbackContext):
         "/start - Start the bot and receive a welcome message\n"
         "/add - Start the process of adding a new course\n"
         "/courses - View your saved courses\n"
+        "/delete_course - Delete a specific course\n"
+        "/delete_category - Delete a coach/child category and its courses (not parent folders)\n"
+        "/delete_all_data - Deletes both courses and categories (don't use this lightly!)\n\n"
         "📚 **Category Management**:\n"
         "/categories - List all available categories\n"
         "/create_category - Create a new empty category\n\n"
@@ -998,8 +1001,16 @@ async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
     await safe_answer(query)
-    # Expect callback_data: showcat::{path_or_name}
-    encoded = query.data.split("::", 1)[1]
+    # Expect callback_data: showcat::{path_or_name} or showcat::{path_or_name}::{page}
+    parts = query.data.split("::")
+    encoded = parts[1] if len(parts) > 1 else ""
+    # If a page suffix was included, parts[2] will contain it — keep it available
+    page_from_callback = None
+    if len(parts) > 2:
+        try:
+            page_from_callback = int(parts[2])
+        except Exception:
+            page_from_callback = None
     cat_path = urllib.parse.unquote_plus(encoded)
     db = await get_db()
     # Try to resolve by `path` first, then by `name` for legacy docs
@@ -1046,21 +1057,53 @@ async def showcat_handler(update: Update, context: CallbackContext):
         children = []
 
     if children:
-        # show child categories first
+        # Paginate child categories when there are many.
+        # Use any page parsed earlier from the callback (page_from_callback)
+        page = page_from_callback or 1
+
+        # sort children deterministically
+        sorted_children = sorted(children, key=lambda c: (c.get('name') or '').lower())
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_children = sorted_children[start:end]
+
         keyboard = []
-        for child in sorted(children, key=lambda c: (c.get('name') or '').lower()):
+        for child in page_children:
             child_path = child.get('path') or child.get('name')
             keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
-        # add up/back button to parent or top-level
+
+        # Navigation row (Previous / Next)
+        nav = []
+        total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
+        last_page = max(1, total_pages)
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page-1}"))
+        if len(sorted_children) > end:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page+1}"))
+        if nav:
+            keyboard.append(nav)
+
+        # Breadcrumb / Home / End row (insert at top for context)
+        try:
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+            if total_pages > 1 and page < total_pages:
+                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=f"showcat::{urllib.parse.quote_plus(cat_name)}::{last_page}"))
+            breadcrumb_buttons.append(InlineKeyboardButton(cat_name, callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}"))
+            keyboard.insert(0, breadcrumb_buttons)
+        except Exception:
+            pass
+
+        # add up/back button to parent or top-level at the bottom for convenience
         parent = category_doc.get('parent')
         if parent:
-            # find parent's path
             pdoc = await db.categories.find_one({"name": parent})
             ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
             keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-        await safe_edit_message(query, f"{cat_path} — Subcategories:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+
+        await safe_edit_message(query, f"{cat_path} — Subcategories (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
     # If the category doc contains a nested 'types' (category_type) level, show types first
