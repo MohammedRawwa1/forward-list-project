@@ -313,6 +313,10 @@ async def setup_handlers(application: Application):
     application.add_handler(
         CallbackQueryHandler(showcat_handler, pattern=r"^showcat::[^:]+::\d+$")
     )
+    # Support short stored refs for showcat links (avoids long callback_data)
+    application.add_handler(
+        CallbackQueryHandler(showcat_handler, pattern=r"^showcat_ref::")
+    )
     # Generic showcat handler (catch-all) registered after the paged pattern
     application.add_handler(
         CallbackQueryHandler(showcat_handler, pattern=r"^showcat::")
