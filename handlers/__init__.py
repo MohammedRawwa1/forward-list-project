@@ -5,6 +5,8 @@ from handlers.base_handlers import (
     list_courses,
     list_coaches,
     list_categories,
+    categories_page,
+    createcat_page,
     create_category,
     create_parent,
     handle_create_category_parent,
