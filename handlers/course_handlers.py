@@ -8,6 +8,9 @@ import re
 import urllib.parse
 from handlers.base_handlers import safe_edit_message, safe_answer
 
+# Page size used only by course-related handlers (coaches/categories/courses in add flow)
+COURSE_PAGE_SIZE = 50
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -165,8 +168,8 @@ async def add_course_link(update: Update, context: CallbackContext):
             await update.message.reply_text("No categories available. Create one first with /create_category")
             return ConversationHandler.END
 
-        keyboard = [[InlineKeyboardButton(c['name'], callback_data=f"addcat_{urllib.parse.quote_plus(c['name'])}")] for c in cats]
-        await update.message.reply_text("Pick a category for the course:", reply_markup=InlineKeyboardMarkup(keyboard))
+        # Show paginated categories listing (first page)
+        await addcat_page(update.message, context, page=1)
         return ADD_CATEGORY
 
     except Exception as e:
@@ -199,8 +202,24 @@ async def parent_selected(update: Update, context: CallbackContext):
 
     keyboard = []
     if child_cats:
-        for child in sorted(child_cats, key=lambda c: (c.get('name') or '').lower()):
+        # Paginate child categories (coaches) when many
+        sorted_children = sorted(child_cats, key=lambda c: (c.get('name') or '').lower())
+        page = 1
+        page_size = COURSE_PAGE_SIZE
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_children = sorted_children[start:end]
+        for child in page_children:
             keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
+        # Navigation row
+        nav = []
+        total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
+        last_page = max(1, total_pages)
+        if total_pages > 1 and page < last_page:
+            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+        if nav:
+            keyboard.append(nav)
         # Also allow manual entry or no coach
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
@@ -217,13 +236,139 @@ async def parent_selected(update: Update, context: CallbackContext):
             coaches_set = set()
 
         coaches = sorted(list(coaches_set))
-        for coach in coaches:
+        # Paginate derived coaches when many
+        page = 1
+        page_size = COURSE_PAGE_SIZE
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_coaches = coaches[start:end]
+        for coach in page_coaches:
             keyboard.append([InlineKeyboardButton(coach, callback_data=f"addcoach::{urllib.parse.quote_plus(coach)}")])
+        nav = []
+        total_pages = (len(coaches) - 1) // page_size + 1 if coaches else 1
+        last_page = max(1, total_pages)
+        if total_pages > 1 and page < last_page:
+            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+        if nav:
+            keyboard.append(nav)
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
 
     await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     return ADD_COACH
+
+
+async def addcoach_page(update: Update, context: CallbackContext):
+    """Paginated view for coach selection inside the add flow.
+
+    Callback format: addcoach_page::{parent}::{page}
+    parent may be empty string for top-level.
+    """
+    query = update.callback_query
+    await safe_answer(query)
+    data = query.data
+    parts = data.split("::")
+    if len(parts) < 3:
+        await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, 'data', None))
+        return
+    parent_enc = parts[1]
+    try:
+        page = int(parts[2])
+    except Exception:
+        page = 1
+    parent = urllib.parse.unquote_plus(parent_enc) if parent_enc else None
+
+    try:
+        db = await get_db()
+        if parent:
+            children = await db.categories.find({"parent": parent}).to_list(length=None)
+        else:
+            children = []
+    except Exception:
+        children = []
+
+    keyboard = []
+    if children:
+        sorted_children = sorted(children, key=lambda c: (c.get('name') or '').lower())
+        page_size = COURSE_PAGE_SIZE
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_children = sorted_children[start:end]
+        for child in page_children:
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
+
+        nav = []
+        total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
+        last_page = max(1, total_pages)
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
+        if total_pages > 1 and page < last_page:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+        if nav:
+            keyboard.append(nav)
+
+    # Always include manual/no-coach options
+    keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
+    keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+
+    await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+    return
+
+
+async def addcat_page(update_or_message, context: CallbackContext, *, page: int = 1):
+    """Paginated categories selection for the add-course fallback.
+
+    This function supports being called with a CallbackQuery (update.callback_query)
+    where `update_or_message.data` contains `addcat_page::{page}` or with
+    a Message context (initial call) where we pass page param explicitly.
+    """
+    # Normalize to callback query if present
+    query = getattr(update_or_message, 'callback_query', None)
+    is_query = query is not None
+    if is_query:
+        await safe_answer(query)
+        data = query.data
+        parts = data.split("::")
+        try:
+            page = int(parts[1])
+        except Exception:
+            page = 1
+
+    try:
+        db = await get_db()
+        cats = await db.categories.find().to_list(length=None)
+    except Exception:
+        cats = []
+
+    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+    page_size = COURSE_PAGE_SIZE
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_cats = cats[start:end]
+
+    keyboard = [[InlineKeyboardButton(c.get('name'), callback_data=f"addcat_{urllib.parse.quote_plus(c.get('name'))}")] for c in page_cats]
+
+    nav = []
+    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    last_page = max(1, total_pages)
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page-1}"))
+    if page < last_page:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
+    if nav:
+        keyboard.append(nav)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if is_query:
+        await safe_edit_message(query, f"Pick a category for the course (page {page}/{last_page}):", reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    else:
+        # called from a Message flow (initial display)
+        await update_or_message.reply_text(f"Pick a category for the course (page {page}/{last_page}):", reply_markup=reply_markup)
+    return
 
 
 async def coach_selected(update: Update, context: CallbackContext):
