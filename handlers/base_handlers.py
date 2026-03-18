@@ -939,7 +939,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             await update_or_message.reply_text("No subcategories available.")
         return
 
-    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}::{page}")] for child in page_children]
+    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}")] for child in page_children]
 
     nav = []
     total_pages = (len(children) - 1) // page_size + 1 if children else 1
@@ -1383,7 +1383,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         keyboard = []
         for child in page_children:
             child_path = child.get('path') or child.get('name')
-            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}::{page}")])
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
 
         # Navigation row (Previous / End / Next)
         nav = []
