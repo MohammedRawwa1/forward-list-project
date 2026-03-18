@@ -9,7 +9,6 @@ from pymongo.errors import DuplicateKeyError
 import urllib.parse
 import os
 from datetime import datetime, timedelta
-
 import hashlib
 import json
 import time
@@ -756,6 +755,16 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
     # (Breadcrumb row inserted above with Home/End when applicable)
 
+    # Ensure a clear Back button for category-origin pages so users can
+    # return to the categories listing (consistent with other views).
+    try:
+        if origin_type == 'category':
+            # Avoid duplicating a Back button if one already exists
+            if not any((getattr(b, 'text', '') == '🔙 Back') for row in keyboard for b in row):
+                keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    except Exception:
+        pass
+
     return text, InlineKeyboardMarkup(keyboard)
 
 # Input Validation for Category Name
@@ -798,27 +807,237 @@ async def help(update: Update, context: CallbackContext):
 
 async def list_categories(update: Update, context: CallbackContext):
     """Show every category as an inline button that opens its courses."""
+    # Show paginated top-level categories (page 1)
+    try:
+        await categories_page(update.message, context, page=1)
+    except Exception as e:
+        logger.error(f"Error listing categories: {e}")
+        await update.message.reply_text("An unexpected error occurred. Please try again later.")
+
+
+async def createcat_page(update_or_message, context: CallbackContext, *, page: int = 1):
+    """Paginated top-level categories view for the `/create_category` flow.
+
+    Buttons use `createcat_parent::{name}` callback_data so the
+    existing `handle_create_category_parent` handler can be reused.
+    Accepts either a `Message` (initial call) or a `CallbackQuery`
+    (callback_data: `createcat_page::{page}`).
+    """
+    query = getattr(update_or_message, 'callback_query', None)
+    is_query = query is not None
+    if is_query:
+        await safe_answer(query)
+        data = query.data
+        parts = data.split("::")
+        try:
+            page = int(parts[1])
+        except Exception:
+            page = 1
+
     try:
         db = await get_db()
-        # show only top-level categories (no parent) for the command
-        categories = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
-        # Ensure deterministic, case-insensitive A→Z ordering for display
-        categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
-        if not categories:
-            await update.message.reply_text("No categories available. Use /create_category to create one.")
+        if db is None:
+            if is_query:
+                await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
+            else:
+                await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
-        keyboard = [
-            [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")]
-            for cat in categories
-        ]
-        msg = await update.message.reply_text("Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+        cats = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+    except Exception:
+        cats = []
+
+    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+    page_size = PAGE_SIZE
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_cats = cats[start:end]
+
+    if not page_cats and not is_query:
+        await update_or_message.reply_text("No categories available. Use /create_category to create one.")
+        return
+
+    keyboard = []
+    # Provide explicit Top-level option
+    keyboard.append([InlineKeyboardButton("(Top-level)", callback_data=f"createcat_parent::")])
+    for cat in page_cats:
+        keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}")])
+
+    nav = []
+    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    last_page = max(1, total_pages)
+    # Prev (left)
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"createcat_page::{page-1}"))
+    # Home (center)
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"createcat_page::1"))
+    # Next (right)
+    if page < last_page:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"createcat_page::{page+1}"))
+    # End (always rightmost when multiple pages)
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"createcat_page::{last_page}"))
+
+    if nav:
+        keyboard.append(nav)
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    title = f"Select a parent category (page {page}/{last_page}):"
+    if is_query:
+        await safe_edit_message(query, title, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    else:
+        await update_or_message.reply_text(title, reply_markup=reply_markup)
+    return
+
+
+async def children_page(update_or_message, context: CallbackContext, parent: str, *, page: int = 1):
+    """Paginated child categories view for a given `parent`.
+
+    Shows child categories of `parent` with `showcat::` callbacks so the
+    user can inspect the newly created child. Accepts Message or CallbackQuery.
+    """
+    query = getattr(update_or_message, 'callback_query', None)
+    is_query = query is not None
+    if is_query:
+        await safe_answer(query)
+        data = query.data
+        parts = data.split("::")
+        # support showcat::<path>::<page> format — ignored here, page parsed below
+        if len(parts) > 2:
+            try:
+                page = int(parts[-1])
+            except Exception:
+                page = page
+
+    try:
+        db = await get_db()
+        if db is None:
+            if is_query:
+                await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
+            else:
+                await update_or_message.reply_text("Error: Unable to connect to the database.")
+            return
+
+        children = await db.categories.find({"parent": parent}).to_list(length=None)
+    except Exception:
+        children = []
+
+    children = sorted(children, key=lambda c: (c.get('name') or '').lower())
+    page_size = PAGE_SIZE
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_children = children[start:end]
+
+    if not page_children:
+        if is_query:
+            await safe_edit_message(query, "No subcategories available on this page.", action_key=getattr(query, 'data', None))
+        else:
+            await update_or_message.reply_text("No subcategories available.")
+        return
+
+    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}")] for child in page_children]
+
+    nav = []
+    total_pages = (len(children) - 1) // page_size + 1 if children else 1
+    last_page = max(1, total_pages)
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::{page-1}"))
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::1"))
+    if page < last_page:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::{page+1}"))
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::{last_page}"))
+    if nav:
+        keyboard.append(nav)
+
+    # Up button to parent view
+    pdoc = await db.categories.find_one({"name": parent})
+    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+    keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    title = f"Subcategories of '{parent}' (page {page}/{last_page}):"
+    if is_query:
+        await safe_edit_message(query, title, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    else:
+        await update_or_message.reply_text(title, reply_markup=reply_markup)
+    return
+
+
+async def categories_page(update_or_message, context: CallbackContext, *, page: int = 1):
+    """Paginated top-level categories view.
+
+    Accepts either a `Message` (from the `/categories` command) or a
+    `CallbackQuery` (callback_data: `categories_page::{page}`).
+    """
+    query = getattr(update_or_message, 'callback_query', None)
+    is_query = query is not None
+    if is_query:
+        await safe_answer(query)
+        data = query.data
+        parts = data.split("::")
+        try:
+            page = int(parts[1])
+        except Exception:
+            page = 1
+
+    try:
+        db = await get_db()
+        if db is None:
+            if is_query:
+                await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
+            else:
+                await update_or_message.reply_text("Error: Unable to connect to the database.")
+            return
+
+        cats = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+    except Exception:
+        cats = []
+
+    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+    page_size = PAGE_SIZE
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_cats = cats[start:end]
+
+    if not page_cats:
+        if is_query:
+            await safe_edit_message(query, "No categories available on this page.", action_key=getattr(query, 'data', None))
+        else:
+            await update_or_message.reply_text("No categories available. Use /create_category to create one.")
+        return
+
+    keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")] for cat in page_cats]
+
+    nav = []
+    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    last_page = max(1, total_pages)
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"categories_page::{page-1}"))
+    if page < last_page:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"categories_page::{page+1}"))
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"categories_page::{last_page}"))
+    if nav:
+        keyboard.append(nav)
+
+    # Breadcrumb / Home row
+    try:
+        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+        keyboard.insert(0, breadcrumb_buttons)
+    except Exception:
+        pass
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    title = f"Tap a category to see its courses (page {page}/{last_page}):"
+    if is_query:
+        await safe_edit_message(query, title, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    else:
+        msg = await update_or_message.reply_text(title, reply_markup=reply_markup)
         try:
             schedule_close_inline_message(msg)
         except Exception:
             pass
-    except Exception as e:
-        logger.error(f"Error listing categories: {e}")
-        await update.message.reply_text("An unexpected error occurred. Please try again later.")
+    return
 
 
 async def list_coaches(update: Update, context: CallbackContext):
@@ -1211,27 +1430,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
         )
         return
     courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-    keyboard = []
-    for crs in courses:
-        try:
-            details_cb = _make_course_ref(cat_name, crs['name'], 'category', 1)
-            logger.debug("showcat_handler: course=%s details_cb=%s", crs.get('name'), details_cb)
-            keyboard.append([
-                InlineKeyboardButton(crs["name"], url=crs.get('link')),
-                InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
-            ])
-        except Exception as e:
-            logger.error("showcat_handler: failed to build button for course %s: %s", repr(crs), e)
-    # Delete is only available from the course Details view.
-    # Back to parent if available, otherwise top-level categories
-    parent = category_doc.get('parent')
-    if parent:
-        pdoc = await db.categories.find_one({"name": parent})
-        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
-    else:
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-    await safe_edit_message(query, f"Courses in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+    # Use paginated courses view for this category
+    page = page_from_callback or 1
+    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=cat_name)
+    if not text:
+        await safe_edit_message(query, f"No courses found in '{cat_name}' on page {page}.", action_key=getattr(query, 'data', None))
+        return
+    await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
@@ -1428,11 +1633,16 @@ async def create_category(update: Update, context: CallbackContext):
     except Exception:
         cats = []
 
-    keyboard = []
-    keyboard.append([InlineKeyboardButton("(Top-level)", callback_data=f"createcat_parent::")])
-    for cat in cats:
-        keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}")])
-    await update.message.reply_text("Select a parent category (or choose Top-level):", reply_markup=InlineKeyboardMarkup(keyboard))
+    # Use paginated createcat_page for consistent viewing
+    try:
+        await createcat_page(update.message, context, page=1)
+    except Exception:
+        # Fallback to previous behavior
+        keyboard = []
+        keyboard.append([InlineKeyboardButton("(Top-level)", callback_data=f"createcat_parent::")])
+        for cat in cats:
+            keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}")])
+        await update.message.reply_text("Select a parent category (or choose Top-level):", reply_markup=InlineKeyboardMarkup(keyboard))
     return CREATE_CAT_PARENT
 
 
@@ -1520,20 +1730,11 @@ async def handle_category_name(update: Update, context: CallbackContext):
         # categories; otherwise show the parent's children list.
         try:
             if not parent:
-                # Show top-level categories
-                await list_categories(update, context)
+                # Show top-level categories using paginated view
+                await createcat_page(update.message, context, page=1)
             else:
-                # Show children of the parent including the newly created category
-                children = await db.categories.find({"parent": parent}).to_list(length=None)
-                keyboard = []
-                for child in sorted(children, key=lambda c: (c.get('name') or '').lower()):
-                    child_path = child.get('path') or child.get('name')
-                    keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
-                # add up/back button to parent or top-level
-                pdoc = await db.categories.find_one({"name": parent})
-                ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
-                await update.message.reply_text(f"Subcategories of '{parent}':", reply_markup=InlineKeyboardMarkup(keyboard))
+                # Show paginated children of the parent including the newly created category
+                await children_page(update.message, context, parent, page=1)
         except Exception:
             # Non-fatal; ignore errors when trying to display the view
             pass
