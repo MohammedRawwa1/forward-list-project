@@ -40,6 +40,8 @@ from handlers.course_handlers import (
     add_course_link,
     add_course_category,
     category_selected,
+    addcoach_page,
+    addcat_page,
     error_handler as course_error_handler,
     handle_link_parsing_error,
     cancel,
