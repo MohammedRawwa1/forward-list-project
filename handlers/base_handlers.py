@@ -130,6 +130,21 @@ def _store_callback_payload(payload: dict) -> str:
     return key
 
 
+def _shorten_showcat_cb(path: str, page: int):
+    """Return a safe callback_data for showcat views: either the direct
+    `showcat::{path}::{page}` if it fits, or a stored `showcat_ref::<key>`.
+    """
+    try:
+        cb = f"showcat::{urllib.parse.quote_plus(path)}::{page}"
+        if len(cb.encode('utf-8')) <= 64:
+            return cb
+        payload = {"type": "showcat", "path": path, "page": page}
+        key = _store_callback_payload(payload)
+        return f"showcat_ref::{key}"
+    except Exception:
+        return f"showcat::{urllib.parse.quote_plus(path)}::{page}"
+
+
 async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
     """Persist callback payload to Redis (preferred) or MongoDB (fallback).
     TTL defaults to 7 days.
@@ -955,12 +970,12 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     total_pages = (len(children) - 1) // page_size + 1 if children else 1
     last_page = max(1, total_pages)
     if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::{page-1}"))
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::1"))
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(parent, page-1)))
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent, 1)))
     if page < last_page:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::{page+1}"))
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent, page+1)))
     if total_pages > 1:
-        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"showcat::{urllib.parse.quote_plus(parent)}::{last_page}"))
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(parent, last_page)))
     if nav:
         keyboard.append(nav)
 
@@ -1117,7 +1132,19 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
     data = query.data
-    parts = data.split("::")
+    # Support short stored refs for coach_in_cat (coach_in_cat_ref::<key>)
+    if data.startswith("coach_in_cat_ref::"):
+        key = data.split("::", 1)[1]
+        payload = await _resolve_callback_payload(key)
+        if not payload:
+            await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
+            return
+        # payload contains category, coach_slug, page
+        category = payload.get('category')
+        coach_slug = payload.get('coach_slug')
+        page = int(payload.get('page', 1) or 1)
+    else:
+        parts = data.split("::")
     # Accept either: coach_in_cat::{category}::{coach_slug}
     # Or: coach_in_cat::{category}::{coach_slug}::{type_slug}
     if len(parts) < 3:
@@ -1451,18 +1478,18 @@ async def showcat_handler(update: Update, context: CallbackContext):
         total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
         last_page = max(1, total_pages)
         if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page-1}"))
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(cat_path, page-1)))
 
         # Put End between Prev and Next; if on first page, place End at the left
-        if total_pages > 1:
-            end_btn = InlineKeyboardButton("⏭️ End", callback_data=f"showcat::{urllib.parse.quote_plus(cat_name)}::{last_page}")
+            if total_pages > 1:
+                end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_name, last_page))
             if page == 1:
                 nav.insert(0, end_btn)
             else:
                 nav.append(end_btn)
 
         if len(sorted_children) > end:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page+1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(cat_path, page+1)))
 
         if nav:
             keyboard.append(nav)
@@ -1513,8 +1540,22 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # If we found coaches, show them; otherwise fall back to showing courses in this category
     if coaches:
         # Include the current category page in the coach callback so we can
-        # return the user to the same page after viewing details.
-        keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach.get('slug') or urllib.parse.quote_plus(coach.get('name'))}::{page}")] for coach in coaches]
+        # return the user to the same page after viewing details. Use short
+        # stored refs when the callback_data would exceed Telegram's 64-byte
+        # limit to avoid Button_data_invalid errors.
+        keyboard = []
+        for coach in coaches:
+            coach_name = coach.get('name')
+            coach_slug = coach.get('slug') or urllib.parse.quote_plus(coach_name)
+            cb = f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach_slug}::{page}"
+            try:
+                if len(cb.encode('utf-8')) > 64:
+                    payload = {"type": "coach_in_cat", "category": cat_name, "coach_slug": coach_slug, "page": page}
+                    key = _store_callback_payload(payload)
+                    cb = f"coach_in_cat_ref::{key}"
+            except Exception:
+                pass
+            keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page}")])
         await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
