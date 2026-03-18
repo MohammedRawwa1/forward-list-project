@@ -13,6 +13,8 @@ from handlers.base_handlers import (
     list_courses,
     list_coaches,
     list_categories,
+    categories_page,
+    createcat_page,
     create_category,
     create_parent,
     handle_create_category_parent,
@@ -161,6 +163,12 @@ async def setup_handlers(application: Application):
     )
     application.add_handler(
         CallbackQueryHandler(addcat_page, pattern=r"^addcat_page::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(categories_page, pattern=r"^categories_page::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(createcat_page, pattern=r"^createcat_page::")
     )
     application.add_handler(
         CallbackQueryHandler(handle_category_selection, pattern=r"^category_")
