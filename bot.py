@@ -38,6 +38,8 @@ from handlers.course_handlers import (
     add_course_link,
     add_course_category,
     category_selected,
+    addcoach_page,
+    addcat_page,
     error_handler as course_error_handler,
     handle_link_parsing_error,
     cancel,
@@ -153,6 +155,12 @@ async def setup_handlers(application: Application):
     )
     application.add_handler(
         CallbackQueryHandler(courses_callback, pattern=r"^courses::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(addcat_page, pattern=r"^addcat_page::")
     )
     application.add_handler(
         CallbackQueryHandler(handle_category_selection, pattern=r"^category_")
