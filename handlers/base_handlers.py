@@ -1341,6 +1341,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
         cat_path = payload.get('path')
         parent_origin = payload.get('from_parent')
         parent_origin_page = payload.get('parent_page')
+        # ensure downstream logic that expects `encoded` works
+        try:
+            encoded = urllib.parse.quote_plus(cat_path) if cat_path else ""
+        except Exception:
+            encoded = ""
         page_from_callback = None
     else:
         # Handle from_parent suffix first (preserves parent page info while
