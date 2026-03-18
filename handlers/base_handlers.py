@@ -762,7 +762,8 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                 # prefer origin_context (parent path) when available
                 target = origin_context or category
                 if target:
-                    back_cb = f"showcat::{urllib.parse.quote_plus(str(target))}"
+                    # Preserve the current page when returning to the target
+                    back_cb = f"showcat::{urllib.parse.quote_plus(str(target))}::{page}"
                 else:
                     back_cb = "back_to_cats"
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
@@ -939,7 +940,9 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             await update_or_message.reply_text("No subcategories available.")
         return
 
-    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}")] for child in page_children]
+    # When linking into a child category, include a `from_parent` suffix so
+    # the child can return to the same parent page via its Up/Back buttons.
+    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}::from_parent::{urllib.parse.quote_plus(parent)}::{page}")] for child in page_children]
 
     nav = []
     total_pages = (len(children) - 1) // page_size + 1 if children else 1
@@ -1011,7 +1014,7 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             await update_or_message.reply_text("No categories available. Use /create_category to create one.")
         return
 
-    keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")] for cat in page_cats]
+    keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}::1")] for cat in page_cats]
 
     nav = []
     total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
@@ -1311,16 +1314,48 @@ async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
     await safe_answer(query)
-    # Expect callback_data: showcat::{path_or_name} or showcat::{path_or_name}::{page}
-    parts = query.data.split("::")
-    encoded = parts[1] if len(parts) > 1 else ""
-    # If a page suffix was included, parts[2] will contain it — keep it available
+    # Expect callback_data forms:
+    #  - showcat::{path_or_name}
+    #  - showcat::{path_or_name}::{page}
+    #  - showcat::{path_or_name}::from_parent::{parent_path}::{parent_page}
+    raw = query.data
     page_from_callback = None
-    if len(parts) > 2:
+    parent_origin = None
+    parent_origin_page = None
+    encoded = ''
+    # Handle from_parent suffix first (preserves parent page info while
+    # allowing child to open at page 1)
+    if "::from_parent::" in raw:
+        left, right = raw.split("::from_parent::", 1)
+        left_parts = left.split("::")
+        encoded = left_parts[1] if len(left_parts) > 1 else ""
+        # left may optionally include a page too (rare)
+        if len(left_parts) > 2:
+            try:
+                page_from_callback = int(left_parts[2])
+            except Exception:
+                page_from_callback = None
+        # parse right as parent_path::parent_page
         try:
-            page_from_callback = int(parts[2])
+            rp = right.split("::")
+            parent_origin = urllib.parse.unquote_plus(rp[0]) if rp and rp[0] else None
+            if len(rp) > 1:
+                try:
+                    parent_origin_page = int(rp[1])
+                except Exception:
+                    parent_origin_page = None
         except Exception:
-            page_from_callback = None
+            parent_origin = None
+            parent_origin_page = None
+    else:
+        parts = raw.split("::")
+        encoded = parts[1] if len(parts) > 1 else ""
+        if len(parts) > 2:
+            try:
+                page_from_callback = int(parts[2])
+            except Exception:
+                page_from_callback = None
+
     # Current page for this category view (used when linking to coaches)
     page = page_from_callback or 1
     cat_path = urllib.parse.unquote_plus(encoded)
@@ -1383,7 +1418,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         keyboard = []
         for child in page_children:
             child_path = child.get('path') or child.get('name')
-            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}::from_parent::{urllib.parse.quote_plus(cat_path)}::{page}")])
 
         # Navigation row (Previous / End / Next)
         nav = []
@@ -1444,8 +1479,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
             else:
                 continue
             keyboard.append([InlineKeyboardButton(t_name, callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}")])
-        # Back to this category view
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}")])
+        # Back to this category view (preserve current page)
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page}")])
         await safe_edit_message(query, f"{cat_name} — Select a type:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -1454,8 +1489,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
         # Include the current category page in the coach callback so we can
         # return the user to the same page after viewing details.
         keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach.get('slug') or urllib.parse.quote_plus(coach.get('name'))}::{page}")] for coach in coaches]
-        # Back to this category view
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}")])
+        # Back to this category view (preserve current page)
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page}")])
         await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -1470,7 +1505,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if parent:
             pdoc = await db.categories.find_one({"name": parent})
             ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{page}")])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
@@ -1515,7 +1550,7 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
             await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
             return
         keyboard = [
-            [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}")]
+            [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}::1")]
             for cat in categories
         ]
         await safe_edit_message(query, "Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
@@ -1609,7 +1644,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             if total_pages > 1 and page < total_pages:
                 end_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"
                 breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
-            breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}"))
+            breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}::{page}"))
             keyboard.insert(0, breadcrumb_buttons)
         except Exception:
             pass
@@ -1839,10 +1874,11 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     ]
     # Delete is only available from the course Details view.
     parent = category_doc.get('parent')
-    if parent:
-        pdoc = await db.categories.find_one({"name": parent})
-        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+        if parent:
+            pdoc = await db.categories.find_one({"name": parent})
+            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+            # No page context here — default to page 1
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::1")])
     else:
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await safe_edit_message(query, f'📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
@@ -2022,7 +2058,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             if parent:
                                 pdoc = await db.categories.find_one({"name": parent})
                                 ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                extra_row.append(InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}"))
+                                extra_row.append(InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{origin_page}"))
                                 logger.debug("handle_course_selection: coaches button -> parent=%s ppath=%s", parent, ppath)
                     # Always include All Categories button next to Coaches (or alone)
                     extra_row.append(InlineKeyboardButton("📚 All Categories", callback_data="back_to_cats"))
@@ -2044,7 +2080,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                 if parent:
                                     pdoc = await db.categories.find_one({"name": parent})
                                     ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                    extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")]
+                                    extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{origin_page}")]
                                 else:
                                     extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
                             else:
