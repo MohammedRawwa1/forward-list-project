@@ -301,10 +301,17 @@ async def addcoach_page(update: Update, context: CallbackContext):
         nav = []
         total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
         last_page = max(1, total_pages)
+        # Layout: Prev (left), Home (center), Next (right); End always at the end.
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
-        if total_pages > 1 and page < last_page:
+
+        # Home for add flow: go to first page for this parent
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
+
+        if page < last_page:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+
+        if total_pages > 1:
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
         if nav:
             keyboard.append(nav)
@@ -353,10 +360,18 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     nav = []
     total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
     last_page = max(1, total_pages)
+    # Layout: Prev (left), Home (center), Next (right); End always at the end.
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page-1}"))
+
+    # Home for /add (go to first page)
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcat_page::1"))
+
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
+
+    # End: always provide when multiple pages
+    if total_pages > 1:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
     if nav:
         keyboard.append(nav)
