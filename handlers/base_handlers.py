@@ -1116,7 +1116,26 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
     # parts[0] == 'coach_in_cat'
     category = urllib.parse.unquote_plus(parts[1])
     coach_slug = urllib.parse.unquote_plus(parts[2])
-    type_slug = urllib.parse.unquote_plus(parts[3]) if len(parts) >= 4 else None
+    # Support optional forms:
+    #  - coach_in_cat::{category}::{coach_slug}
+    #  - coach_in_cat::{category}::{coach_slug}::{type_slug}
+    #  - coach_in_cat::{category}::{coach_slug}::{page}
+    #  - coach_in_cat::{category}::{coach_slug}::{type_slug}::{page}
+    type_slug = None
+    page = 1
+    if len(parts) >= 4:
+        maybe = parts[3]
+        # if numeric, treat as page
+        try:
+            page = int(maybe)
+        except Exception:
+            type_slug = urllib.parse.unquote_plus(maybe)
+    if len(parts) >= 5:
+        # treat parts[4] as page if present
+        try:
+            page = int(parts[4])
+        except Exception:
+            pass
 
     db = await get_db()
     if db is None:
@@ -1175,7 +1194,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         except Exception:
             origin_ctx = None
 
-        text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='category', category=category, origin_context=origin_ctx)
+        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='category', category=category, origin_context=origin_ctx)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
             return
@@ -1302,6 +1321,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
             page_from_callback = int(parts[2])
         except Exception:
             page_from_callback = None
+    # Current page for this category view (used when linking to coaches)
+    page = page_from_callback or 1
     cat_path = urllib.parse.unquote_plus(encoded)
     db = await get_db()
     # Try to resolve by `path` first, then by `name` for legacy docs
@@ -1430,7 +1451,9 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     # If we found coaches, show them; otherwise fall back to showing courses in this category
     if coaches:
-        keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach.get('slug') or urllib.parse.quote_plus(coach.get('name'))}")] for coach in coaches]
+        # Include the current category page in the coach callback so we can
+        # return the user to the same page after viewing details.
+        keyboard = [[InlineKeyboardButton(coach.get('name'), callback_data=f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach.get('slug') or urllib.parse.quote_plus(coach.get('name'))}::{page}")] for coach in coaches]
         # Back to this category view
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}")])
         await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
