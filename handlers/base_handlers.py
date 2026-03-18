@@ -940,9 +940,16 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             await update_or_message.reply_text("No subcategories available.")
         return
 
-    # When linking into a child category, include a `from_parent` suffix so
-    # the child can return to the same parent page via its Up/Back buttons.
-    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}::from_parent::{urllib.parse.quote_plus(parent)}::{page}")] for child in page_children]
+    # When linking into a child category, store a short callback payload so
+    # the callback_data remains under Telegram's 64-byte limit. Payload
+    # includes child path and parent page info so the child can return to
+    # the same parent page via its Up/Back buttons.
+    keyboard = []
+    for child in page_children:
+        child_path = child.get('path') or child.get('name')
+        payload = {"type": "showcat", "path": child_path, "from_parent": parent, "parent_page": page}
+        key = _store_callback_payload(payload)
+        keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat_ref::{key}")])
 
     nav = []
     total_pages = (len(children) - 1) // page_size + 1 if children else 1
@@ -1323,38 +1330,52 @@ async def showcat_handler(update: Update, context: CallbackContext):
     parent_origin = None
     parent_origin_page = None
     encoded = ''
-    # Handle from_parent suffix first (preserves parent page info while
-    # allowing child to open at page 1)
-    if "::from_parent::" in raw:
-        left, right = raw.split("::from_parent::", 1)
-        left_parts = left.split("::")
-        encoded = left_parts[1] if len(left_parts) > 1 else ""
-        # left may optionally include a page too (rare)
-        if len(left_parts) > 2:
-            try:
-                page_from_callback = int(left_parts[2])
-            except Exception:
-                page_from_callback = None
-        # parse right as parent_path::parent_page
-        try:
-            rp = right.split("::")
-            parent_origin = urllib.parse.unquote_plus(rp[0]) if rp and rp[0] else None
-            if len(rp) > 1:
-                try:
-                    parent_origin_page = int(rp[1])
-                except Exception:
-                    parent_origin_page = None
-        except Exception:
-            parent_origin = None
-            parent_origin_page = None
+    # Support short stored refs: `showcat_ref::<key>` -> resolve payload
+    if raw.startswith("showcat_ref::"):
+        key = raw.split("::", 1)[1]
+        payload = await _resolve_callback_payload(key)
+        if not payload:
+            await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
+            return
+        # payload should contain `path`, optional `from_parent` and `parent_page`
+        cat_path = payload.get('path')
+        parent_origin = payload.get('from_parent')
+        parent_origin_page = payload.get('parent_page')
+        page_from_callback = None
     else:
-        parts = raw.split("::")
-        encoded = parts[1] if len(parts) > 1 else ""
-        if len(parts) > 2:
+        # Handle from_parent suffix first (preserves parent page info while
+        # allowing child to open at page 1)
+        if "::from_parent::" in raw:
+            left, right = raw.split("::from_parent::", 1)
+            left_parts = left.split("::")
+            encoded = left_parts[1] if len(left_parts) > 1 else ""
+            # left may optionally include a page too (rare)
+            if len(left_parts) > 2:
+                try:
+                    page_from_callback = int(left_parts[2])
+                except Exception:
+                    page_from_callback = None
+            # parse right as parent_path::parent_page
             try:
-                page_from_callback = int(parts[2])
+                rp = right.split("::")
+                parent_origin = urllib.parse.unquote_plus(rp[0]) if rp and rp[0] else None
+                if len(rp) > 1:
+                    try:
+                        parent_origin_page = int(rp[1])
+                    except Exception:
+                        parent_origin_page = None
             except Exception:
-                page_from_callback = None
+                parent_origin = None
+                parent_origin_page = None
+        else:
+            parts = raw.split("::")
+            encoded = parts[1] if len(parts) > 1 else ""
+            if len(parts) > 2:
+                try:
+                    page_from_callback = int(parts[2])
+                except Exception:
+                    page_from_callback = None
+    
 
     # Current page for this category view (used when linking to coaches)
     page = page_from_callback or 1
