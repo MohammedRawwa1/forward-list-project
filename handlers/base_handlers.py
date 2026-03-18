@@ -721,17 +721,10 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         # unambiguously route the request.
         if origin_type == 'global':
             home_cb = f"courses::global::1"
-        elif origin_type == 'category' and category:
-            # If an explicit origin_context was provided, treat that as the
-            # parent/return target (e.g., parent path). Otherwise default to
-            # the category's own first page.
-            if origin_context:
-                home_cb = f"showcat::{urllib.parse.quote_plus(origin_context)}"
-            else:
-                home_cb = f"courses::category::{urllib.parse.quote_plus(category)}::1"
         elif origin_type == 'coach' and category:
             home_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::1"
         else:
+            # Default Home goes to the top-level categories view
             home_cb = "back_to_cats"
         breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=home_cb)]
         if total_pages > 1 and page < total_pages:
@@ -763,9 +756,16 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     # return to the categories listing (consistent with other views).
     try:
         if origin_type == 'category':
-            # Avoid duplicating a Back button if one already exists
+            # For category-origin pages: Home -> top-level categories,
+            # Back -> return to the parent/topic view (origin_context if provided).
             if not any((getattr(b, 'text', '') == '🔙 Back') for row in keyboard for b in row):
-                keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+                # prefer origin_context (parent path) when available
+                target = origin_context or category
+                if target:
+                    back_cb = f"showcat::{urllib.parse.quote_plus(str(target))}"
+                else:
+                    back_cb = "back_to_cats"
+                keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
     except Exception:
         pass
 
@@ -1971,7 +1971,22 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             # Back button (it previously routed to the global /courses GUI)
             # and instead show a row with Coaches + All Categories.
             if origin_type == 'category':
-                nav_row = [InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                # Compute a back callback that returns to the course list for
+                # this course's category (use saved back token when present).
+                back_cb = None
+                try:
+                    if saved_back_cb:
+                        back_cb = saved_back_cb
+                except Exception:
+                    back_cb = None
+                if not back_cb:
+                    back_target = course.get('category') or cat_name or '1'
+                    try:
+                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                    except Exception:
+                        back_cb = f"courses::global::{origin_page}"
+
+                nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
                 extra_row = []
                 try:
                     # Coaches are represented as child categories under the
