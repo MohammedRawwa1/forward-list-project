@@ -1874,11 +1874,11 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     ]
     # Delete is only available from the course Details view.
     parent = category_doc.get('parent')
-        if parent:
-            pdoc = await db.categories.find_one({"name": parent})
-            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-            # No page context here — default to page 1
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::1")])
+    if parent:
+        pdoc = await db.categories.find_one({"name": parent})
+        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+        # No page context here — default to page 1
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::1")])
     else:
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await safe_edit_message(query, f'📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
