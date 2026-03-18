@@ -939,7 +939,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             await update_or_message.reply_text("No subcategories available.")
         return
 
-    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}")] for child in page_children]
+    keyboard = [[InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child.get('path') or child.get('name'))}::{page}")] for child in page_children]
 
     nav = []
     total_pages = (len(children) - 1) // page_size + 1 if children else 1
@@ -957,7 +957,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     # Up button to parent view
     pdoc = await db.categories.find_one({"name": parent})
     ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-    keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+    keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{page}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     title = f"Subcategories of '{parent}' (page {page}/{last_page}):"
@@ -1383,7 +1383,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         keyboard = []
         for child in page_children:
             child_path = child.get('path') or child.get('name')
-            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}")])
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}::{page}")])
 
         # Navigation row (Previous / End / Next)
         nav = []
@@ -1418,7 +1418,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if parent:
             pdoc = await db.categories.find_one({"name": parent})
             ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}")])
+            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{page}")])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
