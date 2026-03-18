@@ -317,6 +317,9 @@ async def setup_handlers(application: Application):
     application.add_handler(
         CallbackQueryHandler(showcat_handler, pattern=r"^showcat_ref::")
     )
+    application.add_handler(
+        CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat_ref::")
+    )
     # Generic showcat handler (catch-all) registered after the paged pattern
     application.add_handler(
         CallbackQueryHandler(showcat_handler, pattern=r"^showcat::")
