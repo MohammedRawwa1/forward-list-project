@@ -40,7 +40,7 @@ async def setup_course_handlers(application):
             ],
 
             # Legacy: allow selecting an arbitrary category at the end if needed
-            ADD_CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^addcat_")]
+            ADD_CATEGORY:[CallbackQueryHandler(category_selected, pattern=r"^addcat")]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         name="add_course_conv",
@@ -356,7 +356,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     end = start + page_size
     page_cats = cats[start:end]
 
-    keyboard = [[InlineKeyboardButton(c.get('name'), callback_data=f"addcat_{urllib.parse.quote_plus(c.get('name'))}")] for c in page_cats]
+    keyboard = [[InlineKeyboardButton(c.get('name'), callback_data=f"addcat::{urllib.parse.quote_plus(c.get('name'))}::{page}")] for c in page_cats]
 
     nav = []
     total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
@@ -417,9 +417,24 @@ async def category_selected(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
 
-    # Extract category name from callback data using the add-flow prefix
-    encoded = query.data.split('_', 1)[1]
-    category_name = urllib.parse.unquote_plus(encoded)
+    # Support both legacy `addcat_<name>` and new `addcat::<name>::<page>` formats
+    raw = query.data
+    category_name = None
+    origin_page = None
+    if raw.startswith("addcat::"):
+        parts = raw.split("::")
+        # parts -> ['addcat', '<name>', '<page>' (optional)]
+        if len(parts) >= 2:
+            category_name = urllib.parse.unquote_plus(parts[1])
+        if len(parts) >= 3:
+            try:
+                origin_page = int(parts[2])
+            except Exception:
+                origin_page = None
+    else:
+        # legacy underscore format
+        encoded = query.data.split('_', 1)[1]
+        category_name = urllib.parse.unquote_plus(encoded)
 
     # Get course data from user context
     course_name = context.user_data.get('course_name')
@@ -462,7 +477,9 @@ async def category_selected(update: Update, context: CallbackContext):
         )
         # Add a button so the user can view the updated category immediately
         try:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, 1))]])
+            # If we know the originating categories page, open that page; otherwise default to 1
+            view_page = origin_page or 1
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, view_page))]])
             await safe_edit_message(query, msg, reply_markup=kb, action_key=getattr(query, 'data', None))
         except Exception:
             await safe_edit_message(query, msg, action_key=getattr(query, 'data', None))
@@ -478,8 +495,21 @@ async def add_course_category(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
 
-    # Support callback data formats and allow underscores in names
-    category_name = query.data.split('_', 1)[1]
+    # Support both legacy `addcat_<name>` and new `addcat::<name>::<page>` formats
+    raw = query.data
+    category_name = None
+    origin_page = None
+    if raw.startswith("addcat::"):
+        parts = raw.split("::")
+        if len(parts) >= 2:
+            category_name = urllib.parse.unquote_plus(parts[1])
+        if len(parts) >= 3:
+            try:
+                origin_page = int(parts[2])
+            except Exception:
+                origin_page = None
+    else:
+        category_name = query.data.split('_', 1)[1]
     course_name = context.user_data.get("course_name")
     course_link = context.user_data.get("course_link")
 
@@ -505,7 +535,8 @@ async def add_course_category(update: Update, context: CallbackContext):
             return ConversationHandler.END
 
         try:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, 1))]])
+            view_page = origin_page or 1
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, view_page))]])
             await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", reply_markup=kb, action_key=getattr(query, 'data', None))
         except Exception:
             await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", action_key=getattr(query, 'data', None))
