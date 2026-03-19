@@ -6,7 +6,7 @@ from pymongo.errors import PyMongoError
 import logging
 import re
 import urllib.parse
-from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb
+from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload
 
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
 COURSE_PAGE_SIZE = 50
@@ -479,7 +479,13 @@ async def category_selected(update: Update, context: CallbackContext):
         try:
             # If we know the originating categories page, open that page; otherwise default to 1
             view_page = origin_page or 1
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, view_page))]])
+            try:
+                payload = {"type": "showcat", "path": category_name, "from_parent": "categories", "parent_page": view_page}
+                key = _store_callback_payload(payload)
+                cb = f"showcat_ref::{key}"
+            except Exception:
+                cb = _shorten_showcat_cb(category_name, view_page)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=cb)]])
             await safe_edit_message(query, msg, reply_markup=kb, action_key=getattr(query, 'data', None))
         except Exception:
             await safe_edit_message(query, msg, action_key=getattr(query, 'data', None))
@@ -536,7 +542,13 @@ async def add_course_category(update: Update, context: CallbackContext):
 
         try:
             view_page = origin_page or 1
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, view_page))]])
+            try:
+                payload = {"type": "showcat", "path": category_name, "from_parent": "categories", "parent_page": view_page}
+                key = _store_callback_payload(payload)
+                cb = f"showcat_ref::{key}"
+            except Exception:
+                cb = _shorten_showcat_cb(category_name, view_page)
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=cb)]])
             await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", reply_markup=kb, action_key=getattr(query, 'data', None))
         except Exception:
             await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", action_key=getattr(query, 'data', None))
