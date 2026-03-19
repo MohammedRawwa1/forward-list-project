@@ -784,8 +784,9 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                     elif origin_context == 'back_to_cats':
                         back_cb = "back_to_cats"
                     else:
-                        # Preserve the current page when returning to the target
-                        back_cb = _shorten_showcat_cb(str(target), page)
+                        # Preserve the parent page when returning to the target
+                        back_page = origin_context_page if origin_context_page is not None else page
+                        back_cb = _shorten_showcat_cb(str(target), back_page)
                 else:
                     back_cb = "back_to_cats"
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
