@@ -608,7 +608,7 @@ MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
 PAGE_SIZE = 50  # Default number of items per page for pagination
 
 
-def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None):
+def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None):
     """Builds the text and InlineKeyboardMarkup for a courses page.
 
     Returns (text, InlineKeyboardMarkup) or (None, None) when no items.
@@ -780,7 +780,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                     # If origin_context points to the categories listing (special sentinel),
                     # route back to the correct categories page instead of a showcat.
                     if origin_context == 'categories':
-                        back_cb = f"categories_page::{page}"
+                        back_cb = f"categories_page::{origin_context_page or 1}"
                     elif origin_context == 'back_to_cats':
                         back_cb = "back_to_cats"
                     else:
@@ -1257,7 +1257,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         # Back returns to the correct parent page.
         if parent_origin:
             origin_ctx = parent_origin
-        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='category', category=category, origin_context=origin_ctx)
+        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=parent_origin_page)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
             return
@@ -1660,7 +1660,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             except Exception:
                 origin_ctx = parent
 
-    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=cat_name, origin_context=origin_ctx)
+    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=cat_name, origin_context=origin_ctx, origin_context_page=parent_origin_page)
     if not text:
         await safe_edit_message(query, f"No courses found in '{cat_name}' on page {page}.", action_key=getattr(query, 'data', None))
         return
