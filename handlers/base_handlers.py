@@ -777,8 +777,15 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                 # prefer origin_context (parent path) when available
                 target = origin_context or category
                 if target:
-                    # Preserve the current page when returning to the target
-                    back_cb = _shorten_showcat_cb(str(target), page)
+                    # If origin_context points to the categories listing (special sentinel),
+                    # route back to the correct categories page instead of a showcat.
+                    if origin_context == 'categories':
+                        back_cb = f"categories_page::{page}"
+                    elif origin_context == 'back_to_cats':
+                        back_cb = "back_to_cats"
+                    else:
+                        # Preserve the current page when returning to the target
+                        back_cb = _shorten_showcat_cb(str(target), page)
                 else:
                     back_cb = "back_to_cats"
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
@@ -1140,16 +1147,23 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
     await safe_answer(query)
     data = query.data
     # Support short stored refs for coach_in_cat (coach_in_cat_ref::<key>)
+    parent_origin = None
+    parent_origin_page = None
     if data.startswith("coach_in_cat_ref::"):
         key = data.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
         if not payload:
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
-        # payload contains category, coach_slug, page
+        # payload contains category, coach_slug, page and optionally from_parent/parent_page
         category = payload.get('category')
         coach_slug = payload.get('coach_slug')
         page = int(payload.get('page', 1) or 1)
+        parent_origin = payload.get('from_parent')
+        try:
+            parent_origin_page = int(payload.get('parent_page')) if payload.get('parent_page') is not None else None
+        except Exception:
+            parent_origin_page = None
     else:
         parts = data.split("::")
     # Accept either: coach_in_cat::{category}::{coach_slug}
@@ -1238,6 +1252,11 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         except Exception:
             origin_ctx = None
 
+        # If this coach/category view originated from a parent (e.g., the
+        # paginated categories listing), prefer using that parent_origin so
+        # Back returns to the correct parent page.
+        if parent_origin:
+            origin_ctx = parent_origin
         text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='category', category=category, origin_context=origin_ctx)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
@@ -1579,14 +1598,21 @@ async def showcat_handler(update: Update, context: CallbackContext):
         for coach in coaches:
             coach_name = coach.get('name')
             coach_slug = coach.get('slug') or urllib.parse.quote_plus(coach_name)
-            cb = f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach_slug}::{page}"
-            try:
-                if len(cb.encode('utf-8')) > 64:
-                    payload = {"type": "coach_in_cat", "category": cat_name, "coach_slug": coach_slug, "page": page}
-                    key = _store_callback_payload(payload)
-                    cb = f"coach_in_cat_ref::{key}"
-            except Exception:
-                pass
+            # If we have a parent_origin, always persist the payload so we
+            # can carry parent_page info; otherwise try direct callback when short.
+            if parent_origin:
+                payload = {"type": "coach_in_cat", "category": cat_name, "coach_slug": coach_slug, "page": page, "from_parent": parent_origin, "parent_page": parent_origin_page}
+                key = _store_callback_payload(payload)
+                cb = f"coach_in_cat_ref::{key}"
+            else:
+                cb = f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach_slug}::{page}"
+                try:
+                    if len(cb.encode('utf-8')) > 64:
+                        payload = {"type": "coach_in_cat", "category": cat_name, "coach_slug": coach_slug, "page": page}
+                        key = _store_callback_payload(payload)
+                        cb = f"coach_in_cat_ref::{key}"
+                except Exception:
+                    pass
             keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
