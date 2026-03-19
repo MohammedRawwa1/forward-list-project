@@ -911,8 +911,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
     # Prev (left)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"createcat_page::{page-1}"))
-    # Home (center)
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"createcat_page::1"))
     # Next (right)
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"createcat_page::{page+1}"))
