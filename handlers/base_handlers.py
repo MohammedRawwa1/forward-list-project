@@ -1646,13 +1646,19 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # origin_context so Home will return to the parent directory.
     page = page_from_callback or 1
     parent = category_doc.get('parent')
+    # Prefer the stored parent_origin (from a showcat_ref) so we restore
+    # the exact parent page the user navigated from; otherwise fall back
+    # to the category's DB parent path.
     origin_ctx = None
-    if parent:
-        try:
-            pdoc = await db.categories.find_one({"name": parent})
-            origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-        except Exception:
-            origin_ctx = parent
+    if parent_origin:
+        origin_ctx = parent_origin
+    else:
+        if parent:
+            try:
+                pdoc = await db.categories.find_one({"name": parent})
+                origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+            except Exception:
+                origin_ctx = parent
 
     text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=cat_name, origin_context=origin_ctx)
     if not text:
