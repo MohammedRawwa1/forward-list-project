@@ -1036,7 +1036,14 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             await update_or_message.reply_text("No categories available. Use /create_category to create one.")
         return
 
-    keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=_shorten_showcat_cb(cat.get('path') or cat.get('name'), 1))] for cat in page_cats]
+    keyboard = []
+    for cat in page_cats:
+        cat_path = cat.get('path') or cat.get('name')
+        # Persist a short ref including the current categories page so
+        # returning from the category view restores the same page.
+        payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
+        key = _store_callback_payload(payload)
+        keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"showcat_ref::{key}")])
 
     nav = []
     total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
@@ -1367,13 +1374,25 @@ async def showcat_handler(update: Update, context: CallbackContext):
         # payload should contain `path`, optional `from_parent` and `parent_page`
         cat_path = payload.get('path')
         parent_origin = payload.get('from_parent')
-        parent_origin_page = payload.get('parent_page')
+        # parent_page may be stored as int or string; normalize to int when present
+        parent_origin_page = None
+        try:
+            if 'parent_page' in payload and payload.get('parent_page') is not None:
+                parent_origin_page = int(payload.get('parent_page'))
+        except Exception:
+            parent_origin_page = None
+        # child page (if stored) — preserve when provided
+        page_from_callback = None
+        try:
+            if 'page' in payload and payload.get('page') is not None:
+                page_from_callback = int(payload.get('page'))
+        except Exception:
+            page_from_callback = None
         # ensure downstream logic that expects `encoded` works
         try:
             encoded = urllib.parse.quote_plus(cat_path) if cat_path else ""
         except Exception:
             encoded = ""
-        page_from_callback = None
     else:
         # Handle from_parent suffix first (preserves parent page info while
         # allowing child to open at page 1)
@@ -1504,13 +1523,24 @@ async def showcat_handler(update: Update, context: CallbackContext):
             pass
 
         # add up/back button to parent or top-level at the bottom for convenience
-        parent = category_doc.get('parent')
-        if parent:
-            pdoc = await db.categories.find_one({"name": parent})
-            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
+        # If this view was opened via a stored `showcat_ref` from a parent,
+        # prefer returning to the recorded parent page (`parent_origin_page`).
+        if parent_origin:
+            try:
+                pdoc = await db.categories.find_one({"name": parent_origin})
+                ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent_origin
+            except Exception:
+                ppath = parent_origin
+            back_page = parent_origin_page or 1
+            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, back_page))])
         else:
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+            parent = category_doc.get('parent')
+            if parent:
+                pdoc = await db.categories.find_one({"name": parent})
+                ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
+            else:
+                keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
         await safe_edit_message(query, f"{cat_path} — Subcategories (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
