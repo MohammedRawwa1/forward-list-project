@@ -135,15 +135,23 @@ def _store_callback_payload(payload: dict) -> str:
     return key
 
 
-def _shorten_showcat_cb(path: str, page: int):
-    """Return a safe callback_data for showcat views: either the direct
-    `showcat::{path}::{page}` if it fits, or a stored `showcat_ref::<key>`.
+def _shorten_showcat_cb(path: str, page: int, from_parent: Optional[str] = None, parent_page: Optional[int] = None):
+    """Return a safe callback_data for showcat views.
+
+    Prefer the direct `showcat::{path}::{page}` when it fits; otherwise
+    store a short `showcat_ref::<key>` payload. If `from_parent` and
+    `parent_page` are provided, include them in the stored payload so
+    back-navigation can restore the originating categories page.
     """
     try:
         cb = f"showcat::{urllib.parse.quote_plus(path)}::{page}"
         if len(cb.encode('utf-8')) <= 64:
             return cb
         payload = {"type": "showcat", "path": path, "page": page}
+        if from_parent is not None:
+            payload["from_parent"] = from_parent
+        if parent_page is not None:
+            payload["parent_page"] = parent_page
         key = _store_callback_payload(payload)
         return f"showcat_ref::{key}"
     except Exception:
