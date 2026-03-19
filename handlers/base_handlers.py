@@ -102,6 +102,10 @@ def _make_course_ref(category: str, name: str, origin_type: str, origin_page: in
     }
     # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
     key = _store_callback_payload(payload)
+    try:
+        logger.debug("_make_course_ref: stored key=%s category=%s name=%s origin_type=%s origin_page=%s origin_context=%s back_cb=%s", key, category, name, origin_type, origin_page, origin_context, back_cb)
+    except Exception:
+        pass
     # Append an encoded back callback to the returned callback_data so the
     # Details view can use it directly without resolving the stored payload.
     try:
@@ -110,9 +114,10 @@ def _make_course_ref(category: str, name: str, origin_type: str, origin_page: in
         # Telegram callback_data must be <= 64 bytes. Don't append the
         # back token if it would exceed that limit; fall back to stored ref.
         if len(candidate.encode('utf-8')) <= 64:
+            logger.debug("_make_course_ref: using inline candidate (len=%d)", len(candidate.encode('utf-8')))
             return candidate
         else:
-            logger.debug("_make_course_ref: back token omitted due to length (%d bytes)", len(candidate.encode('utf-8')))
+            logger.debug("_make_course_ref: candidate too long (%d bytes), returning stored key course_ref::%s", len(candidate.encode('utf-8')), key)
             return f"course_ref::{key}"
     except Exception:
         return f"course_ref::{key}"
@@ -789,6 +794,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                         back_cb = _shorten_showcat_cb(str(target), back_page)
                 else:
                     back_cb = "back_to_cats"
+                logger.debug("build_courses_page: back_cb=%s origin_context=%s origin_context_page=%s origin_type=%s category=%s page=%s", back_cb, origin_context, origin_context_page, origin_type, category, page)
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
     except Exception:
         pass
@@ -1051,6 +1057,10 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         # returning from the category view restores the same page.
         payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
         key = _store_callback_payload(payload)
+        try:
+            logger.debug("categories_page: created showcat_ref key=%s path=%s parent_page=%s", key, cat_path, page)
+        except Exception:
+            pass
         keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"showcat_ref::{key}")])
 
     nav = []
@@ -1604,6 +1614,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
             if parent_origin:
                 payload = {"type": "coach_in_cat", "category": cat_name, "coach_slug": coach_slug, "page": page, "from_parent": parent_origin, "parent_page": parent_origin_page}
                 key = _store_callback_payload(payload)
+                try:
+                    logger.debug("coach_in_cat: created coach_in_cat_ref key=%s category=%s coach_slug=%s page=%s from_parent=%s parent_page=%s", key, cat_name, coach_slug, page, parent_origin, parent_origin_page)
+                except Exception:
+                    pass
                 cb = f"coach_in_cat_ref::{key}"
             else:
                 cb = f"coach_in_cat::{urllib.parse.quote_plus(cat_name)}::{coach_slug}::{page}"
