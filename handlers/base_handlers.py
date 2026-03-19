@@ -2343,14 +2343,15 @@ async def courses_callback(update: Update, context: CallbackContext):
                         courses = category_doc.get('courses', [])
                         courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
                         # compute origin_context (parent path) so Home returns to parent
-                        origin_ctx = None
-                        try:
-                            parent = category_doc.get('parent')
-                            if parent:
-                                pdoc = await db.categories.find_one({"name": parent})
-                                origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                        except Exception:
-                            origin_ctx = None
+                        # only resolve from DB when we didn't receive an origin_ctx
+                        if origin_ctx is None:
+                            try:
+                                parent = category_doc.get('parent')
+                                if parent:
+                                    pdoc = await db.categories.find_one({"name": parent})
+                                    origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                            except Exception:
+                                origin_ctx = None
                         text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page)
                         if not text:
                             await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
@@ -2420,14 +2421,15 @@ async def courses_callback(update: Update, context: CallbackContext):
                         return
                     courses = category_doc.get('courses', [])
                     courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-                    origin_ctx = None
-                    try:
-                        parent = category_doc.get('parent')
-                        if parent:
-                            pdoc = await db.categories.find_one({"name": parent})
-                            origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                    except Exception:
-                        origin_ctx = None
+                    # If origin_ctx not provided by callback, resolve parent path
+                    if origin_ctx is None:
+                        try:
+                            parent = category_doc.get('parent')
+                            if parent:
+                                pdoc = await db.categories.find_one({"name": parent})
+                                origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                        except Exception:
+                            origin_ctx = None
                     text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page)
                     if not text:
                         await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
