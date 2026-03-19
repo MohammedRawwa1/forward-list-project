@@ -2144,7 +2144,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     if origin_type != 'global':
                         if course_category:
                             parent_doc = await db.categories.find_one({"name": course_category})
-                                    if parent_doc:
+                            if parent_doc:
                                 parent = parent_doc.get('parent')
                                 if parent:
                                     pdoc = await db.categories.find_one({"name": parent})
