@@ -778,7 +778,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                 target = origin_context or category
                 if target:
                     # Preserve the current page when returning to the target
-                    back_cb = f"showcat::{urllib.parse.quote_plus(str(target))}::{page}"
+                    back_cb = _shorten_showcat_cb(str(target), page)
                 else:
                     back_cb = "back_to_cats"
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
@@ -982,7 +982,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     # Up button to parent view
     pdoc = await db.categories.find_one({"name": parent})
     ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-    keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{page}")])
+    keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     title = f"Subcategories of '{parent}' (page {page}/{last_page}):"
@@ -1036,7 +1036,7 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             await update_or_message.reply_text("No categories available. Use /create_category to create one.")
         return
 
-    keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}::1")] for cat in page_cats]
+    keyboard = [[InlineKeyboardButton(cat.get('name'), callback_data=_shorten_showcat_cb(cat.get('path') or cat.get('name'), 1))] for cat in page_cats]
 
     nav = []
     total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
@@ -1471,7 +1471,9 @@ async def showcat_handler(update: Update, context: CallbackContext):
         keyboard = []
         for child in page_children:
             child_path = child.get('path') or child.get('name')
-            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat::{urllib.parse.quote_plus(child_path)}::from_parent::{urllib.parse.quote_plus(cat_path)}::{page}")])
+            payload = {"type": "showcat", "path": child_path, "from_parent": cat_path, "parent_page": page}
+            key = _store_callback_payload(payload)
+            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"showcat_ref::{key}")])
 
         # Navigation row (Previous / End / Next)
         nav = []
@@ -1481,8 +1483,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(cat_path, page-1)))
 
         # Put End between Prev and Next; if on first page, place End at the left
-            if total_pages > 1:
-                end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_name, last_page))
+        if total_pages > 1:
+            end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_name, last_page))
             if page == 1:
                 nav.insert(0, end_btn)
             else:
@@ -1506,7 +1508,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if parent:
             pdoc = await db.categories.find_one({"name": parent})
             ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{page}")])
+            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
@@ -1533,7 +1535,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 continue
             keyboard.append([InlineKeyboardButton(t_name, callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}")])
         # Back to this category view (preserve current page)
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
         await safe_edit_message(query, f"{cat_name} — Select a type:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -1557,7 +1559,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 pass
             keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
         # Back to this category view (preserve current page)
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(cat_path)}::{page}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
         await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -1572,7 +1574,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if parent:
             pdoc = await db.categories.find_one({"name": parent})
             ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{page}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, page))])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
@@ -1617,7 +1619,7 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
             await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
             return
         keyboard = [
-            [InlineKeyboardButton(cat["name"], callback_data=f"showcat::{urllib.parse.quote_plus(cat.get('path') or cat.get('name'))}::1")]
+            [InlineKeyboardButton(cat["name"], callback_data=_shorten_showcat_cb(cat.get('path') or cat.get('name'), 1))]
             for cat in categories
         ]
         await safe_edit_message(query, "Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
@@ -1711,7 +1713,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             if total_pages > 1 and page < total_pages:
                 end_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"
                 breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
-            breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}::{page}"))
+            breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=_shorten_showcat_cb(category_name, page)))
             keyboard.insert(0, breadcrumb_buttons)
         except Exception:
             pass
@@ -1945,7 +1947,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         pdoc = await db.categories.find_one({"name": parent})
         ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
         # No page context here — default to page 1
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::1")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, 1))])
     else:
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
     await safe_edit_message(query, f'📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
@@ -2125,7 +2127,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             if parent:
                                 pdoc = await db.categories.find_one({"name": parent})
                                 ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                extra_row.append(InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{origin_page}"))
+                                extra_row.append(InlineKeyboardButton("🏠 Coaches", callback_data=_shorten_showcat_cb(ppath, origin_page)))
                                 logger.debug("handle_course_selection: coaches button -> parent=%s ppath=%s", parent, ppath)
                     # Always include All Categories button next to Coaches (or alone)
                     extra_row.append(InlineKeyboardButton("📚 All Categories", callback_data="back_to_cats"))
@@ -2142,12 +2144,12 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     if origin_type != 'global':
                         if course_category:
                             parent_doc = await db.categories.find_one({"name": course_category})
-                            if parent_doc:
+                                    if parent_doc:
                                 parent = parent_doc.get('parent')
                                 if parent:
                                     pdoc = await db.categories.find_one({"name": parent})
                                     ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-                                    extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=f"showcat::{urllib.parse.quote_plus(ppath)}::{origin_page}")]
+                                    extra_row = [InlineKeyboardButton("🏠 Coaches", callback_data=_shorten_showcat_cb(ppath, origin_page))]
                                 else:
                                     extra_row = [InlineKeyboardButton("🏠 Categories", callback_data="back_to_cats")]
                             else:
