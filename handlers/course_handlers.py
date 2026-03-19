@@ -6,7 +6,7 @@ from pymongo.errors import PyMongoError
 import logging
 import re
 import urllib.parse
-from handlers.base_handlers import safe_edit_message, safe_answer
+from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb
 
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
 COURSE_PAGE_SIZE = 50
@@ -155,7 +155,8 @@ async def add_course_link(update: Update, context: CallbackContext):
             else:
                 view_cat = parent
             if view_cat:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=f"showcat::{urllib.parse.quote_plus(view_cat)}")]])
+                # Open the category at page 1 by default
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(view_cat, 1))]])
                 await update.message.reply_text(f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}", reply_markup=kb)
             else:
                 await update.message.reply_text(f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}")
@@ -461,7 +462,7 @@ async def category_selected(update: Update, context: CallbackContext):
         )
         # Add a button so the user can view the updated category immediately
         try:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}")]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, 1))]])
             await safe_edit_message(query, msg, reply_markup=kb, action_key=getattr(query, 'data', None))
         except Exception:
             await safe_edit_message(query, msg, action_key=getattr(query, 'data', None))
@@ -504,7 +505,7 @@ async def add_course_category(update: Update, context: CallbackContext):
             return ConversationHandler.END
 
         try:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=f"showcat::{urllib.parse.quote_plus(category_name)}")]])
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=_shorten_showcat_cb(category_name, 1))]])
             await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", reply_markup=kb, action_key=getattr(query, 'data', None))
         except Exception:
             await safe_edit_message(query, f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉", action_key=getattr(query, 'data', None))
