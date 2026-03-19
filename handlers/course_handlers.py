@@ -11,6 +11,22 @@ from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_show
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
 COURSE_PAGE_SIZE = 50
 
+
+async def _compute_category_page(db, category_name, page_size=COURSE_PAGE_SIZE):
+    """Compute the 1-based page number where `category_name` appears among
+    top-level categories sorted A→Z. Returns 1 when not found.
+    """
+    try:
+        cats = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+        cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
+        for idx, c in enumerate(cats):
+            name = c.get('name') or c.get('path')
+            if name == category_name or c.get('path') == category_name:
+                return (idx // page_size) + 1
+    except Exception:
+        pass
+    return 1
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
