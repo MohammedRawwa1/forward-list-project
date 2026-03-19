@@ -665,6 +665,10 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if start > 0:
         if origin_type == 'category' and category:
             prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page-1}"
+            # preserve origin context and origin page so Prev/Next keep the
+            # same parent pagination when navigating between course pages
+            if origin_context:
+                prev_cb = prev_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
         elif origin_type == 'coach' and category:
             prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page-1}"
         else:
@@ -673,6 +677,8 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if len(all_courses) > start + page_size:
         if origin_type == 'category' and category:
             next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page+1}"
+            if origin_context:
+                next_cb = next_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
         elif origin_type == 'coach' and category:
             next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page+1}"
         else:
@@ -751,6 +757,8 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
             # build end callback depending on origin type
             if origin_type == 'category' and category:
                 end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
+                if origin_context:
+                    end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
             elif origin_type == 'global':
                 end_cb = f"courses::global::{total_pages}"
             elif origin_type == 'coach' and category:
@@ -2317,6 +2325,19 @@ async def courses_callback(update: Update, context: CallbackContext):
                     if kind == "category":
                         category = urllib.parse.unquote_plus(parts[1])
                         page = int(parts[2])
+                        # optional origin context suffix: ::from_parent::<origin_ctx>::<origin_page>
+                        origin_ctx = None
+                        origin_ctx_page = None
+                        if len(parts) > 3:
+                            try:
+                                if parts[3] == 'from_parent' and len(parts) >= 6:
+                                    origin_ctx = urllib.parse.unquote_plus(parts[4])
+                                    try:
+                                        origin_ctx_page = int(parts[5])
+                                    except Exception:
+                                        origin_ctx_page = None
+                            except Exception:
+                                origin_ctx = None
                         category_doc = await db.categories.find_one({"name": category})
                         if not category_doc or not category_doc.get('courses'):
                             await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
@@ -2332,7 +2353,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
                         except Exception:
                             origin_ctx = None
-                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx)
+                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page)
                         if not text:
                             await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
@@ -2380,6 +2401,21 @@ async def courses_callback(update: Update, context: CallbackContext):
                     except Exception:
                         await safe_edit_message(query, "Invalid page number.", action_key=getattr(query, 'data', None))
                         return
+                    # legacy category pagination may not include origin; but
+                    # support optional ::from_parent::<origin_ctx>::<origin_page>
+                    origin_ctx = None
+                    origin_ctx_page = None
+                    if len(parts) > 2:
+                        # parts[2] might be 'from_parent' in legacy fallback
+                        try:
+                            if parts[2] == 'from_parent' and len(parts) >= 5:
+                                origin_ctx = urllib.parse.unquote_plus(parts[3])
+                                try:
+                                    origin_ctx_page = int(parts[4])
+                                except Exception:
+                                    origin_ctx_page = None
+                        except Exception:
+                            origin_ctx = None
                     category_doc = await db.categories.find_one({"name": category})
                     if not category_doc or not category_doc.get('courses'):
                         await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
@@ -2394,7 +2430,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
                     except Exception:
                         origin_ctx = None
-                    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx)
+                    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page)
                     if not text:
                         await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                         return
