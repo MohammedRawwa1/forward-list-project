@@ -498,7 +498,7 @@ async def category_selected(update: Update, context: CallbackContext):
         try:
             # If we know the originating categories page, open that page; otherwise default to 1
             view_page = origin_page or 1
-                try:
+            try:
                 payload = {"type": "showcat", "path": category_name, "from_parent": "categories", "parent_page": view_page}
                 key = _store_callback_payload(payload)
                 cb = f"showcat_ref::{key}"
