@@ -97,19 +97,8 @@ async def add_course_start(update: Update, context: CallbackContext):
     # Allow top-level (no parent) explicitly
     keyboard.append([InlineKeyboardButton("(Add to top-level)", callback_data="addparent::")])
     for p in parents:
-        try:
-            # consider non-empty if has children or courses
-            has_children = False
-            try:
-                child = await db.categories.find_one({"parent": p.get('name')}, projection={"_id": 1})
-                has_children = bool(child)
-            except Exception:
-                has_children = False
-            courses = p.get('courses', []) if isinstance(p, dict) else []
-            is_empty = (not has_children) and (not courses)
-        except Exception:
-            is_empty = True
-        display = f"{p.get('name')}{' (empty)' if is_empty else ''}"
+        # Keep the add flow fast: do not check emptiness here to avoid extra DB calls.
+        display = f"{p.get('name')}"
         keyboard.append([InlineKeyboardButton(display, callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}")])
 
     await update.message.reply_text("Choose a parent category for the new course:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -276,22 +265,12 @@ async def parent_selected(update: Update, context: CallbackContext):
         end = start + page_size
         page_children = sorted_children[start:end]
         for child in page_children:
-            try:
-                has_children = False
-                try:
-                    cdoc = await db.categories.find_one({"parent": child.get('name')}, projection={"_id": 1})
-                    has_children = bool(cdoc)
-                except Exception:
-                    has_children = False
-                child_courses = child.get('courses', []) if isinstance(child, dict) else []
-                is_empty = (not has_children) and (not child_courses)
-            except Exception:
-                is_empty = True
-            display = f"{child.get('name')}{' (empty)' if is_empty else ''}"
+            # Skip emptiness checks to keep pagination responsive in the add flow.
+            display = f"{child.get('name')}"
             keyboard.append([InlineKeyboardButton(display, callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
         # Navigation row
         nav = []
-        total_pages = (total_children - 1) // page_size + 1 if total_children else 1
+        total_pages = (child_count - 1) // page_size + 1 if child_count else 1
         last_page = max(1, total_pages)
         if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
