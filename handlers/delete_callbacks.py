@@ -167,7 +167,44 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                 return
             res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
             if res.modified_count:
-                await safe_edit_message(query, f"Course '{item}' deleted from category '{cat}'. ✅", action_key=getattr(query, 'data', None))
+                # After deletion, show the updated courses list for the category
+                try:
+                    # Re-fetch the category document to get the updated courses
+                    cat_doc = await db['categories'].find_one({"name": cat})
+                    courses = cat_doc.get('courses', []) if cat_doc else []
+                    # Normalize to list of dicts with name/link/category for the page builder
+                    all_courses = [
+                        {"name": c.get('name'), "link": c.get('link'), "category": cat}
+                        for c in courses
+                    ]
+                    # Ensure deterministic ordering
+                    all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                    # Import build_courses_page from handlers.base_handlers to render
+                    from handlers.base_handlers import build_courses_page
+                    # origin_page from payload may be present; default to 1
+                    try:
+                        page = int(payload.get('origin_page', 1))
+                    except Exception:
+                        page = 1
+                    # Clamp page to available range
+                    page_size = 20
+                    try:
+                        from handlers.base_handlers import PAGE_SIZE
+                        page_size = PAGE_SIZE
+                    except Exception:
+                        pass
+                    total_pages = max(1, (len(all_courses) - 1) // page_size + 1) if all_courses else 1
+                    if page > total_pages:
+                        page = total_pages
+
+                    text, reply_markup = build_courses_page(all_courses, page=page, origin_type='category', category=cat, origin_context=None, origin_context_page=None)
+                    if text and reply_markup:
+                        await safe_edit_message(query, text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                    else:
+                        await safe_edit_message(query, f"Course '{item}' deleted from category '{cat}'. ✅\n\nNo courses remain in this category.", action_key=getattr(query, 'data', None))
+                except Exception as e:
+                    logger.exception("Error while rendering updated courses after delete: %s", e)
+                    await safe_edit_message(query, f"Course '{item}' deleted from category '{cat}'. ✅", action_key=getattr(query, 'data', None))
             else:
                 await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, 'data', None))
             return
