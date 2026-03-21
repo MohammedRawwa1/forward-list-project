@@ -1893,8 +1893,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
         # Breadcrumb / Home row (insert at top for context)
         try:
-            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
-            keyboard.insert(0, breadcrumb_buttons)
+            # Show Home only when not already on the first page; Home
+            # should return to this category's subcategories page 1.
+            if page > 1:
+                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(cat_path, 1))]
+                keyboard.insert(0, breadcrumb_buttons)
         except Exception:
             pass
 
