@@ -17,15 +17,16 @@ async def _compute_category_page(db, category_name, page_size=COURSE_PAGE_SIZE):
     top-level categories sorted A→Z. Returns 1 when not found.
     """
     try:
-        cats = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
-        cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
-        for idx, c in enumerate(cats):
-            name = c.get('name') or c.get('path')
-            if name == category_name or c.get('path') == category_name:
-                return (idx // page_size) + 1
+        # Find the matching top-level category doc first
+        doc = await db.categories.find_one({"parent": {"$exists": False}, "$or": [{"name": category_name}, {"path": category_name}]}, projection={"name": 1, "path": 1})
+        if not doc:
+            return 1
+        key = doc.get('name') or doc.get('path') or ''
+        # Count how many top-level categories sort before this one (lexicographic by name/path)
+        count = await db.categories.count_documents({"parent": {"$exists": False}, "$or": [{"name": {"$lt": key}}, {"name": {"$exists": False}, "path": {"$lt": key}}]})
+        return (count // page_size) + 1
     except Exception:
-        pass
-    return 1
+        return 1
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,8 +78,13 @@ async def add_course_start(update: Update, context: CallbackContext):
     """
     try:
         db = await get_db()
-        parents = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
-        parents = sorted(parents, key=lambda c: (c.get('name') or '').lower())
+        # Check quickly if any top-level parents exist without fetching them all
+        parents_exist = await db.categories.find_one({"parent": {"$exists": False}}, projection={"_id": 1})
+        if not parents_exist:
+            parents = []
+        else:
+            # Fetch only the first page of parents (server-side sort + limit)
+            parents = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).limit(COURSE_PAGE_SIZE).to_list(length=COURSE_PAGE_SIZE)
     except Exception:
         parents = []
 
@@ -210,7 +216,8 @@ async def add_course_link(update: Update, context: CallbackContext):
                 f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}"
             )
             return ConversationHandler.END
-        cats = await db.categories.find().to_list(length=None)
+        # Fallback: fetch a limited set of categories when we continue the flow
+        cats = await db.categories.find({}, projection={"name": 1}).sort('name', 1).limit(COURSE_PAGE_SIZE).to_list(length=COURSE_PAGE_SIZE)
         cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
 
         if not cats:
@@ -241,11 +248,19 @@ async def parent_selected(update: Update, context: CallbackContext):
         db = await get_db()
         # find child categories of the selected parent
         if parent:
-            child_cats = await db.categories.find({"parent": parent}).to_list(length=None)
+            # Use server-side pagination: count + sort + skip/limit
+            child_count = await db.categories.count_documents({"parent": parent})
+            page_size = COURSE_PAGE_SIZE
+            start = (1 - 1) * page_size
+            child_cats = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+            sorted_children = sorted(child_cats, key=lambda c: (c.get('name') or '').lower())
         else:
+            child_count = 0
             child_cats = []
+            sorted_children = []
     except Exception:
         child_cats = []
+        sorted_children = []
 
     keyboard = []
     if child_cats:
@@ -272,7 +287,7 @@ async def parent_selected(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton(display, callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
         # Navigation row
         nav = []
-        total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
+        total_pages = (total_children - 1) // page_size + 1 if total_children else 1
         last_page = max(1, total_pages)
         if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
@@ -283,18 +298,13 @@ async def parent_selected(update: Update, context: CallbackContext):
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
     else:
-        # Fallback: derive coaches from existing course 'coach' fields
+        # Fallback: derive coaches from existing course 'coach' fields via distinct
         try:
-            cats = await db.categories.find({"$or": [{"name": parent}, {"parent": parent}] }).to_list(length=None) if parent else await db.categories.find().to_list(length=None)
-            coaches_set = set()
-            for c in cats:
-                for crs in c.get('courses', []):
-                    if crs.get('coach'):
-                        coaches_set.add(crs.get('coach'))
+            filter_q = {"$or": [{"name": parent}, {"parent": parent}]} if parent else {}
+            coaches_list = await db.categories.distinct("courses.coach", filter_q)
+            coaches = sorted([c for c in coaches_list if c])
         except Exception:
-            coaches_set = set()
-
-        coaches = sorted(list(coaches_set))
+            coaches = []
         # Paginate derived coaches when many
         page = 1
         page_size = COURSE_PAGE_SIZE
@@ -342,8 +352,12 @@ async def addcoach_page(update: Update, context: CallbackContext):
     try:
         db = await get_db()
         if parent:
-            children = await db.categories.find({"parent": parent}).to_list(length=None)
+            total_children = await db.categories.count_documents({"parent": parent})
+            page_size = COURSE_PAGE_SIZE
+            start = (page - 1) * page_size
+            children = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
         else:
+            total_children = 0
             children = []
     except Exception:
         children = []
@@ -406,15 +420,16 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     
     try:
         db = await get_db()
-        cats = await db.categories.find().to_list(length=None)
+        # Use server-side pagination: get total count and fetch only the page slice
+        total = await db.categories.count_documents({})
+        page_size = COURSE_PAGE_SIZE
+        start = (page - 1) * page_size
+        cats = await db.categories.find({}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
+        total = 0
         cats = []
 
-    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
-    page_size = COURSE_PAGE_SIZE
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_cats = cats[start:end]
+    page_cats = cats
 
     keyboard = []
     for c in page_cats:
@@ -433,7 +448,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
         keyboard.append([InlineKeyboardButton(display, callback_data=f"addcat::{urllib.parse.quote_plus(c.get('name'))}::{page}")])
 
     nav = []
-    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
     # Layout: Prev (left), Home (center), Next (right); End always at the end.
     if page > 1:
