@@ -1906,12 +1906,19 @@ async def showcat_handler(update: Update, context: CallbackContext):
         # prefer returning to the recorded parent page (`parent_origin_page`).
         if parent_origin:
             try:
-                pdoc = await db.categories.find_one({"name": parent_origin})
-                ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent_origin
+                # Special sentinel 'categories' means return to the paginated
+                # top-level categories view rather than trying to open a
+                # category literally called 'categories'. Handle that case
+                # explicitly here.
+                if parent_origin == 'categories':
+                    back_cb = f"categories_page::{parent_origin_page or 1}"
+                else:
+                    pdoc = await db.categories.find_one({"name": parent_origin})
+                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent_origin
+                    back_cb = _shorten_showcat_cb(ppath, parent_origin_page or 1)
             except Exception:
-                ppath = parent_origin
-            back_page = parent_origin_page or 1
-            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, back_page))])
+                back_cb = "back_to_cats"
+            keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=back_cb)])
         else:
             parent = category_doc.get('parent')
             if parent:
