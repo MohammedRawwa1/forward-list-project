@@ -767,7 +767,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         else:
             prev_cb = f"courses::global::{page-1}"
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-    if len(all_courses) > start + page_size:
+    if effective_total > start + page_size:
         if origin_type == 'category' and category:
             next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page+1}"
             if origin_context:
@@ -794,7 +794,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         max_course_buttons = max(1, MAX_BUTTONS - reserved)
         max_course_rows = max_course_buttons // 2
         # Recompute display to the smaller size and rebuild keyboard
-        display = all_courses[start:start + max_course_rows]
+        display = display[:max_course_rows]
         keyboard = []
         for c in display:
             try:
@@ -817,7 +817,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         if start > 0:
             prev_cb = f"courses::global::{page-1}" if origin_type == 'global' else prev_cb
             pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-        if len(all_courses) > start + len(display):
+        if effective_total > start + len(display):
             next_cb = f"courses::global::{page+1}" if origin_type == 'global' else next_cb
             pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
         if pagination_buttons:
@@ -825,7 +825,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
     # Compute total pages for End button placement
     try:
-        total_pages = math.ceil(len(all_courses) / page_size)
+        total_pages = math.ceil(effective_total / page_size) if effective_total is not None else page
     except Exception:
         total_pages = page
 
