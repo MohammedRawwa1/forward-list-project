@@ -2537,24 +2537,44 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 origin_page = origin_page or 1
                 logger.debug("handle_course_selection: inferred origin_type='category' from course_category=%s", course_category)
 
-            # Build Back callback: prefer explicit saved back_cb, otherwise
-            # compute from origin_type/origin_page as a fallback.
-            if saved_back_cb:
-                back_cb = saved_back_cb
-            else:
-                if origin_type == 'category' and origin_page:
-                    back_target = course_category or cat_name or '1'
+            # Build Back callback: for category-origin details, always return
+            # to the category view (coaches list) so users see the main coach
+            # menu rather than a single-course listing. For other origins,
+            # prefer saved_back_cb when present, otherwise compute a sensible
+            # fallback.
+            if origin_type == 'category' and origin_page:
+                back_target = course_category or cat_name or '1'
+                try:
+                    # prefer stored path when available
+                    pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                except Exception:
+                    ppath = back_target
+                try:
+                    # Special sentinel: when origin/context points to the
+                    # top-level categories listing, route directly to that
+                    # page instead of attempting to open a category named
+                    # "categories" which does not exist.
+                    if (ppath == 'categories') or (str(back_target).lower() == 'categories'):
+                        back_cb = f"categories_page::{origin_page or 1}"
+                    else:
+                        back_cb = _shorten_showcat_cb(ppath, origin_page)
+                except Exception:
                     back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
-                    logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
-                elif origin_type == 'coach' and origin_page:
-                    back_target = course_category or cat_name or '1'
-                    back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
-                    logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
-                elif origin_type == 'global' and origin_page:
-                    back_cb = f"courses::global::{origin_page}"
+                logger.debug("handle_course_selection: computed category back_cb=%s", back_cb)
+            else:
+                if saved_back_cb:
+                    back_cb = saved_back_cb
                 else:
-                    # default fallback: global page 1
-                    back_cb = "courses::global::1"
+                    if origin_type == 'coach' and origin_page:
+                        back_target = course_category or cat_name or '1'
+                        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                        logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
+                    elif origin_type == 'global' and origin_page:
+                        back_cb = f"courses::global::{origin_page}"
+                    else:
+                        # default fallback: global page 1
+                        back_cb = "courses::global::1"
 
             # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
