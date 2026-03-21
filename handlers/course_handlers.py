@@ -7,6 +7,7 @@ import logging
 import re
 import urllib.parse
 from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload
+import uuid
 
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
 COURSE_PAGE_SIZE = 50
@@ -167,15 +168,28 @@ async def add_course_link(update: Update, context: CallbackContext):
             if coach:
                 child_doc = await db['categories'].find_one({"name": coach, "parent": parent})
                 if child_doc:
+                    course_doc = {
+                        "id": str(uuid.uuid4()),
+                        "name": context.user_data.get('course_name'),
+                        "link": link
+                    }
+                    # child coach category: push course into coach's document
                     update_result = await categories_coll.update_one(
                         {"name": coach, "parent": parent},
-                        {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link}}}
+                        {"$push": {"courses": course_doc}}
                     )
                     logger.info("[ADD-COURSE] saved to child coach=%s under parent=%s result=%s", coach, parent, getattr(update_result, 'raw_result', update_result))
                 else:
+                    # parent category: include coach field on the course
+                    course_doc = {
+                        "id": str(uuid.uuid4()),
+                        "name": context.user_data.get('course_name'),
+                        "link": link,
+                        "coach": coach
+                    }
                     update_result = await categories_coll.update_one(
                         {"name": parent},
-                        {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link, "coach": coach}}}
+                        {"$push": {"courses": course_doc}}
                     )
 
                     # Fetch and log updated category for debugging: ensure new course appears
@@ -185,9 +199,15 @@ async def add_course_link(update: Update, context: CallbackContext):
                     except Exception:
                         logger.debug("[ADD-COURSE] unable to fetch updated category %s for logging", parent)
             else:
+                # parent without coach: push course_doc without coach field
+                course_doc = {
+                    "id": str(uuid.uuid4()),
+                    "name": context.user_data.get('course_name'),
+                    "link": link
+                }
                 update_result = await categories_coll.update_one(
                     {"name": parent},
-                    {"$push": {"courses": {"name": context.user_data.get('course_name'), "link": link}}}
+                    {"$push": {"courses": course_doc}}
                 )
             logger.info("[ADD-COURSE] saved to parent=%s result=%s", parent, getattr(update_result, 'raw_result', update_result))
             if update_result.modified_count == 0:
@@ -617,7 +637,11 @@ async def category_selected(update: Update, context: CallbackContext):
         # Save course inside the category document (push into categories.courses array)
         categories_coll = db['categories']
         coach = context.user_data.get('course_coach')
-        course_doc = {"name": course_name, "link": course_link}
+        course_doc = {
+            "id": str(uuid.uuid4()),
+            "name": course_name,
+            "link": course_link
+        }
         if coach:
             course_doc['coach'] = coach
         update_result = await categories_coll.update_one(
@@ -691,7 +715,11 @@ async def add_course_category(update: Update, context: CallbackContext):
         # Push the course into the category document (embedded array)
         categories_coll = db['categories']
         coach = context.user_data.get('course_coach')
-        course_doc = {"name": course_name, "link": course_link}
+        course_doc = {
+            "id": str(uuid.uuid4()),
+            "name": course_name,
+            "link": course_link
+        }
         if coach:
             course_doc['coach'] = coach
         upd = await categories_coll.update_one(
