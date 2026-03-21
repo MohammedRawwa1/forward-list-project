@@ -2595,29 +2595,38 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             # Back button (it previously routed to the global /courses GUI)
             # and instead show a row with Coaches + All Categories.
             if origin_type == 'category':
-                # Compute a back callback that returns to the course list for
-                # this course's category (use saved back token when present).
-                back_cb = None
+                # Compute a back callback that returns to the category's main
+                # view (coaches / subcategories) so users see the coach menu
+                # rather than a single-course listing. Prefer any saved_back_cb
+                # from the payload; otherwise compute a showcat callback and
+                # clamp the page to the available range.
                 try:
                     if saved_back_cb:
                         back_cb = saved_back_cb
                 except Exception:
                     back_cb = None
+
                 if not back_cb:
                     back_target = course.get('category') or cat_name or '1'
                     try:
-                        # Clamp origin_page to the valid range for this category
+                        # Determine the display path for the target category
                         try:
-                            cdoc = await db.categories.find_one({"name": back_target}, projection={"courses": 1})
+                            cdoc = await db.categories.find_one({"name": back_target}, projection={"courses": 1, "path": 1})
                             total_items = len(cdoc.get('courses', [])) if cdoc and isinstance(cdoc.get('courses', None), list) else 0
                             total_pages = math.ceil(total_items / PAGE_SIZE) if total_items > 0 else 1
+                            ppath = cdoc.get('path') if cdoc and cdoc.get('path') else back_target
                         except Exception:
                             total_pages = origin_page or 1
+                            ppath = back_target
                         try:
                             clamped_page = max(1, min(int(origin_page or 1), max(1, int(total_pages))))
                         except Exception:
                             clamped_page = origin_page or 1
-                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{clamped_page}"
+                        # Prefer returning to the category main `showcat` view
+                        if (str(ppath).lower() == 'categories'):
+                            back_cb = f"categories_page::{clamped_page}"
+                        else:
+                            back_cb = _shorten_showcat_cb(str(ppath), clamped_page)
                     except Exception:
                         back_cb = f"courses::global::{origin_page}"
 
