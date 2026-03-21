@@ -359,6 +359,40 @@ if REDIS_URL:
                 pass
             return cnt
 
+# Ensure count cache and helpers exist even when Redis isn't configured
+if '_COUNT_CACHE' not in globals():
+    _COUNT_CACHE = {}
+
+if '_db_timing' not in globals():
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _db_timing(name: str):
+        t0 = time.time()
+        try:
+            yield
+        finally:
+            elapsed = time.time() - t0
+            try:
+                logger.info("[DB-TIME] %s %.3fs", name, elapsed)
+            except Exception:
+                pass
+
+if '_get_total_count' not in globals():
+    async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
+        key = f"count:{coll_name}:{json.dumps(filter_q or {}, sort_keys=True)}"
+        now = time.time()
+        entry = _COUNT_CACHE.get(key)
+        if entry and entry[1] > now:
+            return entry[0]
+        try:
+            coll = getattr(db, coll_name) if hasattr(db, coll_name) else db[coll_name]
+            cnt = await coll.count_documents(filter_q or {})
+        except Exception:
+            cnt = 0
+        _COUNT_CACHE[key] = (cnt, now + ttl)
+        return cnt
+
 def _refill_bucket(bucket):
     now = time.time()
     elapsed = now - bucket.get("last_refill", now)
