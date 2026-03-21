@@ -2650,6 +2650,8 @@ async def courses_callback(update: Update, context: CallbackContext):
     if db is None:
         await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
         return
+    # pagination page size
+    page_size = PAGE_SIZE
 
     try:
         # New format supports: courses::{category}::{page} or courses::{page} for global
