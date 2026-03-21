@@ -47,6 +47,9 @@ GUI_SESSION_TTL = _parse_ttl(os.getenv("GUI_SESSION_TTL", "300"), 300)
 logger = logging.getLogger(__name__)
 logger.info("GUI_SESSION_TTL=%s seconds (env=%r)", GUI_SESSION_TTL, os.getenv("GUI_SESSION_TTL"))
 
+# Reusable filter for top-level categories that handles missing, null, or empty-string parents
+TOP_LEVEL_FILTER = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
+
 # Basic DB timing and count helpers (ensure available early so handlers can use them)
 from contextlib import asynccontextmanager
 
@@ -1050,8 +1053,8 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         async with _db_timing(f"createcat_page:{page}"):
-            total = await _get_total_count(db, 'categories', {"parent": {"$exists": False}}, ttl=30)
-            cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+            total = await _get_total_count(db, 'categories', TOP_LEVEL_FILTER, ttl=30)
+            cats = await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception as e:
         logger.exception("createcat_page: exception while fetching categories")
         cats = []
@@ -1222,26 +1225,33 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        # Use server-side pagination for categories listing
+        # Use server-side pagination for categories listing. Fetch minimal
+        # fields and only a single course element to decide emptiness.
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         async with _db_timing(f"categories_page:{page}"):
-            filter_q = {"parent": {"$exists": False}}
+            filter_q = TOP_LEVEL_FILTER
             total = await _get_total_count(db, 'categories', filter_q, ttl=30)
-            cats = await db.categories.find(filter_q).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
-        logger.info("categories_page: requested page=%s total_est=%s got=%s", page, total, len(cats))
+            proj = {"name": 1, "path": 1, "parent": 1, "_id": 1, "courses": {"$slice": 1}}
+            raw = await db.categories.find(filter_q, proj).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1)
+        have_more = len(raw) > page_size
+        cats = raw[:page_size] if have_more else raw
+        logger.info("categories_page: requested page=%s total_est=%s got=%s have_more=%s", page, total, len(cats), have_more)
         # Fallback: some data models store top-level categories with parent==None
         # or an empty string. If we got no results, try relaxed filter once.
         if not cats and total == 0:
             try:
-                alt_filter = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
+                alt_filter = TOP_LEVEL_FILTER
                 async with _db_timing(f"categories_page:fallback:{page}"):
                     alt_total = await _get_total_count(db, 'categories', alt_filter, ttl=30)
-                    alt_cats = await db.categories.find(alt_filter).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+                    alt_raw = await db.categories.find(alt_filter, proj).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1)
+                alt_have_more = len(alt_raw) > page_size
+                alt_cats = alt_raw[:page_size] if alt_have_more else alt_raw
                 logger.info("categories_page: fallback total_est=%s got=%s", alt_total, len(alt_cats))
                 if alt_cats:
                     cats = alt_cats
                     total = alt_total
+                    have_more = alt_have_more
             except Exception:
                 logger.exception("categories_page: fallback query failed")
     except Exception:
@@ -1259,6 +1269,17 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         return
 
     keyboard = []
+    # Batch-check which page categories have children to avoid N queries
+    cat_names = [c.get('name') for c in page_cats if c.get('name')]
+    parent_has_children = {}
+    if cat_names:
+        try:
+            docs = await db.categories.find({"parent": {"$in": cat_names}}, {"parent": 1}).to_list(length=len(cat_names))
+            parents_with_children = {d.get('parent') for d in docs if d.get('parent')}
+            parent_has_children = {name: (name in parents_with_children) for name in cat_names}
+        except Exception:
+            parent_has_children = {name: False for name in cat_names}
+
     for cat in page_cats:
         cat_path = cat.get('path') or cat.get('name')
         # Persist a short ref including the current categories page so
@@ -1269,16 +1290,10 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             logger.debug("categories_page: created showcat_ref key=%s path=%s parent_page=%s", key, cat_path, page)
         except Exception:
             pass
-        # Indicate empty categories visually so users can fill them later.
+        # Indicate empty categories visually: we sliced one course element
+        # above, so `courses` truthiness indicates at least one course.
         try:
-            # A category is considered non-empty if it has child categories
-            # or it has courses. Check DB for children existence.
-            has_children = False
-            try:
-                child_doc = await db.categories.find_one({"parent": cat.get('name')}, projection={"_id": 1})
-                has_children = bool(child_doc)
-            except Exception:
-                has_children = False
+            has_children = parent_has_children.get(cat.get('name'))
             courses = cat.get('courses', []) if isinstance(cat, dict) else []
             is_empty = (not has_children) and (not courses)
         except Exception:
@@ -1814,18 +1829,23 @@ async def showcat_handler(update: Update, context: CallbackContext):
         page_children = sorted_children[start:end]
 
         keyboard = []
+        # Batch-check children existence for page_children to avoid N queries
+        child_names = [c.get('name') for c in page_children if c.get('name')]
+        names_with_children = set()
+        if child_names:
+            try:
+                docs = await db.categories.find({"parent": {"$in": child_names}}, {"parent": 1}).to_list(length=len(child_names))
+                names_with_children = {d.get('parent') for d in docs if d.get('parent')}
+            except Exception:
+                names_with_children = set()
+
         for child in page_children:
             child_path = child.get('path') or child.get('name')
             payload = {"type": "showcat", "path": child_path, "from_parent": cat_path, "parent_page": page}
             key = _store_callback_payload(payload)
             # Mark child as empty when it has neither sub-children nor courses
             try:
-                has_children = False
-                try:
-                    cdoc = await db.categories.find_one({"parent": child.get('name')}, projection={"_id": 1})
-                    has_children = bool(cdoc)
-                except Exception:
-                    has_children = False
+                has_children = child.get('name') in names_with_children
                 courses = child.get('courses', []) if isinstance(child, dict) else []
                 is_empty = (not has_children) and (not courses)
             except Exception:
@@ -2019,9 +2039,9 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
     try:
         db = await get_db()
         # list only top-level categories (no parent) — server-side first page
-        total = await db.categories.count_documents({"parent": {"$exists": False}})
+        total = await db.categories.count_documents(TOP_LEVEL_FILTER)
         page_size = PAGE_SIZE
-        categories = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).limit(page_size).to_list(length=page_size)
+        categories = await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).limit(page_size).to_list(length=page_size)
         # Ensure deterministic, case-insensitive A→Z ordering for display
         categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
         if not categories:
