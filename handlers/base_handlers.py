@@ -1032,6 +1032,10 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
     if is_query:
         await safe_answer(query)
         data = query.data
+        try:
+            logger.debug("categories_page: raw callback_data=%r", data)
+        except Exception:
+            pass
         parts = data.split("::")
         try:
             page = int(parts[1])
