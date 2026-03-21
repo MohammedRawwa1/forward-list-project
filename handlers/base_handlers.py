@@ -217,14 +217,11 @@ async def _resolve_callback_payload(key: str):
 
     # Redis
     try:
-
-
         if _redis is not None:
             val = await _redis.get(f"callback:ref:{key}")
             if val:
                 import json as _json
                 payload = _json.loads(val)
-                # repopulate in-memory cache for speed
                 CALLBACK_MAP[key] = payload
                 return payload
     except Exception:
@@ -648,6 +645,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         return None, None
     page_size = PAGE_SIZE
     start = (page - 1) * page_size
+def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None, total_count: int = None, is_page: bool = False):
     display = all_courses[start:start + page_size]
     if not display:
         return None, None
@@ -655,13 +653,20 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     logger.debug("build_courses_page called: origin_type=%s category=%s page=%s total=%s", origin_type, category, page, len(all_courses) if hasattr(all_courses, '__len__') else 'unknown')
     if origin_type == 'category' and category:
         text = f"Courses in category '{category}' (page {page}):"
-        breadcrumb = ["Home", "categories", category]
-    elif origin_type == 'coach' and category is None:
-        text = f"Courses (page {page}):"
-        breadcrumb = ["Home", "coaches"]
+    # If caller already provided just the page items, use them directly.
+    if is_page:
+        display = all_courses
+        if not display:
+            return None, None
+    else:
+        start = (page - 1) * page_size
+        display = all_courses[start:start + page_size]
+        if not display:
+            return None, None
     else:
         text = f"Here are the available courses (page {page}):"
-        breadcrumb = ["Home", "courses"]
+    effective_total = total_count if total_count is not None else (len(all_courses) if hasattr(all_courses, '__len__') else 0)
+    if effective_total > ( (page - 1) * page_size ) + page_size:
 
     keyboard = []
     for c in display:
@@ -911,15 +916,17 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        cats = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+        # Use server-side pagination: count + sort + skip/limit for top-level categories
+        total = await db.categories.count_documents({"parent": {"$exists": False}})
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         cats = []
+        total = 0
 
-    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
-    page_size = PAGE_SIZE
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_cats = cats[start:end]
+    # cats already contains only the current page slice (server-side)
+    page_cats = cats
 
     if not page_cats and not is_query:
         await update_or_message.reply_text("No categories available. Use /create_category to create one.")
@@ -932,7 +939,7 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}")])
 
     nav = []
-    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
     # Prev (left)
     if page > 1:
@@ -984,15 +991,19 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        children = await db.categories.find({"parent": parent}).to_list(length=None)
+        # Use server-side pagination for children; fetch only this page slice
+        total_children = await db.categories.count_documents({"parent": parent})
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+        children = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         children = []
+        total_children = 0
 
-    children = sorted(children, key=lambda c: (c.get('name') or '').lower())
+    # children already contains only the current page slice (server-side)
+    sorted_children = sorted(children, key=lambda c: (c.get('name') or '').lower())
     page_size = PAGE_SIZE
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_children = children[start:end]
+    page_children = sorted_children
 
     if not page_children:
         if is_query:
@@ -1078,15 +1089,17 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        cats = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+        # Use server-side pagination for categories listing
+        total = await db.categories.count_documents({"parent": {"$exists": False}})
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         cats = []
+        total = 0
 
-    cats = sorted(cats, key=lambda c: (c.get('name') or '').lower())
-    page_size = PAGE_SIZE
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_cats = cats[start:end]
+    # cats already contains only the current page slice (server-side)
+    page_cats = cats
 
     if not page_cats:
         if is_query:
@@ -1124,7 +1137,7 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         keyboard.append([InlineKeyboardButton(display_name, callback_data=f"showcat_ref::{key}")])
 
     nav = []
-    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"categories_page::{page-1}"))
@@ -1188,21 +1201,50 @@ async def show_coach_handler(update: Update, context: CallbackContext):
 
     # Collect all courses for this coach: prefer explicit 'coach' field, else category name match
     try:
-        cats = await db.categories.find().to_list(length=None)
-        coach_courses = []
-        for cat in cats:
-            for crs in cat.get('courses', []):
-                if crs.get('coach'):
-                    if crs.get('coach') == coach_name:
-                        coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
-                else:
-                    # legacy: category name represents coach
-                    if (cat.get('name') or '') == coach_name:
-                        coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+        # Query only categories that could contain this coach's courses or
+        # whose name matches the coach (legacy modeling). This avoids
+        # fetching the entire collection into memory.
+        filter_q = {"$or": [{"courses.coach": coach_name}, {"name": coach_name}]}
+        # Use aggregation to unwind courses and project only the fields we need
+        # This avoids transferring entire category documents when only course
+        # metadata is required for coach views.
+        # Paginated aggregation: count total matching coach courses, then
+        # fetch only the requested page of items server-side.
+        page = 1
+        page_size = PAGE_SIZE
+        # count pipeline
+        count_pipeline = [
+            {"$match": filter_q},
+            {"$unwind": "$courses"},
+            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "coach": "$courses.coach"}},
+            {"$match": {"$or": [{"coach": coach_name}, {"category": coach_name}] }},
+            {"$count": "total"}
+        ]
+        try:
+            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+            total_courses = count_res[0]["total"] if count_res else 0
+        except Exception:
+            total_courses = 0
 
-        # Sort and render using existing helper
+        # items pipeline with skip/limit
+        start = (page - 1) * page_size
+        items_pipeline = [
+            {"$match": filter_q},
+            {"$unwind": "$courses"},
+            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "coach": "$courses.coach"}},
+            {"$match": {"$or": [{"coach": coach_name}, {"category": coach_name}] }},
+            {"$sort": {"name": 1}},
+            {"$skip": start},
+            {"$limit": page_size}
+        ]
+        try:
+            coach_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+        except Exception:
+            coach_courses = []
+
+        # coach_courses already have the expected shape for build_courses_page
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
-        text, reply_markup = build_courses_page(coach_courses, page=1, origin_type='coach', category=coach_name, origin_context=None)
+        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}'.", action_key=getattr(query, 'data', None))
             return
@@ -1554,7 +1596,9 @@ async def showcat_handler(update: Update, context: CallbackContext):
         # Look for coaches that explicitly list this topic
         if hasattr(db, 'coaches'):
             # find coaches whose topics array contains this category name (case-insensitive)
-            coaches = await db.coaches.find({"topics": cat_name}).to_list(length=None)
+            # coaches collection is typically small but still limit the returned
+            # list to avoid unbounded memory usage.
+            coaches = await db.coaches.find({"topics": cat_name}).to_list(length=PAGE_SIZE)
     except Exception:
         coaches = []
 
@@ -1571,7 +1615,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     # First: show any child categories (sub-categories)
     try:
-        children = await db.categories.find({"parent": cat_name}).to_list(length=None)
+        # Server-side pagination for child categories under this category
+        total_children = await db.categories.count_documents({"parent": cat_name})
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+        children = await db.categories.find({"parent": cat_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         children = []
 
@@ -1609,7 +1657,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
         # Navigation row (Previous / End / Next)
         nav = []
-        total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
+        total_pages = (total_children - 1) // page_size + 1 if total_children else 1
         last_page = max(1, total_pages)
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(cat_path, page-1)))
@@ -1622,7 +1670,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             else:
                 nav.append(end_btn)
 
-        if len(sorted_children) > end:
+        if (page * page_size) < total_children:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(cat_path, page+1)))
 
         if nav:
@@ -1792,8 +1840,10 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
     await safe_answer(query)
     try:
         db = await get_db()
-        # list only top-level categories (no parent)
-        categories = await db.categories.find({"parent": {"$exists": False}}).to_list(length=None)
+        # list only top-level categories (no parent) — server-side first page
+        total = await db.categories.count_documents({"parent": {"$exists": False}})
+        page_size = PAGE_SIZE
+        categories = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).limit(page_size).to_list(length=page_size)
         # Ensure deterministic, case-insensitive A→Z ordering for display
         categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
         if not categories:
@@ -1828,21 +1878,35 @@ async def list_courses(update: Update, context: CallbackContext):
         return
 
     try:
-        # Build a flattened list of courses from all categories
+        # Build a flattened list of courses via aggregation to avoid loading
+        # full category documents into memory.
         page = 1
         page_size = PAGE_SIZE
-        cats = await db.categories.find().to_list(length=None)
-        all_courses = []
-        for cat in cats:
-            for crs in cat.get('courses', []):
-                all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
-
-        # Sort all courses case-insensitively A→Z for deterministic ordering
+        # Paginated aggregation for unified course listing
+        count_pipeline = [
+            {"$unwind": "$courses"},
+            {"$count": "total"}
+        ]
+        try:
+            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+            total_courses = count_res[0]['total'] if count_res else 0
+        except Exception:
+            total_courses = 0
+        start = (page - 1) * page_size
+        items_pipeline = [
+            {"$unwind": "$courses"},
+            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+            {"$sort": {"name": 1}},
+            {"$skip": start},
+            {"$limit": page_size}
+        ]
+        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+        # Sort current page deterministically
         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
 
         if all_courses:
             # Build unified page UI
-            text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', origin_context=None)
+            text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', origin_context=None, total_count=total_courses, is_page=True)
             if not text:
                 await update.message.reply_text("No courses available.")
                 return
@@ -1952,7 +2016,7 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
         # Fetch one extra document as a lookahead to decide whether a "Next"
         # button is needed.
         cursor = collection.find().sort("name", 1).skip(start).limit(page_size + 1)
-        results = await cursor.to_list(length=None)
+        results = await cursor.to_list(length=page_size + 1)
 
         if not results:
             # If no results for this page, inform the user (they may have
@@ -1988,7 +2052,9 @@ async def create_category(update: Update, context: CallbackContext):
     cats = []
     try:
         # Show only top-level parent categories for parent selection
-        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).to_list(length=None)
+        # Limit results to avoid loading the entire collection in fallback paths
+        page_size = PAGE_SIZE
+        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).limit(page_size).to_list(length=page_size)
     except Exception:
         cats = []
 
@@ -2228,12 +2294,13 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         course = {"name": crs.get('name'), "link": crs.get('link'), "category": cat_name}
                         break
         else:
-            # search across categories
-            cats = await db.categories.find().to_list(length=None)
-            for cat in cats:
-                for crs in cat.get('courses', []):
+            # search across categories: find the first category document that
+            # contains the requested course and examine only its courses array.
+            category_doc = await db.categories.find_one({"courses.name": course_name}, projection={"name": 1, "courses": 1})
+            if category_doc:
+                for crs in category_doc.get('courses', []):
                     if crs.get('name') == course_name:
-                        course = {"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')}
+                        course = {"name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
                         break
                 if course:
                     break
@@ -2416,14 +2483,35 @@ async def courses_callback(update: Update, context: CallbackContext):
                     kind = parts[0]
                     if kind == "global":
                         page = int(parts[1])
-                        # flatten all courses
-                        cats = await db.categories.find().to_list(length=None)
-                        all_courses = []
-                        for cat in cats:
-                            for crs in cat.get('courses', []):
-                                all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
-                        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
-                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global')
+                        # flatten all courses server-side using aggregation so we
+                        # only transfer the minimal course fields instead of
+                        # whole category documents.
+                        pipeline = [
+                            {"$unwind": "$courses"},
+                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                            {"$sort": {"name": 1}}
+                        ]
+                                        # count total courses and fetch the requested page server-side
+                                        count_pipeline = [
+                                            {"$unwind": "$courses"},
+                                            {"$count": "total"}
+                                        ]
+                                        try:
+                                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+                                            total_courses = count_res[0]['total'] if count_res else 0
+                                        except Exception:
+                                            total_courses = 0
+                                        start = (page - 1) * page_size
+                                        items_pipeline = [
+                                            {"$unwind": "$courses"},
+                                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                                            {"$sort": {"name": 1}},
+                                            {"$skip": start},
+                                            {"$limit": page_size}
+                                        ]
+                                        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                                        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                             return
@@ -2472,16 +2560,36 @@ async def courses_callback(update: Update, context: CallbackContext):
                     if kind == "coach":
                         coach_slug = urllib.parse.unquote_plus(parts[1])
                         page = int(parts[2])
-                        # derive coach courses similar to show_coach_handler
-                        cats = await db.categories.find().to_list(length=None)
-                        coach_courses = []
+                        # derive coach courses using aggregation (server-side
+                        # unwind + match) to avoid iterating over all categories
+                        # in Python.
                         coach_name = coach_slug
-                        for cat in cats:
-                            for crs in cat.get('courses', []):
-                                if crs.get('coach') == coach_name:
-                                    coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+                        # Paginated aggregation for coach results
+                        count_pipeline = [
+                            {"$match": {"courses.coach": coach_name}},
+                            {"$unwind": "$courses"},
+                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "coach": "$courses.coach"}},
+                            {"$match": {"coach": coach_name}},
+                            {"$count": "total"}
+                        ]
+                        try:
+                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+                            total_courses = count_res[0]['total'] if count_res else 0
+                        except Exception:
+                            total_courses = 0
+                        start = (page - 1) * page_size
+                        items_pipeline = [
+                            {"$match": {"courses.coach": coach_name}},
+                            {"$unwind": "$courses"},
+                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "coach": "$courses.coach"}},
+                            {"$match": {"coach": coach_name}},
+                            {"$sort": {"name": 1}},
+                            {"$skip": start},
+                            {"$limit": page_size}
+                        ]
+                        coach_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
                         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
-                        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None)
+                        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found for coach '{coach_name}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
@@ -2491,13 +2599,27 @@ async def courses_callback(update: Update, context: CallbackContext):
                     # legacy fallback handling
                     if len(parts) == 1:
                         page = int(parts[0])
-                        cats = await db.categories.find().to_list(length=None)
-                        all_courses = []
-                        for cat in cats:
-                            for crs in cat.get('courses', []):
-                                all_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": cat.get('name')})
+                        # Legacy global fallback: use paginated aggregation
+                        count_pipeline = [
+                            {"$unwind": "$courses"},
+                            {"$count": "total"}
+                        ]
+                        try:
+                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+                            total_courses = count_res[0]['total'] if count_res else 0
+                        except Exception:
+                            total_courses = 0
+                        start = (page - 1) * page_size
+                        items_pipeline = [
+                            {"$unwind": "$courses"},
+                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                            {"$sort": {"name": 1}},
+                            {"$skip": start},
+                            {"$limit": page_size}
+                        ]
+                        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
                         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
-                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', origin_context=None)
+                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', origin_context=None, total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                             return
