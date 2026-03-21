@@ -91,7 +91,20 @@ async def add_course_start(update: Update, context: CallbackContext):
     # Allow top-level (no parent) explicitly
     keyboard.append([InlineKeyboardButton("(Add to top-level)", callback_data="addparent::")])
     for p in parents:
-        keyboard.append([InlineKeyboardButton(p.get('name'), callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}")])
+        try:
+            # consider non-empty if has children or courses
+            has_children = False
+            try:
+                child = await db.categories.find_one({"parent": p.get('name')}, projection={"_id": 1})
+                has_children = bool(child)
+            except Exception:
+                has_children = False
+            courses = p.get('courses', []) if isinstance(p, dict) else []
+            is_empty = (not has_children) and (not courses)
+        except Exception:
+            is_empty = True
+        display = f"{p.get('name')}{' (empty)' if is_empty else ''}"
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}")])
 
     await update.message.reply_text("Choose a parent category for the new course:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ADD_PARENT
@@ -244,7 +257,19 @@ async def parent_selected(update: Update, context: CallbackContext):
         end = start + page_size
         page_children = sorted_children[start:end]
         for child in page_children:
-            keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
+            try:
+                has_children = False
+                try:
+                    cdoc = await db.categories.find_one({"parent": child.get('name')}, projection={"_id": 1})
+                    has_children = bool(cdoc)
+                except Exception:
+                    has_children = False
+                child_courses = child.get('courses', []) if isinstance(child, dict) else []
+                is_empty = (not has_children) and (not child_courses)
+            except Exception:
+                is_empty = True
+            display = f"{child.get('name')}{' (empty)' if is_empty else ''}"
+            keyboard.append([InlineKeyboardButton(display, callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
         # Navigation row
         nav = []
         total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
@@ -391,7 +416,21 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     end = start + page_size
     page_cats = cats[start:end]
 
-    keyboard = [[InlineKeyboardButton(c.get('name'), callback_data=f"addcat::{urllib.parse.quote_plus(c.get('name'))}::{page}")] for c in page_cats]
+    keyboard = []
+    for c in page_cats:
+        try:
+            has_children = False
+            try:
+                cdoc = await db.categories.find_one({"parent": c.get('name')}, projection={"_id": 1})
+                has_children = bool(cdoc)
+            except Exception:
+                has_children = False
+            courses = c.get('courses', []) if isinstance(c, dict) else []
+            is_empty = (not has_children) and (not courses)
+        except Exception:
+            is_empty = True
+        display = f"{c.get('name')}{' (empty)' if is_empty else ''}"
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"addcat::{urllib.parse.quote_plus(c.get('name'))}::{page}")])
 
     nav = []
     total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
