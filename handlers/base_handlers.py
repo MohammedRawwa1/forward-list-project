@@ -2108,6 +2108,10 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
 logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
     # Present existing categories as optional parents
+    try:
+        logger.info("create_category invoked: user=%s chat=%s", getattr(update, 'effective_user', None).id if getattr(update, 'effective_user', None) else None, getattr(update, 'effective_chat', None).id if getattr(update, 'effective_chat', None) else None)
+    except Exception:
+        logger.info("create_category invoked (unable to read user/chat)")
     db = await get_db()
     cats = []
     try:
@@ -2139,6 +2143,10 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
     parent = urllib.parse.unquote_plus(encoded) if encoded else None
     # Store chosen parent in user_data for the following name prompt
     context.user_data['new_cat_parent'] = parent
+    try:
+        logger.info("handle_create_category_parent: user=%s parent=%s", update.effective_user.id if update.effective_user else None, parent)
+    except Exception:
+        logger.debug("handle_create_category_parent: log failed")
     if parent:
         prompt = f"Enter the new category name (parent: {parent}):"
     else:
@@ -2176,6 +2184,10 @@ async def handle_category_name(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     category_name = update.message.text.strip()
     logger.info(f"[CAT-INSERT-START] name={category_name!r} uid={user_id}")
+    try:
+        logger.debug("handle_category_name: incoming message=%s", update.message.text if getattr(update, 'message', None) else None)
+    except Exception:
+        pass
 
     # --- single validator (allow special chars; only restrict control/newline chars) ---
     if not category_name or len(category_name) < 3 or len(category_name) > MAX_CATEGORY_NAME_LENGTH:
