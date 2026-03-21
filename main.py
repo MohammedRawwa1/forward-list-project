@@ -66,7 +66,8 @@ async def startup_event():
     global application
 
     await initialize_db()
-    await MongoDB.ensure_indexes("categories")
+    # Index creation managed manually; automatic ensure_indexes disabled.
+    logger.info("Skipping automatic ensure_indexes (manual index management)")
 
     application = await create_application()
     await application.initialize()
