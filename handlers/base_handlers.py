@@ -1689,6 +1689,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
     #  - showcat::{path_or_name}::{page}
     #  - showcat::{path_or_name}::from_parent::{parent_path}::{parent_page}
     raw = query.data
+    try:
+        logger.debug("showcat_handler: raw callback_data=%r", raw)
+    except Exception:
+        pass
     page_from_callback = None
     parent_origin = None
     parent_origin_page = None
@@ -1812,11 +1816,19 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     # First: show any child categories (sub-categories)
     try:
+        try:
+            logger.debug("showcat_handler: parsed page_from_callback=%r parent_origin=%r parent_origin_page=%r encoded=%r", page_from_callback, parent_origin, parent_origin_page, encoded)
+        except Exception:
+            pass
         # Server-side pagination for child categories under this category
         total_children = await db.categories.count_documents({"parent": cat_name})
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         children = await db.categories.find({"parent": cat_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        try:
+            logger.debug("showcat_handler: total_children=%s page=%s start=%s fetched_children=%s", total_children, page, start, len(children) if children is not None else 0)
+        except Exception:
+            pass
     except Exception:
         children = []
 
