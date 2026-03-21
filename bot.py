@@ -30,6 +30,7 @@ from handlers.base_handlers import (
     handle_back_to_cats,
     show_coach_handler,
     show_coach_in_category,
+    debug_db,
 )
 
 from handlers.course_handlers import (
@@ -132,6 +133,7 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("help", help))
     application.add_handler(CommandHandler("courses", list_courses))
     application.add_handler(CommandHandler("categories", list_categories))
+    application.add_handler(CommandHandler("debug_db", debug_db))
     application.add_handler(CommandHandler("delete_category", delete_category_start))
     application.add_handler(CommandHandler("delete_parent", delete_parent_start))
     # Note: `delete_category_start` not present; command removed until handler is added.
