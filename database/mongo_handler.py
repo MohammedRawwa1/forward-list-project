@@ -101,11 +101,33 @@ class MongoDB:
 # ------------------------------------------------------------------
     @classmethod
     async def ensure_indexes(cls, collection_name='categories', indexes=None):
-        # ensure_indexes intentionally left as a no-op to preserve existing
-        # deployment state. Index creation was causing unexpected behavior
-        # in some environments; revert to manual index management.
-        logger.info("ensure_indexes called but no-op (index creation rolled back)")
-        return
+        # Conditional index creation: only run when AUTO_CREATE_INDEXES env var is set.
+        auto = os.getenv('AUTO_CREATE_INDEXES', '0')
+        if str(auto) not in ('1', 'true', 'yes', 'on'):
+            logger.info("ensure_indexes skipped (AUTO_CREATE_INDEXES not enabled)")
+            return
+
+        db = await cls.get_db()
+        coll = db[collection_name]
+        try:
+            info = await coll.index_information()
+            if 'name_1' not in info:
+                await coll.create_index('name', unique=True)
+                logger.info("Unique index on categories.name created")
+            if 'parent_1' not in info:
+                await coll.create_index('parent')
+                logger.info("Index on categories.parent created")
+            if 'path_1' not in info:
+                await coll.create_index('path')
+                logger.info("Index on categories.path created")
+            if 'courses.coach_1' not in info:
+                await coll.create_index('courses.coach')
+                logger.info("Index on categories.courses.coach created")
+            if 'courses.name_1' not in info:
+                await coll.create_index('courses.name')
+                logger.info("Index on categories.courses.name created")
+        except Exception as e:
+            logger.exception("ensure_indexes failed: %s", e)
 
     @classmethod
     async def delete_all_categories(cls):
