@@ -1157,8 +1157,24 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         async with _db_timing(f"categories_page:{page}"):
-            total = await _get_total_count(db, 'categories', {"parent": {"$exists": False}}, ttl=30)
-            cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+            filter_q = {"parent": {"$exists": False}}
+            total = await _get_total_count(db, 'categories', filter_q, ttl=30)
+            cats = await db.categories.find(filter_q).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        logger.info("categories_page: requested page=%s total_est=%s got=%s", page, total, len(cats))
+        # Fallback: some data models store top-level categories with parent==None
+        # or an empty string. If we got no results, try relaxed filter once.
+        if not cats and total == 0:
+            try:
+                alt_filter = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
+                async with _db_timing(f"categories_page:fallback:{page}"):
+                    alt_total = await _get_total_count(db, 'categories', alt_filter, ttl=30)
+                    alt_cats = await db.categories.find(alt_filter).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+                logger.info("categories_page: fallback total_est=%s got=%s", alt_total, len(alt_cats))
+                if alt_cats:
+                    cats = alt_cats
+                    total = alt_total
+            except Exception:
+                logger.exception("categories_page: fallback query failed")
     except Exception:
         cats = []
         total = 0
