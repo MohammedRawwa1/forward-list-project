@@ -18,12 +18,12 @@ async def _compute_category_page(db, category_name, page_size=COURSE_PAGE_SIZE):
     """
     try:
         # Find the matching top-level category doc first
-        doc = await db.categories.find_one({"parent": {"$exists": False}, "$or": [{"name": category_name}, {"path": category_name}]}, projection={"name": 1, "path": 1})
+        doc = await db.categories.find_one({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}], "$or": [{"name": category_name}, {"path": category_name}]}, projection={"name": 1, "path": 1})
         if not doc:
             return 1
         key = doc.get('name') or doc.get('path') or ''
         # Count how many top-level categories sort before this one (lexicographic by name/path)
-        count = await db.categories.count_documents({"parent": {"$exists": False}, "$or": [{"name": {"$lt": key}}, {"name": {"$exists": False}, "path": {"$lt": key}}]})
+        count = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}], "$or": [{"name": {"$lt": key}}, {"name": {"$exists": False}, "path": {"$lt": key}}]})
         return (count // page_size) + 1
     except Exception:
         return 1
@@ -79,12 +79,12 @@ async def add_course_start(update: Update, context: CallbackContext):
     try:
         db = await get_db()
         # Check quickly if any top-level parents exist without fetching them all
-        parents_exist = await db.categories.find_one({"parent": {"$exists": False}}, projection={"_id": 1})
+        parents_exist = await db.categories.find_one({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}, projection={"_id": 1})
         if not parents_exist:
             parents = []
         else:
             # Fetch only the first page of parents (server-side sort + limit)
-            parents = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).limit(COURSE_PAGE_SIZE).to_list(length=COURSE_PAGE_SIZE)
+            parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).limit(COURSE_PAGE_SIZE).to_list(length=COURSE_PAGE_SIZE)
     except Exception:
         parents = []
 
@@ -227,8 +227,12 @@ async def add_course_link(update: Update, context: CallbackContext):
         await addcat_page(update.message, context, page=1)
         return ADD_CATEGORY
     except Exception as e:
-        logger.error("Error saving course link: %s", e)
-        await update.message.reply_text("An error occurred while saving the course. Please try again later.")
+        logger.exception("Error saving course link")
+        # Provide a clearer message to the user and include a short hint to check logs
+        try:
+            await update.message.reply_text("An error occurred while saving the course. Check bot logs for details.")
+        except Exception:
+            pass
         return ConversationHandler.END
 
 
