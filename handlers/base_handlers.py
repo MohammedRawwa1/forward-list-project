@@ -2586,7 +2586,18 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 if not back_cb:
                     back_target = course.get('category') or cat_name or '1'
                     try:
-                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                        # Clamp origin_page to the valid range for this category
+                        try:
+                            cdoc = await db.categories.find_one({"name": back_target}, projection={"courses": 1})
+                            total_items = len(cdoc.get('courses', [])) if cdoc and isinstance(cdoc.get('courses', None), list) else 0
+                            total_pages = math.ceil(total_items / PAGE_SIZE) if total_items > 0 else 1
+                        except Exception:
+                            total_pages = origin_page or 1
+                        try:
+                            clamped_page = max(1, min(int(origin_page or 1), max(1, int(total_pages))))
+                        except Exception:
+                            clamped_page = origin_page or 1
+                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{clamped_page}"
                     except Exception:
                         back_cb = f"courses::global::{origin_page}"
 
