@@ -19,6 +19,7 @@ from typing import Optional
 CALLBACK_REF_TTL = int(os.getenv("CALLBACK_REF_TTL", str(7 * 24 * 3600)))
 import math
 from telegram.error import RetryAfter, BadRequest
+from contextlib import asynccontextmanager
 
 # In-memory mapping for short callback ids -> payload
 CALLBACK_MAP = {}
@@ -299,6 +300,64 @@ if REDIS_URL:
     except Exception:
         _redis = None
         _redis_token_script = None
+
+        # Simple in-memory TTL cache for inexpensive totals; keyed by JSON'd filter.
+        _COUNT_CACHE = {}  # key -> (count:int, expire_ts:float)
+
+
+        @asynccontextmanager
+        async def _db_timing(name: str):
+            """Async context manager to time DB operations and log durations."""
+            t0 = time.time()
+            try:
+                yield
+            finally:
+                elapsed = time.time() - t0
+                try:
+                    logger.info("[DB-TIME] %s %.3fs", name, elapsed)
+                except Exception:
+                    pass
+
+
+        async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
+            """Get total count with optional caching. Prefers Redis when configured.
+
+            `coll_name` is the collection attribute name on the `db` object (e.g. 'categories').
+            """
+            key = f"count:{coll_name}:{json.dumps(filter_q or {}, sort_keys=True)}"
+            now = time.time()
+            entry = _COUNT_CACHE.get(key)
+            if entry and entry[1] > now:
+                return entry[0]
+
+            # Try Redis first (best-effort)
+            try:
+                if _redis is not None:
+                    val = await _redis.get(key)
+                    if val is not None:
+                        try:
+                            cnt = int(val)
+                            _COUNT_CACHE[key] = (cnt, now + ttl)
+                            return cnt
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Fallback: run count_documents on the collection
+            try:
+                coll = getattr(db, coll_name) if hasattr(db, coll_name) else db[coll_name]
+                cnt = await coll.count_documents(filter_q or {})
+            except Exception:
+                cnt = 0
+
+            _COUNT_CACHE[key] = (cnt, now + ttl)
+            try:
+                if _redis is not None:
+                    await _redis.setex(key, ttl, str(cnt))
+            except Exception:
+                pass
+            return cnt
 
 def _refill_bucket(bucket):
     now = time.time()
@@ -919,11 +978,12 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        # Use server-side pagination: count + sort + skip/limit for top-level categories
-        total = await db.categories.count_documents({"parent": {"$exists": False}})
+        # Use server-side pagination: cached count + sort + skip/limit for top-level categories
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
-        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        async with _db_timing(f"createcat_page:{page}"):
+            total = await _get_total_count(db, 'categories', {"parent": {"$exists": False}}, ttl=30)
+            cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         cats = []
         total = 0
@@ -995,10 +1055,11 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             return
 
         # Use server-side pagination for children; fetch only this page slice
-        total_children = await db.categories.count_documents({"parent": parent})
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
-        children = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        async with _db_timing(f"children_page:{parent}:{page}"):
+            total_children = await _get_total_count(db, 'categories', {"parent": parent}, ttl=30)
+            children = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         children = []
         total_children = 0
@@ -1093,10 +1154,11 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             return
 
         # Use server-side pagination for categories listing
-        total = await db.categories.count_documents({"parent": {"$exists": False}})
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
-        cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        async with _db_timing(f"categories_page:{page}"):
+            total = await _get_total_count(db, 'categories', {"parent": {"$exists": False}}, ttl=30)
+            cats = await db.categories.find({"parent": {"$exists": False}}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
         cats = []
         total = 0
@@ -1213,23 +1275,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
         # metadata is required for coach views.
         # Paginated aggregation: count total matching coach courses, then
         # fetch only the requested page of items server-side.
-        page = 1
-        page_size = PAGE_SIZE
-        # count pipeline
-        count_pipeline = [
-            {"$match": filter_q},
-            {"$unwind": "$courses"},
-            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "coach": "$courses.coach"}},
-            {"$match": {"$or": [{"coach": coach_name}, {"category": coach_name}] }},
-            {"$count": "total"}
-        ]
-        try:
-            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-            total_courses = count_res[0]["total"] if count_res else 0
-        except Exception:
-            total_courses = 0
-
-        # items pipeline with skip/limit
         start = (page - 1) * page_size
         items_pipeline = [
             {"$match": filter_q},
@@ -1238,20 +1283,18 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             {"$match": {"$or": [{"coach": coach_name}, {"category": coach_name}] }},
             {"$sort": {"name": 1}},
             {"$skip": start},
-            {"$limit": page_size}
+            {"$limit": page_size + 1}
         ]
-        try:
-            coach_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
-        except Exception:
-            coach_courses = []
-
-        # coach_courses already have the expected shape for build_courses_page
+        async with _db_timing(f"show_coach:{coach_name}:{page}"):
+            try:
+                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+            except Exception:
+                items = []
+        has_more = len(items) > page_size
+        coach_courses = items[:page_size]
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
+        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
         text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True)
-        if not text:
-            await safe_edit_message(query, f"No courses found for coach '{coach_name}'.", action_key=getattr(query, 'data', None))
-            return
-        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error("Error showing coach courses: %s", e)
         await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
@@ -1885,28 +1928,26 @@ async def list_courses(update: Update, context: CallbackContext):
         # full category documents into memory.
         page = 1
         page_size = PAGE_SIZE
-        # Paginated aggregation for unified course listing
-        count_pipeline = [
-            {"$unwind": "$courses"},
-            {"$count": "total"}
-        ]
-        try:
-            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-            total_courses = count_res[0]['total'] if count_res else 0
-        except Exception:
-            total_courses = 0
+        # Paginated aggregation for unified course listing. Fetch one extra
+        # item (page_size + 1) to detect whether a Next page exists without
+        # performing a full collection count.
         start = (page - 1) * page_size
         items_pipeline = [
             {"$unwind": "$courses"},
             {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
             {"$sort": {"name": 1}},
             {"$skip": start},
-            {"$limit": page_size}
+            {"$limit": page_size + 1}
         ]
-        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
-        # Sort current page deterministically
+        async with _db_timing(f"list_courses:page:{page}"):
+            try:
+                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+            except Exception:
+                items = []
+        has_more = len(items) > page_size
+        all_courses = items[:page_size]
         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
-
+        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
         if all_courses:
             # Build unified page UI
             text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', origin_context=None, total_count=total_courses, is_page=True)
@@ -2445,15 +2486,22 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         return []
 
     try:
-        # Read courses from the category document's embedded array and paginate
-        category_doc = await db.categories.find_one({"name": category})
-        if not category_doc or not category_doc.get('courses'):
-            return []
-        courses = category_doc.get('courses', [])
-        # Sort courses case-insensitively A→Z for deterministic pagination
-        courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
+        # Use server-side aggregation to paginate embedded `courses` array
         start = (page - 1) * page_size
-        return courses[start:start + page_size]
+        items_pipeline = [
+            {"$match": {"name": category}},
+            {"$unwind": "$courses"},
+            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+            {"$sort": {"name": 1}},
+            {"$skip": start},
+            {"$limit": page_size}
+        ]
+        async with _db_timing(f"get_courses_by_category:{category}:{page}"):
+            try:
+                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+            except Exception:
+                items = []
+        return items
     except Exception as e:
         logger.error(f"Error while fetching courses for category '{category}': {str(e)}")
         return []
@@ -2485,27 +2533,22 @@ async def courses_callback(update: Update, context: CallbackContext):
                     kind = parts[0]
                     if kind == "global":
                         page = int(parts[1])
-                        # Count total courses and fetch the requested page server-side
-                        count_pipeline = [
-                            {"$unwind": "$courses"},
-                            {"$count": "total"}
-                        ]
-                        try:
-                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-                            total_courses = count_res[0]['total'] if count_res else 0
-                        except Exception:
-                            total_courses = 0
-
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$unwind": "$courses"},
                             {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
                             {"$sort": {"name": 1}},
                             {"$skip": start},
-                            {"$limit": page_size}
+                            {"$limit": page_size + 1}
                         ]
-                        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                        try:
+                            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                        except Exception:
+                            items = []
+                        has_more = len(items) > page_size
+                        all_courses = items[:page_size]
                         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
                         text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
@@ -2529,23 +2572,35 @@ async def courses_callback(update: Update, context: CallbackContext):
                                         origin_ctx_page = None
                             except Exception:
                                 origin_ctx = None
-                        category_doc = await db.categories.find_one({"name": category})
-                        if not category_doc or not category_doc.get('courses'):
-                            await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
-                            return
-                        courses = category_doc.get('courses', [])
+                        # Use aggregation to avoid loading the full category document
+                        start = (page - 1) * page_size
+                        items_pipeline = [
+                            {"$match": {"name": category}},
+                            {"$unwind": "$courses"},
+                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                            {"$sort": {"name": 1}},
+                            {"$skip": start},
+                            {"$limit": page_size + 1}
+                        ]
+                        try:
+                            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                        except Exception:
+                            items = []
+                        has_more = len(items) > page_size
+                        courses = items[:page_size]
                         courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-                        # compute origin_context (parent path) so Home returns to parent
-                        # only resolve from DB when we didn't receive an origin_ctx
+                        # compute origin_context (parent path) — fetch parent path if we don't already have origin_ctx
                         if origin_ctx is None:
                             try:
-                                parent = category_doc.get('parent')
+                                pdoc = await db.categories.find_one({"name": category}, projection={"parent": 1})
+                                parent = pdoc.get('parent') if pdoc else None
                                 if parent:
-                                    pdoc = await db.categories.find_one({"name": parent})
-                                    origin_ctx = pdoc.get('path') if pdoc and pdoc.get('path') else parent
+                                    pp = await db.categories.find_one({"name": parent}, projection={"path": 1})
+                                    origin_ctx = pp.get('path') if pp and pp.get('path') else parent
                             except Exception:
                                 origin_ctx = None
-                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page)
+                        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(courses))
+                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page, total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
@@ -2559,19 +2614,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         # unwind + match) to avoid iterating over all categories
                         # in Python.
                         coach_name = coach_slug
-                        # Paginated aggregation for coach results
-                        count_pipeline = [
-                            {"$match": {"courses.coach": coach_name}},
-                            {"$unwind": "$courses"},
-                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "coach": "$courses.coach"}},
-                            {"$match": {"coach": coach_name}},
-                            {"$count": "total"}
-                        ]
-                        try:
-                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-                            total_courses = count_res[0]['total'] if count_res else 0
-                        except Exception:
-                            total_courses = 0
+                        # Fetch coach results with a small overfetch to detect Next page
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$match": {"courses.coach": coach_name}},
@@ -2580,10 +2623,16 @@ async def courses_callback(update: Update, context: CallbackContext):
                             {"$match": {"coach": coach_name}},
                             {"$sort": {"name": 1}},
                             {"$skip": start},
-                            {"$limit": page_size}
+                            {"$limit": page_size + 1}
                         ]
-                        coach_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                        try:
+                            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                        except Exception:
+                            items = []
+                        has_more = len(items) > page_size
+                        coach_courses = items[:page_size]
                         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
+                        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
                         text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found for coach '{coach_name}' on page {page}.", action_key=getattr(query, 'data', None))
@@ -2594,26 +2643,23 @@ async def courses_callback(update: Update, context: CallbackContext):
                     # legacy fallback handling
                     if len(parts) == 1:
                         page = int(parts[0])
-                        # Legacy global fallback: use paginated aggregation
-                        count_pipeline = [
-                            {"$unwind": "$courses"},
-                            {"$count": "total"}
-                        ]
-                        try:
-                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-                            total_courses = count_res[0]['total'] if count_res else 0
-                        except Exception:
-                            total_courses = 0
+                        # Legacy global fallback: fetch page_size+1 items to detect Next
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$unwind": "$courses"},
                             {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
                             {"$sort": {"name": 1}},
                             {"$skip": start},
-                            {"$limit": page_size}
+                            {"$limit": page_size + 1}
                         ]
-                        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                        try:
+                            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                        except Exception:
+                            items = []
+                        has_more = len(items) > page_size
+                        all_courses = items[:page_size]
                         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
                         text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', origin_context=None, total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
