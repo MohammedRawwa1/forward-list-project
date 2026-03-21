@@ -163,11 +163,18 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
 
     try:
         if action == 'course':
-            # remove single course from its category
+            # remove single course from its category; prefer id-based deletion
             if not cat:
                 await safe_edit_message(query, "Cannot determine course category. Aborting.", action_key=getattr(query, 'data', None))
                 return
-            res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+            course_id = payload.get('id')
+            if course_id:
+                # delete by embedded course id when available
+                res = await db['categories'].update_one({"courses.id": course_id}, {"$pull": {"courses": {"id": course_id}}})
+            else:
+                # fallback to name-based deletion for legacy entries
+                res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+
             if res.modified_count:
                 # After deletion, show the updated courses list for the category
                 try:
