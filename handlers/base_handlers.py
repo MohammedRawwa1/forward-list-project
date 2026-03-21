@@ -1077,7 +1077,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
     keyboard.append([InlineKeyboardButton("(Top-level)", callback_data=f"createcat_parent::")])
     for cat in page_cats:
         keyboard.append([InlineKeyboardButton(cat.get('name'), callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}")])
-                            details_cb = _make_course_ref(course_cat, name, origin_type, page, origin_context, c.get('id'))
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
