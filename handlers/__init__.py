@@ -23,7 +23,7 @@ from handlers.base_handlers import (
     show_coach_handler,
     show_coach_in_category,
 )
-from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion, handle_delete_ref, handle_delete_confirm
+from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion, handle_delete_ref, handle_delete_confirm, handle_delete_summary
 __all__ += [
     "handle_categories_pagination",
     "handle_back_to_cats",
