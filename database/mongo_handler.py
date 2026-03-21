@@ -26,11 +26,7 @@ class MongoDB:
             cls._client = AsyncIOMotorClient(mongo_uri)
             cls._db = cls._client[db_name]
             logger.info(f"MongoDB initialized successfully with database: {db_name}")
-            # Ensure recommended indexes are present for faster queries
-            try:
-                await cls.ensure_indexes()
-            except Exception:
-                logger.exception("ensure_indexes failed")
+            # NOTE: index creation was disabled (rollback to previous behavior)
         except Exception as e:
             logger.error(f"Failed to initialize MongoDB: {e}")
             raise MongoConnectionError(f"Failed to initialize MongoDB: {e}")
@@ -105,31 +101,11 @@ class MongoDB:
 # ------------------------------------------------------------------
     @classmethod
     async def ensure_indexes(cls, collection_name='categories', indexes=None):
-        indexes = indexes or [('name', 1)]
-        db = await cls.get_db()
-        coll = db[collection_name]
-
-        # --- categories ---
-        info = await coll.index_information()
-        if 'name_1' not in info:
-            await coll.create_index('name', unique=True)
-            logger.info("Unique index on categories.name created")
-        if 'parent_1' not in info:
-            await coll.create_index('parent')
-            logger.info("Index on categories.parent created")
-        if 'path_1' not in info:
-            await coll.create_index('path')
-            logger.info("Index on categories.path created")
-        # Index for embedded course coach names to accelerate distinct/filters
-        if 'courses.coach_1' not in info:
-            await coll.create_index('courses.coach')
-            logger.info("Index on categories.courses.coach created")
-        # Index for embedded course names to accelerate course lookups
-        if 'courses.name_1' not in info:
-            await coll.create_index('courses.name')
-            logger.info("Index on categories.courses.name created")
-
-        # Note: legacy global `courses` collection removed; courses are embedded in `categories` documents.
+        # ensure_indexes intentionally left as a no-op to preserve existing
+        # deployment state. Index creation was causing unexpected behavior
+        # in some environments; revert to manual index management.
+        logger.info("ensure_indexes called but no-op (index creation rolled back)")
+        return
 
     @classmethod
     async def delete_all_categories(cls):
