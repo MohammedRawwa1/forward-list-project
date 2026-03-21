@@ -6,6 +6,8 @@ import urllib.parse
 import logging
 from handlers.base_handlers import safe_edit_message, _resolve_callback_payload, safe_answer
 logger = logging.getLogger(__name__)
+# Batch limit to avoid loading very large result sets into memory
+BATCH_LIMIT = 500
 
 # ----------  delete category  ----------
 async def handle_category_deletion(update: Update, context: CallbackContext):
@@ -34,7 +36,7 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
                     {"parent": curr},
                     {"path": {"$regex": f'^{re.escape(curr)}/'}}
                 ]
-            }).to_list(length=None)
+                }).project({"name": 1}).to_list(length=BATCH_LIMIT)
             for ch in children:
                 name = ch.get('name')
                 if name and name not in to_delete:
@@ -227,7 +229,7 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                             {"parent": curr},
                             {"path": {"$regex": f'^{re.escape(curr)}/'}}
                         ]
-                    }).to_list(length=None)
+                        }).project({"name": 1}).to_list(length=BATCH_LIMIT)
                     for ch in children:
                         name = ch.get('name')
                         if name and name not in to_delete:
@@ -267,7 +269,7 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                             {"parent": curr},
                             {"path": {"$regex": f'^{re.escape(curr)}/'}}
                         ]
-                    }).to_list(length=None)
+                        }).project({"name": 1}).to_list(length=BATCH_LIMIT)
                     for ch in children:
                         name = ch.get('name')
                         if name and name not in to_delete:
@@ -335,7 +337,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                         {"parent": curr},
                         {"path": {"$regex": f'^{re.escape(curr)}/'}}
                     ]
-                }).to_list(length=None)
+                }).project({"name": 1}).to_list(length=BATCH_LIMIT)
                 for ch in children:
                     name = ch.get('name')
                     if name and name not in to_delete:
@@ -343,7 +345,8 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
 
             # count categories and courses (fetch docs once for efficiency)
             cat_count = len(to_delete)
-            docs = await db['categories'].find({"name": {"$in": list(to_delete)}}).to_list(length=None)
+            # fetch exactly the number of docs we expect to summarize (project minimal fields)
+            docs = await db['categories'].find({"name": {"$in": list(to_delete)}}, projection={"name": 1, "courses": 1}).to_list(length=cat_count)
             doc_map = {d.get('name'): d for d in docs}
             course_count = sum(len(d.get('courses', [])) for d in docs)
 
@@ -404,7 +407,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                         {"parent": curr},
                         {"path": {"$regex": f'^{re.escape(curr)}/'}}
                     ]
-                }).to_list(length=None)
+                    }).project({"name": 1}).to_list(length=BATCH_LIMIT)
                 for ch in children:
                     name = ch.get('name')
                     if name and name not in to_delete:
