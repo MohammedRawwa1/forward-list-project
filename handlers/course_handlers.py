@@ -38,7 +38,10 @@ async def setup_course_handlers(application):
         entry_points=[CommandHandler("add", add_course_start)],
         states={
             # First: pick a parent/top-level category
-            ADD_PARENT: [CallbackQueryHandler(parent_selected, pattern=r"^addparent::")],
+            ADD_PARENT: [
+                CallbackQueryHandler(parent_selected, pattern=r"^addparent::"),
+                CallbackQueryHandler(addparent_page, pattern=r"^addparent_page::")
+            ],
 
             # Then: pick a coach (buttons) or enter one manually (text)
             ADD_COACH: [
@@ -78,14 +81,14 @@ async def add_course_start(update: Update, context: CallbackContext):
     """
     try:
         db = await get_db()
-        # Check quickly if any top-level parents exist without fetching them all
-        parents_exist = await db.categories.find_one({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}, projection={"_id": 1})
-        if not parents_exist:
-            parents = []
-        else:
-            # Fetch only the first page of parents (server-side sort + limit)
-            parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).limit(COURSE_PAGE_SIZE).to_list(length=COURSE_PAGE_SIZE)
+        # Use server-side pagination for top-level parents
+        total = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]})
+        page = 1
+        page_size = COURSE_PAGE_SIZE
+        start = (page - 1) * page_size
+        parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
     except Exception:
+        total = 0
         parents = []
 
     if not parents:
@@ -99,7 +102,22 @@ async def add_course_start(update: Update, context: CallbackContext):
     for p in parents:
         # Keep the add flow fast: do not check emptiness here to avoid extra DB calls.
         display = f"{p.get('name')}"
-        keyboard.append([InlineKeyboardButton(display, callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}")])
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}::1")])
+
+    # Navigation row
+    nav = []
+    total_pages = (total - 1) // page_size + 1 if total else 1
+    last_page = max(1, total_pages)
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
+    # Home for add flow: go to first page
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
+    if page < last_page:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
+    if nav:
+        keyboard.append(nav)
 
     await update.message.reply_text("Choose a parent category for the new course:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ADD_PARENT
@@ -229,10 +247,29 @@ async def parent_selected(update: Update, context: CallbackContext):
     """Callback when a parent is chosen. Presents coach choices next."""
     query = update.callback_query
     await safe_answer(query)
-    encoded = query.data.split("::", 1)[1]
-    parent = urllib.parse.unquote_plus(encoded) if encoded else None
+    raw = query.data
+    parent = None
+    origin_page = None
+    if raw.startswith("addparent::"):
+        parts = raw.split("::")
+        # parts -> ['addparent', '<name>' (optional), '<page>' (optional)]
+        if len(parts) >= 2 and parts[1] != "":
+            parent = urllib.parse.unquote_plus(parts[1])
+        if len(parts) >= 3:
+            try:
+                origin_page = int(parts[2])
+            except Exception:
+                origin_page = None
+    else:
+        # fallback
+        encoded = query.data.split('::', 1)[1] if '::' in query.data else ''
+        parent = urllib.parse.unquote_plus(encoded) if encoded else None
+
     # store chosen parent (None means add to top-level)
     context.user_data['course_parent'] = parent
+    # remember the page we came from to allow returning later
+    if origin_page:
+        context.user_data['last_category_page'] = origin_page
 
     # Prefer showing child categories as coach options when coaches are
     # modeled as category documents. This matches the user's workflow where
@@ -378,6 +415,57 @@ async def addcoach_page(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
 
     await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+    return
+
+
+async def addparent_page(update: Update, context: CallbackContext):
+    """Paginated view for top-level parent selection inside the add flow.
+
+    Callback format: addparent_page::{page}
+    """
+    query = update.callback_query
+    await safe_answer(query)
+    data = query.data
+    parts = data.split("::")
+    try:
+        page = int(parts[1])
+    except Exception:
+        page = 1
+    context.user_data["last_category_page"] = page
+
+    try:
+        db = await get_db()
+        total = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]})
+        page_size = COURSE_PAGE_SIZE
+        start = (page - 1) * page_size
+        parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+    except Exception:
+        total = 0
+        parents = []
+
+    keyboard = []
+    keyboard.append([InlineKeyboardButton("(Add to top-level)", callback_data="addparent::")])
+    for p in parents:
+        display = f"{p.get('name')}"
+        keyboard.append([InlineKeyboardButton(display, callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}::{page}")])
+
+    nav = []
+    total_pages = (total - 1) // page_size + 1 if total else 1
+    last_page = max(1, total_pages)
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
+
+    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
+
+    if page < last_page:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
+
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
+    if nav:
+        keyboard.append(nav)
+
+    await safe_edit_message(query, f"Choose a parent category for the new course (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     return
 
 
