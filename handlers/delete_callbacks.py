@@ -206,7 +206,14 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                     if page > total_pages:
                         page = total_pages
 
-                    text, reply_markup = build_courses_page(all_courses, page=page, origin_type='category', category=cat, origin_context=None, origin_context_page=None)
+                    text, reply_markup = build_courses_page(
+                        all_courses,
+                        page=page,
+                        origin_type='category',
+                        category=cat,
+                        origin_context=payload.get('origin_context'),
+                        origin_context_page=payload.get('origin_context_page')
+                    )
                     if text and reply_markup:
                         await safe_edit_message(query, text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                     else:
