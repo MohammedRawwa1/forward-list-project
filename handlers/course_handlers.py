@@ -110,8 +110,9 @@ async def add_course_start(update: Update, context: CallbackContext):
     last_page = max(1, total_pages)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
-    # Home for add flow: go to first page
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
+    # Home for add flow: go to first page (only show on later pages)
+    if page > 1:
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
     if total_pages > 1:
@@ -455,7 +456,9 @@ async def addparent_page(update: Update, context: CallbackContext):
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
 
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
+    # Show Home for add flow only when not on the first page
+    if page > 1:
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
 
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
