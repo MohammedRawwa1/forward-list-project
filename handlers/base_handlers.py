@@ -636,60 +636,63 @@ MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
 PAGE_SIZE = 50  # Default number of items per page for pagination
 
 
-def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None):
+def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None, total_count: int = None, is_page: bool = False):
     """Builds the text and InlineKeyboardMarkup for a courses page.
+
+    `all_courses` may be either the full list of items or, when
+    `is_page=True`, already the list of items for the requested page.
 
     Returns (text, InlineKeyboardMarkup) or (None, None) when no items.
     """
-    if not all_courses:
-        return None, None
     page_size = PAGE_SIZE
-    start = (page - 1) * page_size
-def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None, total_count: int = None, is_page: bool = False):
-    display = all_courses[start:start + page_size]
-    if not display:
-        return None, None
+    try:
+        # If the caller passed in pre-sliced page items, use them directly.
+        if is_page:
+            display = list(all_courses) if all_courses is not None else []
+            effective_total = total_count if total_count is not None else len(display)
+            start = (page - 1) * page_size
+        else:
+            total_len = total_count if total_count is not None else (len(all_courses) if hasattr(all_courses, '__len__') else 0)
+            start = (page - 1) * page_size
+            display = all_courses[start:start + page_size]
+            effective_total = total_len
 
-    logger.debug("build_courses_page called: origin_type=%s category=%s page=%s total=%s", origin_type, category, page, len(all_courses) if hasattr(all_courses, '__len__') else 'unknown')
-    if origin_type == 'category' and category:
-        text = f"Courses in category '{category}' (page {page}):"
-    # If caller already provided just the page items, use them directly.
-    if is_page:
-        display = all_courses
         if not display:
             return None, None
-    else:
-        start = (page - 1) * page_size
-        display = all_courses[start:start + page_size]
-        if not display:
-            return None, None
-    else:
-        text = f"Here are the available courses (page {page}):"
-    effective_total = total_count if total_count is not None else (len(all_courses) if hasattr(all_courses, '__len__') else 0)
-    if effective_total > ( (page - 1) * page_size ) + page_size:
 
-    keyboard = []
-    for c in display:
-        try:
-            # Determine course's category: prefer explicit field on item,
-            # else use the `category` argument passed to this page builder.
-            course_cat = c.get('category') if isinstance(c, dict) else None
-            if not course_cat:
-                course_cat = category
-            name = c.get('name') if isinstance(c, dict) else None
-            link = c.get('link') if isinstance(c, dict) else None
-            if not name:
-                logger.debug("build_courses_page: skipping course without name: %s", repr(c))
+        logger.debug("build_courses_page called: origin_type=%s category=%s page=%s total=%s", origin_type, category, page, effective_total)
+
+        if origin_type == 'category' and category:
+            text = f"Courses in category '{category}' (page {page}):"
+        else:
+            text = f"Here are the available courses (page {page}):"
+
+        keyboard = []
+        for c in display:
+            try:
+                # Determine course's category: prefer explicit field on item,
+                # else use the `category` argument passed to this page builder.
+                course_cat = c.get('category') if isinstance(c, dict) else None
+                if not course_cat:
+                    course_cat = category
+                name = c.get('name') if isinstance(c, dict) else None
+                link = c.get('link') if isinstance(c, dict) else None
+                if not name:
+                    logger.debug("build_courses_page: skipping course without name: %s", repr(c))
+                    continue
+                # details callback may omit back token if too long; _make_course_ref handles that
+                details_cb = _make_course_ref(course_cat, name, origin_type, page)
+                keyboard.append([
+                    InlineKeyboardButton(name, url=link),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
+                ])
+            except Exception as e:
+                logger.error("build_courses_page: error building row for course %s: %s", repr(c), e)
                 continue
-            # details callback may omit back token if too long; _make_course_ref handles that
-            details_cb = _make_course_ref(course_cat, name, origin_type, page)
-            keyboard.append([
-                InlineKeyboardButton(name, url=link),
-                InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
-            ])
-        except Exception as e:
-            logger.error("build_courses_page: error building row for course %s: %s", repr(c), e)
-            continue
+
+    except Exception as e:
+        logger.exception("build_courses_page: unexpected error: %s", e)
+        return None, None
 
     # Pagination controls (Previous / Next)
     pagination_buttons = []
@@ -2302,8 +2305,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     if crs.get('name') == course_name:
                         course = {"name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
                         break
-                if course:
-                    break
+                # no outer loop to break from here; continue processing
 
         if course:
             # Determine canonical category for this course (prefer explicit field)
@@ -2483,35 +2485,28 @@ async def courses_callback(update: Update, context: CallbackContext):
                     kind = parts[0]
                     if kind == "global":
                         page = int(parts[1])
-                        # flatten all courses server-side using aggregation so we
-                        # only transfer the minimal course fields instead of
-                        # whole category documents.
-                        pipeline = [
+                        # Count total courses and fetch the requested page server-side
+                        count_pipeline = [
+                            {"$unwind": "$courses"},
+                            {"$count": "total"}
+                        ]
+                        try:
+                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+                            total_courses = count_res[0]['total'] if count_res else 0
+                        except Exception:
+                            total_courses = 0
+
+                        start = (page - 1) * page_size
+                        items_pipeline = [
                             {"$unwind": "$courses"},
                             {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
-                            {"$sort": {"name": 1}}
+                            {"$sort": {"name": 1}},
+                            {"$skip": start},
+                            {"$limit": page_size}
                         ]
-                                        # count total courses and fetch the requested page server-side
-                                        count_pipeline = [
-                                            {"$unwind": "$courses"},
-                                            {"$count": "total"}
-                                        ]
-                                        try:
-                                            count_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-                                            total_courses = count_res[0]['total'] if count_res else 0
-                                        except Exception:
-                                            total_courses = 0
-                                        start = (page - 1) * page_size
-                                        items_pipeline = [
-                                            {"$unwind": "$courses"},
-                                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
-                                            {"$sort": {"name": 1}},
-                                            {"$skip": start},
-                                            {"$limit": page_size}
-                                        ]
-                                        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
-                                        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
-                                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', total_count=total_courses, is_page=True)
+                        all_courses = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                        all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
+                        text, reply_markup = build_courses_page(all_courses, page=page, origin_type='global', total_count=total_courses, is_page=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                             return
