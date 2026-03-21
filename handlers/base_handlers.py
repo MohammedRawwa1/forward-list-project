@@ -1316,10 +1316,11 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     if nav:
         keyboard.append(nav)
 
-    # Breadcrumb / Home row
+    # Breadcrumb / Home row: show Home only when not already on page 1
     try:
-        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
-        keyboard.insert(0, breadcrumb_buttons)
+        if page > 1:
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"categories_page::1")]
+            keyboard.insert(0, breadcrumb_buttons)
     except Exception:
         pass
 
@@ -1690,7 +1691,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     #  - showcat::{path_or_name}::from_parent::{parent_path}::{parent_page}
     raw = query.data
     try:
-        logger.debug("showcat_handler: raw callback_data=%r", raw)
+        logger.info("showcat_handler: raw callback_data=%r", raw)
     except Exception:
         pass
     page_from_callback = None
@@ -1753,6 +1754,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 parent_origin_page = None
         else:
             parts = raw.split("::")
+            try:
+                logger.info("showcat_handler: parts=%r", parts)
+            except Exception:
+                pass
             encoded = parts[1] if len(parts) > 1 else ""
             if len(parts) > 2:
                 try:
@@ -1817,7 +1822,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # First: show any child categories (sub-categories)
     try:
         try:
-            logger.debug("showcat_handler: parsed page_from_callback=%r parent_origin=%r parent_origin_page=%r encoded=%r", page_from_callback, parent_origin, parent_origin_page, encoded)
+            logger.info("showcat_handler: parsed page_from_callback=%r parent_origin=%r parent_origin_page=%r encoded=%r", page_from_callback, parent_origin, parent_origin_page, encoded)
         except Exception:
             pass
         # Server-side pagination for child categories under this category
@@ -1826,7 +1831,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         start = (page - 1) * page_size
         children = await db.categories.find({"parent": cat_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
         try:
-            logger.debug("showcat_handler: total_children=%s page=%s start=%s fetched_children=%s", total_children, page, start, len(children) if children is not None else 0)
+            logger.info("showcat_handler: total_children=%s page=%s start=%s fetched_children=%s", total_children, page, start, len(children) if children is not None else 0)
         except Exception:
             pass
     except Exception:
@@ -1878,7 +1883,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
         # Put End between Prev and Next; if on first page, place End at the left
         if total_pages > 1:
-            end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_name, last_page))
+            end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_path, last_page))
             if page == 1:
                 nav.insert(0, end_btn)
             else:
