@@ -2169,57 +2169,22 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
     await safe_answer(query)
 
     # Extract the action and page number from the callback data
-    # For this deployment we prefer a full (non-paginated) categories list.
-    # Redirect to the full `list_categories` view instead of DB-side pagination.
-    await list_categories(update, context)
-    return
-
-    db = await get_db()
-    if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, 'data', None))
-        return
-
+    data = getattr(query, 'data', '')
+    # supported forms: categories_prev_<N> or categories_next_<N>
     try:
-        collection = db['categories']
-
-        # Use DB-side pagination: fetch page_size+1 items starting at the
-        # requested offset. This avoids loading the entire collection into
-        # memory (which caused lag) while still allowing arbitrary page
-        # numbers. We sort by name for deterministic ordering.
-        page_size = PAGE_SIZE
-        start = (page - 1) * page_size
-
-        # Fetch one extra document as a lookahead to decide whether a "Next"
-        # button is needed.
-        cursor = collection.find().sort("name", 1).skip(start).limit(page_size + 1)
-        results = await cursor.to_list(length=page_size + 1)
-
-        if not results:
-            # If no results for this page, inform the user (they may have
-            # navigated past the end).
-            await safe_edit_message(query, "No categories available.", action_key=getattr(query, 'data', None))
+        parts = data.split("_")
+        if len(parts) >= 3 and parts[0] == 'categories' and parts[1] in ('prev', 'next'):
+            try:
+                page = int(parts[2])
+            except Exception:
+                page = 1
+            # delegate to `categories_page` with the CallbackQuery as the source
+            await categories_page(query, context, page=page)
             return
-
-        display = results[:page_size]
-
-        keyboard = [
-            [InlineKeyboardButton(category['name'], callback_data=f"category_{urllib.parse.quote_plus(category['name'])}")]
-            for category in display
-        ]
-
-        pagination_buttons = []
-        if start > 0:
-            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"categories_prev_{page-1}"))
-        if len(results) > page_size:
-            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"categories_next_{page+1}"))
-        if pagination_buttons:
-            keyboard.append(pagination_buttons)
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await safe_edit_message(query, "Here are the available categories:", reply_markup=reply_markup, action_key=getattr(query, 'data', None))
-    except Exception as e:
-        logger.error(f"Error handling pagination: {e}")
-        await safe_edit_message(query, "An error occurred while fetching categories. Please try again later.", action_key=getattr(query, 'data', None))
+    except Exception:
+        logger.exception("handle_categories_pagination: failed to parse pagination callback")
+        await list_categories(update, context)
+        return
 
 logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
