@@ -2457,6 +2457,11 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             origin_page = int(payload.get("origin_page", 1))
         except Exception:
             origin_page = 1
+        origin_context = payload.get('origin_context')
+        try:
+            origin_context_page = int(payload.get('origin_context_page')) if payload.get('origin_context_page') is not None else None
+        except Exception:
+            origin_context_page = None
         # Prefer an explicit appended back token, otherwise fall back to saved payload
         saved_back_cb = appended_back or payload.get('back_cb')
     else:
@@ -2583,6 +2588,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 'name': course.get('name'),
                 'origin_type': origin_type,
                 'origin_page': origin_page,
+                'origin_context': origin_context,
+                'origin_context_page': origin_context_page,
             }
             try:
                 delete_key = _store_callback_payload(delete_payload)
@@ -2602,7 +2609,28 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 # clamp the page to the available range.
                 try:
                     if saved_back_cb:
-                        back_cb = saved_back_cb
+                        sb = str(saved_back_cb)
+                        # Prefer showcat-style callbacks so Back opens the
+                        # full category view (coaches/subcategories) instead
+                        # of a small single-course page. Convert legacy
+                        # courses::category::... callbacks into a showcat
+                        # callback; otherwise accept showcat/*/categories refs.
+                        if sb.startswith('showcat') or sb.startswith('showcat_ref') or sb.startswith('categories_page') or sb == 'back_to_cats':
+                            back_cb = sb
+                        elif sb.startswith('courses::category::'):
+                            try:
+                                parts_sb = sb.split('::')
+                                if len(parts_sb) >= 4:
+                                    cat_enc = parts_sb[2]
+                                    pg = int(parts_sb[3]) if parts_sb[3].isdigit() else 1
+                                    cat_un = urllib.parse.unquote_plus(cat_enc)
+                                    back_cb = _shorten_showcat_cb(cat_un, pg)
+                                else:
+                                    back_cb = sb
+                            except Exception:
+                                back_cb = sb
+                        else:
+                            back_cb = sb
                 except Exception:
                     back_cb = None
 
