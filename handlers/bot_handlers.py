@@ -15,7 +15,8 @@ from handlers.base_handlers import safe_edit_message, _store_callback_payload, s
 
 # Logger setup
 logger = logging.getLogger(__name__)
-
+# Batch limit to avoid loading very large result sets into memory
+BATCH_LIMIT = 500
 def normalize_name(name: str) -> str:
     """
     Normalize category/course names for consistent comparison and sorting.
@@ -108,7 +109,7 @@ async def delete_category(user_id, category_name, db):
                 if curr in to_delete:
                     continue
                 to_delete.add(curr)
-                children = await db['categories'].find({"parent": curr}).to_list(length=None)
+                children = await db['categories'].find({"parent": curr}).project({"name": 1}).to_list(length=BATCH_LIMIT)
                 for ch in children:
                     name = ch.get('name')
                     if name and name not in to_delete:
@@ -244,7 +245,8 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
 async def delete_item_start(update: Update, context: CallbackContext):
     """Show every course and empty category in the DB as inline buttons."""
     db = await get_db()
-    cats = await db.categories.find().to_list(length=None)
+    # Fetch minimal fields and bound result size to avoid loading huge docs
+    cats = await db.categories.find({}, projection={"name": 1, "courses": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
 
     # Sort categories safely
     cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
@@ -309,27 +311,23 @@ async def delete_category_start(update: Update, context: CallbackContext):
     try:
         # Only list child categories (those with a parent). Parent/top-level
         # categories are managed via `/delete_parent` and should not appear
-        # in the `/delete_category` flow.
-        cats = await db["categories"].find({
+        # in the `/delete_category` flow. Use DB-side pagination.
+        filter_q = {
             "$and": [
                 {"parent": {"$exists": True}},
                 {"parent": {"$nin": [None, ""]}}
             ]
-        }).to_list(length=None)
-
-        if not cats:
-            await update.message.reply_text("No categories available to delete.")
-            return
-
-        # Sort categories by name safely
-        cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
-
+        }
         # Default page size (can be overridden in context.bot_data)
         page_size = int(context.bot_data.get('delete_cat_page_size', 20))
         page = 1
+        total = await db['categories'].count_documents(filter_q)
         start = (page - 1) * page_size
-        end = start + page_size
-        page_cats = cats[start:end]
+        cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
+        page_cats = await cursor.to_list(length=page_size)
+        if not page_cats:
+            await update.message.reply_text("No categories available to delete.")
+            return
 
         keyboard = []
         for cat in page_cats:
@@ -342,21 +340,22 @@ async def delete_category_start(update: Update, context: CallbackContext):
 
         # Pagination nav: Prev (left), Home (center when not on page 1), Next (right), End always at the end
         nav = []
-        total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+        total_pages = (total - 1) // page_size + 1 if total else 1
         last_page = max(1, total_pages)
-        if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
+        # Desired order: Next (left), Home (center when applicable), End, Previous (right-most)
+        if total > (start + page_size):
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
 
         # Home (center) — show only when not on page 1 (appears starting page 2)
         if page > 1:
             nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"delete_category_page::1"))
 
-        if len(cats) > end:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
-
-        # End button sends user to the last page (keep at right)
+        # End button sends user to the last page (keep near right)
         if total_pages > 1:
             nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
+
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
         if nav:
             keyboard.append(nav)
 
@@ -393,17 +392,17 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         return
 
     # Only page through child categories (exclude parents/top-level folders)
-    cats = await db["categories"].find({
+    filter_q = {
         "$and": [
             {"parent": {"$exists": True}},
             {"parent": {"$nin": [None, ""]}}
         ]
-    }).to_list(length=None)
-    cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
+    }
     page_size = int(context.bot_data.get('delete_cat_page_size', 20))
+    total = await db['categories'].count_documents(filter_q)
     start = (page - 1) * page_size
-    end = start + page_size
-    page_cats = cats[start:end]
+    cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
+    page_cats = await cursor.to_list(length=page_size)
 
     keyboard = []
     for cat in page_cats:
@@ -415,20 +414,21 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
-    total_pages = (len(cats) - 1) // page_size + 1 if cats else 1
+    total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
-    if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
+    # Desired order: Next (left), Home (center when applicable), End, Previous (right-most)
+    if total > (start + page_size):
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
 
     # Home (center) — show only when not on page 1 (appears starting page 2)
     if page > 1:
         nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"delete_category_page::1"))
 
-    if len(cats) > end:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
-
     if total_pages > 1:
         nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
+
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
 
     if nav:
         keyboard.append(nav)
@@ -453,12 +453,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                 {"parent": None},
                 {"parent": ""}
             ]
-        }).to_list(length=None)
-
-        cats = sorted(
-            cats,
-            key=lambda c: normalize_name(c.get("name"))
-        )
+        }).project({"name": 1, "parent": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
 
         if not cats:
             await update.message.reply_text("No parent categories available to delete.")
