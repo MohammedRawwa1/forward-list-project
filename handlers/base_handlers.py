@@ -1838,16 +1838,12 @@ async def showcat_handler(update: Update, context: CallbackContext):
         children = []
 
     if children:
-        # Paginate child categories when there are many.
-        # Use any page parsed earlier from the callback (page_from_callback)
-        page = page_from_callback or 1
-
-        # sort children deterministically
+        # Children were fetched server-side with skip/limit — they already
+        # represent the requested page slice. Avoid re-slicing here which
+        # produced empty pages when page>1 (start index >= len(children)).
+        # Keep deterministic ordering within the fetched page.
         sorted_children = sorted(children, key=lambda c: (c.get('name') or '').lower())
-        page_size = PAGE_SIZE
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_children = sorted_children[start:end]
+        page_children = sorted_children
 
         keyboard = []
         # Batch-check children existence for page_children to avoid N queries
