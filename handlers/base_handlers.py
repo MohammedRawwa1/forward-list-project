@@ -1568,7 +1568,20 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         except Exception:
             is_empty = True
         display_name = f"{cat.get('name')}{' (empty)' if is_empty else ''}"
-        keyboard.append([InlineKeyboardButton(display_name, callback_data=f"showcat_ref::{key}")])
+        cb = f"showcat_ref::{key}"
+        # Debug: log creation details for buttons to help diagnose encoding/empty-label issues
+        try:
+            sample_first = None
+            if isinstance(courses, list) and len(courses) > 0:
+                c0 = courses[0]
+                if isinstance(c0, dict):
+                    sample_first = c0.get('name')
+                else:
+                    sample_first = str(c0)
+            logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s sample_course=%r", cat.get('name'), cat_path, cb, is_empty, sample_first)
+        except Exception:
+            pass
+        keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
@@ -2092,6 +2105,18 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if not category_doc:
             await safe_edit_message(query, f'Category “{cat_path}” not found.', action_key=getattr(query, 'data', None))
             return
+        # Debug: which field matched
+        try:
+            matched_on = None
+            if category_doc.get('path') == cat_path:
+                matched_on = 'path'
+            elif category_doc.get('name') == cat_path:
+                matched_on = 'name'
+            else:
+                matched_on = 'fallback'
+            logger.info("showcat_handler: resolved category_doc name=%r path=%r matched_on=%s encoded=%r", category_doc.get('name'), category_doc.get('path'), matched_on, encoded)
+        except Exception:
+            pass
     except Exception:
         await safe_edit_message(query, f'Category “{cat_path}” not found.', action_key=getattr(query, 'data', None))
         return
