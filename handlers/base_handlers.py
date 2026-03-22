@@ -200,17 +200,18 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
     except Exception:
         # Environment may not support creating background tasks; ignore.
         pass
-def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int, origin_context: str = None, course_id: str = None) -> str:
+def _make_course_ref(category: str, name: str, origin_type: str, origin_page: int, origin_context: str = None, origin_context_page: int = None, course_id: str = None) -> str:
     # Compute a concrete back callback so details can always return to the
     # exact originating UI (category/coach/global) without guessing.
+    page_to_use = origin_context_page or origin_page or 1
     if origin_type == 'category':
         target = origin_context or category
-        back_cb = f"courses::category::{urllib.parse.quote_plus(str(target))}::{origin_page}"
+        back_cb = f"courses::category::{urllib.parse.quote_plus(str(target))}::{page_to_use}"
     elif origin_type == 'coach':
         target = origin_context or category
-        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(target))}::{origin_page}"
+        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(target))}::{page_to_use}"
     else:
-        back_cb = f"courses::global::{origin_page}"
+        back_cb = f"courses::global::{page_to_use}"
 
     payload = {
         "category": category,
@@ -219,6 +220,7 @@ def _make_course_ref(category: str, name: str, origin_type: str, origin_page: in
         "origin_type": origin_type,
         "origin_page": origin_page,
         "origin_context": origin_context,
+        "origin_context_page": origin_context_page,
         "back_cb": back_cb,
     }
     # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
@@ -991,7 +993,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                         make_origin_ctx = category
                 except Exception:
                     make_origin_ctx = origin_context
-                details_cb = _make_course_ref(course_cat, name, origin_type, page, make_origin_ctx, c.get('id') if isinstance(c, dict) else None)
+                details_cb = _make_course_ref(course_cat, name, origin_type, page, make_origin_ctx, origin_context_page, c.get('id') if isinstance(c, dict) else None)
                 keyboard.append([
                     InlineKeyboardButton(name, url=link),
                     InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
@@ -1056,7 +1058,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                 link = c.get('link') if isinstance(c, dict) else None
                 if not name:
                     continue
-                details_cb = _make_course_ref(course_cat, name, origin_type, page, origin_context, c.get('id') if isinstance(c, dict) else None)
+                details_cb = _make_course_ref(course_cat, name, origin_type, page, origin_context, origin_context_page, c.get('id') if isinstance(c, dict) else None)
                 keyboard.append([
                     InlineKeyboardButton(name, url=link),
                     InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
@@ -1483,12 +1485,12 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             pass
         # Indicate empty categories visually: we sliced one course element
         # above, so `courses` truthiness indicates at least one course.
-            try:
-                has_children = parent_has_children.get(cat.get('name'))
-                courses = cat.get('courses', []) if isinstance(cat, dict) else []
-                is_empty = (not has_children) and (not _has_real_courses(courses))
-            except Exception:
-                is_empty = True
+        try:
+            has_children = parent_has_children.get(cat.get('name'))
+            courses = cat.get('courses', []) if isinstance(cat, dict) else []
+            is_empty = (not has_children) and (not _has_real_courses(courses))
+        except Exception:
+            is_empty = True
         display_name = f"{cat.get('name')}{' (empty)' if is_empty else ''}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=f"showcat_ref::{key}")])
 
@@ -2390,7 +2392,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             try:
                 keyboard.append([
                     InlineKeyboardButton(c.get('name'), url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category_name, c.get('name'), 'category', page, None, c.get('id')))
+                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category_name, c.get('name'), 'category', page, None, None, c.get('id')))
                 ])
             except Exception:
                 continue
