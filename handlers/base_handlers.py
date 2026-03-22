@@ -55,6 +55,7 @@ from contextlib import asynccontextmanager
 
 # Simple in-memory TTL cache for inexpensive totals; keyed by JSON'd filter.
 _COUNT_CACHE = {}
+_PAGE_CACHE = {}  # key -> (payload, expire_ts)
 
 @asynccontextmanager
 async def _db_timing(name: str):
@@ -81,6 +82,18 @@ async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int =
         cnt = 0
     _COUNT_CACHE[key] = (cnt, now + ttl)
     return cnt
+
+
+def _get_cached_page(key: str):
+    now = time.time()
+    entry = _PAGE_CACHE.get(key)
+    if entry and entry[1] > now:
+        return entry[0]
+    return None
+
+
+def _set_cached_page(key: str, payload, ttl: int = 3):
+    _PAGE_CACHE[key] = (payload, time.time() + ttl)
 
 
 async def _get_courses_count(db, category: str, ttl: int = 60):
@@ -1572,10 +1585,30 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             {"$limit": page_size + 1}
         ]
         async with _db_timing(f"show_coach:{coach_name}:{page}"):
-            try:
-                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
-            except Exception:
-                items = []
+                    # Try to serve a cached page for this coach first (short TTL)
+                    cache_key = f"page:coach:{coach_name}:{page}"
+                    cached = _get_cached_page(cache_key)
+                    if cached is not None:
+                        items = cached
+                    else:
+                        cache_key = f"page:category:{category}:{page}"
+                        cached = _get_cached_page(cache_key)
+                        if cached is not None:
+                            items = cached
+                        else:
+                            try:
+                                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                            except Exception:
+                                items = []
+                            try:
+                                _set_cached_page(cache_key, items, ttl=3)
+                            except Exception:
+                                pass
+                        # cache the raw items briefly to improve UX on rapid nav
+                        try:
+                            _set_cached_page(cache_key, items, ttl=3)
+                        except Exception:
+                            pass
         has_more = len(items) > page_size
         coach_courses = items[:page_size]
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
@@ -2258,10 +2291,19 @@ async def list_courses(update: Update, context: CallbackContext):
             {"$limit": page_size + 1}
         ]
         async with _db_timing(f"list_courses:page:{page}"):
-            try:
-                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
-            except Exception:
-                items = []
+            cache_key = f"page:global:{page}"
+            cached = _get_cached_page(cache_key)
+            if cached is not None:
+                items = cached
+            else:
+                try:
+                    items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                except Exception:
+                    items = []
+                try:
+                    _set_cached_page(cache_key, items, ttl=3)
+                except Exception:
+                    pass
         has_more = len(items) > page_size
         all_courses = items[:page_size]
         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
@@ -2293,16 +2335,24 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
     try:
         # Paginate over the embedded courses array inside the category document
         page_size = PAGE_SIZE
-        category_doc = await db.categories.find_one({"name": category_name})
-        if not category_doc or not category_doc.get('courses'):
-            await update.message.reply_text(f"No courses found in category '{category_name}'.")
-            return
-
-        courses = category_doc.get('courses', [])
-        # Ensure deterministic, case-insensitive A→Z ordering for pagination/display
-        courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-        start = (page - 1) * page_size
-        display = courses[start:start + page_size]
+        cache_key = f"page:category_display:{category_name}:{page}"
+        cached = _get_cached_page(cache_key)
+        if cached is not None:
+            display = cached
+        else:
+            category_doc = await db.categories.find_one({"name": category_name})
+            if not category_doc or not category_doc.get('courses'):
+                await update.message.reply_text(f"No courses found in category '{category_name}'.")
+                return
+            courses = category_doc.get('courses', [])
+            # Ensure deterministic, case-insensitive A→Z ordering for pagination/display
+            courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
+            start = (page - 1) * page_size
+            display = courses[start:start + page_size]
+            try:
+                _set_cached_page(cache_key, display, ttl=3)
+            except Exception:
+                pass
 
         keyboard = [
             [
@@ -2711,11 +2761,30 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 logger.debug("handle_course_selection: computed category back_cb=%s", back_cb)
             else:
                 if saved_back_cb:
-                    back_cb = saved_back_cb
+                    # If saved back token points to a coach listing, normalize
+                    # it to the top-level coach listing (page 1) so users are
+                    # returned to the full coach list rather than a small
+                    # partial page.
+                    sb = str(saved_back_cb)
+                    if origin_type == 'coach' and sb.startswith('courses::coach::'):
+                        try:
+                            parts = sb.split('::')
+                            # parts: ['courses','coach','<slug>','<page>']
+                            if len(parts) >= 3:
+                                coach_slug = parts[2]
+                                back_cb = f"courses::coach::{coach_slug}::1"
+                            else:
+                                back_cb = sb
+                        except Exception:
+                            back_cb = sb
+                    else:
+                        back_cb = saved_back_cb
                 else:
                     if origin_type == 'coach' and origin_page:
+                        # Always route coach-origin details back to the
+                        # coach's top-level course list (page 1).
                         back_target = course_category or cat_name or '1'
-                        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::1"
                         logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
                     elif origin_type == 'global' and origin_page:
                         back_cb = f"courses::global::{origin_page}"
@@ -2932,10 +3001,19 @@ async def courses_callback(update: Update, context: CallbackContext):
                             {"$skip": start},
                             {"$limit": page_size + 1}
                         ]
-                        try:
-                            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
-                        except Exception:
-                            items = []
+                        cache_key = f"page:coach:{coach_name}:{page}"
+                        cached = _get_cached_page(cache_key)
+                        if cached is not None:
+                            items = cached
+                        else:
+                            try:
+                                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+                            except Exception:
+                                items = []
+                            try:
+                                _set_cached_page(cache_key, items, ttl=3)
+                            except Exception:
+                                pass
                         has_more = len(items) > page_size
                         all_courses = items[:page_size]
                         all_courses = sorted(all_courses, key=lambda c: (c.get('name') or '').lower())
