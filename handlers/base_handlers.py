@@ -2685,6 +2685,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             key = rest
 
         payload = await _resolve_callback_payload(key)
+        logger.debug("handle_course_selection: resolved payload for key=%s -> %s", key, payload)
         if not payload:
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
@@ -2775,7 +2776,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
         if course:
             # Determine canonical category for this course (prefer explicit field)
             course_category = course.get('category') if isinstance(course, dict) else None
-            logger.debug("handle_course_selection: origin_type=%s origin_page=%s course_category=%s cat_name=%s", origin_type, origin_page, course_category, cat_name)
+            logger.debug("handle_course_selection: origin_type=%s origin_page=%s course_category=%s cat_name=%s courses_in_doc=%s", origin_type, origin_page, course_category, cat_name, bool(course_category))
             if not course_category:
                 course_category = cat_name
 
@@ -3102,7 +3103,9 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         start = (page - 1) * page_size
         cache_key = f"page:category:{urllib.parse.quote_plus(str(category))}:{page}:{page_size}"
         cached = _get_cached_page(cache_key)
+        logger.debug("get_courses_by_category: category=%s page=%s page_size=%s cache_key=%s cached=%s", category, page, page_size, cache_key, bool(cached))
         if cached is not None:
+            logger.debug("get_courses_by_category: returning cached page len=%d", len(cached) if hasattr(cached, '__len__') else 0)
             return cached
 
         async with _db_timing(f"get_courses_by_category:{category}:{page}"):
@@ -3114,6 +3117,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
                     items = [{"name": c.get('name'), "link": c.get('link'), "category": doc.get('name')} for c in doc.get('courses')]
                 else:
                     items = []
+                logger.debug("get_courses_by_category: fetched slice start=%s len=%s from category=%s", start, len(items), category)
             except Exception:
                 items = []
 
@@ -3133,6 +3137,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
                     items = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
                 except Exception:
                     items = []
+                logger.debug("get_courses_by_category: fallback unwind returned len=%s for category=%s", len(items), category)
             except Exception:
                 items = []
 
@@ -3141,6 +3146,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
             _set_cached_page(cache_key, items, ttl=PAGE_CACHE_TTL)
         except Exception:
             pass
+        logger.debug("get_courses_by_category: final items_len=%s category=%s page=%s", len(items) if hasattr(items, '__len__') else 0, category, page)
         return items
     except Exception as e:
         logger.error(f"Error while fetching courses for category '{category}': {str(e)}")
