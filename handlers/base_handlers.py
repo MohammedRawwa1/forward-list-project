@@ -93,6 +93,27 @@ def _get_cached_page(key: str):
     return None
 
 
+def _has_real_courses(courses):
+    """Return True if `courses` contains at least one real course (not the
+    placeholder '(empty') or empty dicts. Accepts list-like structures."""
+    try:
+        if not courses:
+            return False
+        for c in courses:
+            if not c:
+                continue
+            if isinstance(c, dict):
+                name = c.get('name')
+            else:
+                # allow legacy string entries
+                name = c
+            if name and str(name).strip() and str(name).strip() != '(empty)':
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _set_cached_page(key: str, payload, ttl: int = 3):
     _PAGE_CACHE[key] = (payload, time.time() + ttl)
     # best-effort Redis backing for multi-process deployments
@@ -1336,7 +1357,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
         try:
             has_children = child.get('name') in names_with_children
             courses = child.get('courses', []) if isinstance(child, dict) else []
-            is_empty = (not has_children) and (not courses)
+            is_empty = (not has_children) and (not _has_real_courses(courses))
         except Exception:
             is_empty = True
         display = f"{child.get('name')}{' (empty)' if is_empty else ''}"
@@ -1462,12 +1483,12 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             pass
         # Indicate empty categories visually: we sliced one course element
         # above, so `courses` truthiness indicates at least one course.
-        try:
-            has_children = parent_has_children.get(cat.get('name'))
-            courses = cat.get('courses', []) if isinstance(cat, dict) else []
-            is_empty = (not has_children) and (not courses)
-        except Exception:
-            is_empty = True
+            try:
+                has_children = parent_has_children.get(cat.get('name'))
+                courses = cat.get('courses', []) if isinstance(cat, dict) else []
+                is_empty = (not has_children) and (not _has_real_courses(courses))
+            except Exception:
+                is_empty = True
         display_name = f"{cat.get('name')}{' (empty)' if is_empty else ''}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=f"showcat_ref::{key}")])
 
@@ -2050,7 +2071,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             try:
                 has_children = child.get('name') in names_with_children
                 courses = child.get('courses', []) if isinstance(child, dict) else []
-                is_empty = (not has_children) and (not courses)
+                is_empty = (not has_children) and (not _has_real_courses(courses))
             except Exception:
                 is_empty = True
             display = f"{child.get('name')}{' (empty)' if is_empty else ''}"
@@ -2276,7 +2297,7 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
             try:
                 has_children = parent_has_children.get(cat.get('name'))
                 courses = cat.get('courses', []) if isinstance(cat, dict) else []
-                is_empty = (not has_children) and (not courses)
+                is_empty = (not has_children) and (not _has_real_courses(courses))
             except Exception:
                 is_empty = True
             display = f"{cat.get('name')}{' (empty)' if is_empty else ''}"
@@ -3051,6 +3072,12 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 f"Link: {course.get('link')}\n"
                 f"Category: {course_category}"
             )
+            try:
+                logger.debug("handle_course_selection: FINAL back_cb=%s origin_type=%s origin_page=%s saved_back_cb=%s origin_context=%s course_category=%s course_id=%s",
+                             back_cb, origin_type, origin_page, saved_back_cb if 'saved_back_cb' in locals() else None,
+                             origin_context if 'origin_context' in locals() else None, course_category, course.get('id'))
+            except Exception:
+                pass
             await safe_edit_message(query, details, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
         else:
             await safe_edit_message(query, "Course not found. Please try again.", action_key=getattr(query, 'data', None))
