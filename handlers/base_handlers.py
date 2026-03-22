@@ -1578,7 +1578,24 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                     sample_first = c0.get('name')
                 else:
                     sample_first = str(c0)
-            logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s sample_course=%r", cat.get('name'), cat_path, cb, is_empty, sample_first)
+            # If we believe the category is empty but DB might have more
+            # courses (slice returned none), fetch the full doc for debug.
+            if is_empty:
+                try:
+                    full_doc = await db.categories.find_one({"name": cat.get('name')}, projection={"courses": 1})
+                    full_count = len(full_doc.get('courses', [])) if full_doc and isinstance(full_doc.get('courses', []), list) else 0
+                    sample_names = []
+                    if full_count > 0:
+                        for i, cc in enumerate(full_doc.get('courses', [])[:3]):
+                            try:
+                                sample_names.append(cc.get('name') if isinstance(cc, dict) else str(cc))
+                            except Exception:
+                                sample_names.append(str(cc))
+                    logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s slice_len=%s full_count=%s sample_course=%r sample_names=%r", cat.get('name'), cat_path, cb, is_empty, len(courses) if isinstance(courses, list) else 'N/A', full_count, sample_first, sample_names)
+                except Exception:
+                    logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s sample_course=%r (full doc lookup failed)", cat.get('name'), cat_path, cb, is_empty, sample_first)
+            else:
+                logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s sample_course=%r", cat.get('name'), cat_path, cb, is_empty, sample_first)
         except Exception:
             pass
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
@@ -3051,20 +3068,20 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             # category, ensure the Back callback routes to that category's
             # courses listing (preserving page). This protects against
             # malformed or legacy saved_back_cb values that point to the
-            # outer coach/parent view.
+            # outer coach/parent view. Overwrite any showcat-style token so
+            # users always return to the category's courses listing.
             try:
                 if course_category:
-                    if not isinstance(back_cb, str) or not back_cb.startswith('courses::category::'):
-                        try:
-                            pdoc = await db.categories.find_one({"name": course_category}, projection={"path": 1})
-                            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else course_category
-                        except Exception:
-                            ppath = course_category
-                        try:
-                            page_to_use = int(origin_page or 1)
-                        except Exception:
-                            page_to_use = 1
-                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
+                    try:
+                        pdoc = await db.categories.find_one({"name": course_category}, projection={"path": 1})
+                        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else course_category
+                    except Exception:
+                        ppath = course_category
+                    try:
+                        page_to_use = int(origin_page or 1)
+                    except Exception:
+                        page_to_use = 1
+                    back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
             except Exception:
                 # If normalization fails, keep whatever back_cb was computed
                 pass
@@ -3098,20 +3115,28 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 try:
                     if saved_back_cb:
                         sb = str(saved_back_cb)
-                        # Prefer showcat-style callbacks so Back opens the
-                        # full category view (coaches/subcategories) instead
-                        # of a small single-course page. Convert legacy
-                        # courses::category::... callbacks into a showcat
-                        # callback; otherwise accept showcat/*/categories refs.
-                        if sb.startswith('showcat') or sb.startswith('showcat_ref') or sb.startswith('categories_page') or sb == 'back_to_cats':
-                            back_cb = sb
-                        elif sb.startswith('courses::category::'):
-                            # Keep category-course pagination callbacks as-is so
-                            # Back returns to the courses listing for that
-                            # category (not the top-level categories view).
-                            back_cb = sb
-                        else:
-                            back_cb = sb
+                        # Prefer returning to the category's courses listing
+                        # rather than the top-level `showcat` view. If the
+                        # saved token points to a showcat/categories view,
+                        # translate it into the corresponding courses::category
+                        # callback so Details->Back returns to the expected
+                        # course listing context.
+                        try:
+                            if sb.startswith('courses::category::'):
+                                back_cb = sb
+                            else:
+                                # Map showcat/ref/categories/coach tokens to the
+                                # category courses listing using the course's
+                                # category name/path and preserve origin_page.
+                                try:
+                                    pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                                except Exception:
+                                    ppath = back_target
+                                page_to_use = origin_page or 1
+                                back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
+                        except Exception:
+                            back_cb = None
                 except Exception:
                     back_cb = None
 
