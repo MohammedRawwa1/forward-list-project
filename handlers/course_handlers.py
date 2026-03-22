@@ -541,7 +541,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
         try:
             has_children = parent_has_children.get(c.get('name'))
             courses = c.get('courses', []) if isinstance(c, dict) else []
-            is_empty = (not has_children) and (not courses)
+            is_empty = (not has_children) and (not _has_real_courses(courses))
         except Exception:
             is_empty = True
         display = f"{c.get('name')}{' (empty)' if is_empty else ''}"
