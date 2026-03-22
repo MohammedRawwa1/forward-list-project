@@ -1,210 +1,3 @@
-import logging
-import os
-from motor.motor_asyncio import AsyncIOMotorClient
-import pymongo
-from dotenv import load_dotenv
-
-load_dotenv()
-
-logger = logging.getLogger(__name__)
-
-class MongoConnectionError(Exception):
-    """Custom exception for MongoDB connection errors."""
-    pass
-
-class MongoDB:
-    _client = None
-    _db = None
-    _sync_client = None
-    _sync_db = None
-
-    @classmethod
-    async def initialize(cls, mongo_uri: str, db_name: str):
-        """Initialize the MongoDB client."""
-        if cls._client is not None:
-            logger.warning("MongoDB is already initialized.")
-            return
-
-        try:
-            cls._client = AsyncIOMotorClient(mongo_uri)
-            cls._db = cls._client[db_name]
-            logger.info(f"MongoDB initialized successfully with database: {db_name}")
-            # NOTE: index creation was disabled (rollback to previous behavior)
-        except Exception as e:
-            logger.error(f"Failed to initialize MongoDB: {e}")
-            raise MongoConnectionError(f"Failed to initialize MongoDB: {e}")
-
-    @classmethod
-    async def get_db(cls):
-        """Get the MongoDB database instance."""
-        if cls._db is None:
-            raise MongoConnectionError("MongoDB instance is not initialized.")
-        return cls._db
-
-    @classmethod
-    async def close(cls):
-        """Properly close the MongoDB connection."""
-        if cls._client:
-            cls._client.close()
-            cls._client = None
-            cls._db = None
-            logger.info("MongoDB connection closed.")
-        else:
-            logger.warning("MongoDB connection is not initialized, nothing to close.")
-        # Close synchronous client if present
-        try:
-            if cls._sync_client:
-                try:
-                    cls._sync_client.close()
-                except Exception:
-                    pass
-                cls._sync_client = None
-                cls._sync_db = None
-                logger.info("Sync MongoDB client closed.")
-        except Exception:
-            logger.exception("Error while closing sync MongoDB client")
-
-    @classmethod
-    async def delete_all_data(cls):
-        """Delete all data from the database."""
-        try:
-            db = await cls.get_db()
-            collections = await db.list_collection_names()
-            for collection_name in collections:
-                collection = db[collection_name]
-                await collection.delete_many({})
-            logger.info("All data has been deleted from the database.")
-        except Exception as e:
-            logger.error(f"Error occurred while deleting all data: {e}")
-            raise MongoConnectionError(f"Failed to delete all data: {e}")
-
-    @classmethod
-    async def count_categories(cls):
-        """Count the total number of categories in the database."""
-        try:
-            db = await cls.get_db()
-            collection = db['categories']
-            count = await collection.count_documents({})
-            logger.info(f"Total categories count: {count}")
-            return count
-        except Exception as e:
-            logger.error(f"Error occurred while counting categories: {e}")
-            raise MongoConnectionError(f"Failed to count categories: {e}")
-
-    @classmethod
-    def initialize_sync(cls, mongo_uri: str, db_name: str):
-        """Initialize a synchronous pymongo client for blocking writes.
-
-        This is useful for performing strong-durability writes from
-        synchronous code paths when Redis isn't configured.
-        """
-        if cls._sync_client is not None:
-            logger.debug("Sync MongoDB client already initialized")
-            return
-        try:
-            cls._sync_client = pymongo.MongoClient(mongo_uri)
-            cls._sync_db = cls._sync_client[db_name]
-            logger.info(f"Sync MongoDB client initialized for database: {db_name}")
-        except Exception as e:
-            logger.exception("Failed to initialize sync pymongo client: %s", e)
-            cls._sync_client = None
-            cls._sync_db = None
-
-    @classmethod
-    def get_sync_db(cls):
-        """Return the synchronous pymongo database instance, initializing lazily.
-
-        Raises MongoConnectionError if the sync client cannot be initialized.
-        """
-        if cls._sync_db is not None:
-            return cls._sync_db
-        # Attempt to lazily initialize using environment variables
-        mongo_uri = os.getenv("MONGODB_URL")
-        db_name = os.getenv("MONGODB_NAME")
-        if not mongo_uri or not db_name:
-            raise MongoConnectionError("MONGODB_URL and MONGODB_NAME must be set for sync client")
-        try:
-            cls.initialize_sync(mongo_uri, db_name)
-            if cls._sync_db is None:
-                raise MongoConnectionError("Failed to initialize sync MongoDB client")
-            return cls._sync_db
-        except Exception as e:
-            raise MongoConnectionError(f"Failed to get sync DB: {e}")
-
-    @classmethod
-    async def get_all_categories(cls, page: int = 1, page_size: int = 20):
-        """Get all categories from the database with pagination."""
-        try:
-            db = await cls.get_db()
-            collection = db['categories']
-            skip = (page - 1) * page_size
-            categories_cursor = collection.find({}, {'_id': 0, 'name': 1}).skip(skip).limit(page_size)
-            categories = await categories_cursor.to_list(length=page_size)
-
-            if categories:
-                logger.info(f"Fetched {len(categories)} categories from the database on page {page}.")
-                return categories
-            else:
-                logger.info("No categories found on the requested page.")
-                return []
-
-        except Exception as e:
-            logger.error(f"Error occurred while retrieving categories: {e}")
-            raise MongoConnectionError(f"Failed to retrieve categories: {e}")
-
-    # mongo_handler.py  (add inside ensure_indexes)
-# ------------------------------------------------------------------
-    @classmethod
-    async def ensure_indexes(cls, collection_name='categories', indexes=None):
-        # Conditional index creation: only run when AUTO_CREATE_INDEXES env var is set.
-        auto = os.getenv('AUTO_CREATE_INDEXES', '0')
-        if str(auto) not in ('1', 'true', 'yes', 'on'):
-            logger.info("ensure_indexes skipped (AUTO_CREATE_INDEXES not enabled)")
-            return
-
-        db = await cls.get_db()
-        coll = db[collection_name]
-        try:
-            info = await coll.index_information()
-            if 'name_1' not in info:
-                await coll.create_index('name', unique=True)
-                logger.info("Unique index on categories.name created")
-            if 'parent_1' not in info:
-                await coll.create_index('parent')
-                logger.info("Index on categories.parent created")
-            if 'path_1' not in info:
-                await coll.create_index('path')
-                logger.info("Index on categories.path created")
-            if 'courses.coach_1' not in info:
-                await coll.create_index('courses.coach')
-                logger.info("Index on categories.courses.coach created")
-            if 'courses.name_1' not in info:
-                await coll.create_index('courses.name')
-                logger.info("Index on categories.courses.name created")
-            if 'courses.id_1' not in info:
-                try:
-                    await coll.create_index('courses.id')
-                    logger.info("Index on categories.courses.id created")
-                except Exception:
-                    logger.exception("Failed to create index on categories.courses.id")
-        except Exception as e:
-            logger.exception("ensure_indexes failed: %s", e)
-
-    @classmethod
-    async def delete_all_categories(cls):
-        """Delete all categories from the database."""
-        try:
-            db = await cls.get_db()
-            collection = db['categories']
-            result = await collection.delete_many({})
-            if result.deleted_count > 0:
-                logger.info(f"Successfully deleted {result.deleted_count} categories.")
-            else:
-                logger.info("No categories found to delete.")
-
-        except Exception as e:
-            logger.error(f"Error occurred while deleting all categories: {e}")
-            raise MongoConnectionError(f"Failed to delete categories: {e}")
 from telegram.ext import CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import logging
@@ -1158,7 +951,19 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
                     logger.debug("build_courses_page: skipping course without name: %s", repr(c))
                     continue
                 # details callback may omit back token if too long; _make_course_ref handles that
-                details_cb = _make_course_ref(course_cat, name, origin_type, page, origin_context, c.get('id') if isinstance(c, dict) else None)
+                # Ensure coach-origin pages pass the coach as origin_context so
+                # Back returns to the coach's main course list rather than the
+                # course's category.
+                make_origin_ctx = origin_context
+                try:
+                    if origin_type == 'coach' and (not make_origin_ctx) and category:
+                        # `category` argument contains the coach name when
+                        # `origin_type=='coach'` (see callers), so use it as
+                        # the origin_context for details refs.
+                        make_origin_ctx = category
+                except Exception:
+                    make_origin_ctx = origin_context
+                details_cb = _make_course_ref(course_cat, name, origin_type, page, make_origin_ctx, c.get('id') if isinstance(c, dict) else None)
                 keyboard.append([
                     InlineKeyboardButton(name, url=link),
                     InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)
@@ -2540,55 +2345,47 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
         return
 
     try:
-        # Paginate over the embedded courses array inside the category document
+        # Server-side paginate the embedded `courses` array; fetch only the
+        # requested page. Use cached total to compute pagination controls.
         page_size = PAGE_SIZE
-        cache_key = f"page:category_display:{category_name}:{page}"
-        cached = _get_cached_page(cache_key)
-        if cached is not None:
-            display = cached
-        else:
-            category_doc = await db.categories.find_one({"name": category_name})
-            if not category_doc or not category_doc.get('courses'):
-                await update.message.reply_text(f"No courses found in category '{category_name}'.")
-                return
-            courses = category_doc.get('courses', [])
-            # Ensure deterministic, case-insensitive A→Z ordering for pagination/display
-            courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
-            start = (page - 1) * page_size
-            display = courses[start:start + page_size]
-            try:
-                _set_cached_page(cache_key, display, ttl=3)
-            except Exception:
-                pass
+        try:
+            items = await get_courses_by_category(None, category_name, page=page, page_size=page_size)
+        except Exception:
+            items = []
 
-        keyboard = [
-            [
-                InlineKeyboardButton(course['name'], url=course.get('link')),
-                InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category_name, course.get('name'), 'category', page, None, course.get('id')))
-            ]
-            for course in display
-        ]
+        if not items:
+            await update.message.reply_text(f"No courses found in category '{category_name}' on page {page}.")
+            return
+
+        keyboard = []
+        for c in items:
+            try:
+                keyboard.append([
+                    InlineKeyboardButton(c.get('name'), url=c.get('link')),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category_name, c.get('name'), 'category', page, None, c.get('id')))
+                ])
+            except Exception:
+                continue
+
+        # Pagination controls using cached count
+        try:
+            total_items = await _get_courses_count(db, category_name)
+        except Exception:
+            total_items = 0
+        total_pages = math.ceil(total_items / page_size) if total_items > 0 else 1
 
         pagination_buttons = []
-        if start > 0:
-            prev_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{page-1}"
-            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-        if len(courses) > start + page_size:
-            next_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{page+1}"
-            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
+        if page > 1:
+            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{page-1}"))
+        if page < total_pages:
+            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{page+1}"))
         if pagination_buttons:
             keyboard.append(pagination_buttons)
-        # Compute total pages and add breadcrumb row with Home and End when applicable
-        try:
-            total_pages = math.ceil(len(courses) / page_size)
-        except Exception:
-            total_pages = page
 
         try:
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
             if total_pages > 1 and page < total_pages:
-                end_cb = f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"
-                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
+                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"))
             breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=_shorten_showcat_cb(category_name, page)))
             keyboard.insert(0, breadcrumb_buttons)
         except Exception:
@@ -2600,7 +2397,7 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             schedule_close_inline_message(msg)
         except Exception:
             pass
-        
+
     except Exception as e:
         logger.error(f"Error listing courses for category '{category_name}': {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
@@ -2782,30 +2579,54 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     else:
         encoded = data.replace("category_", "", 1)
         cat_path = urllib.parse.unquote_plus(encoded)
+    cat_name = cat_path
     db = await get_db()
-    # resolve by path then name
-    category_doc = await db.categories.find_one({"path": cat_path})
-    if not category_doc:
-        category_doc = await db.categories.find_one({"name": cat_path})
-    if not category_doc or not category_doc.get('courses'):
+    # Lazy-load first page of courses for this category instead of pulling
+    # the entire `courses` array into memory. This behaves like an AJAX
+    # page load: only the accessed slice is returned.
+    page = 1
+    page_size = PAGE_SIZE
+    try:
+        items = await get_courses_by_category(None, cat_path, page=page, page_size=page_size)
+    except Exception:
+        items = []
+
+    if not items:
         await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
         return
 
-    # every button is a url button → opens the link immediately
-    courses = category_doc.get('courses', [])
-    keyboard = [
-        [InlineKeyboardButton(crs["name"], url=crs["link"])]
-        for crs in courses
-    ]
-    # Delete is only available from the course Details view.
-    parent = category_doc.get('parent')
+    keyboard = []
+    for crs in items:
+        try:
+            keyboard.append([InlineKeyboardButton(crs.get('name'), url=crs.get('link'))])
+        except Exception:
+            continue
+
+    # Pagination / Back button: compute parent path if present
+    try:
+        pdoc = await db.categories.find_one({"name": cat_path}, projection={"parent": 1})
+        parent = pdoc.get('parent') if pdoc else None
+    except Exception:
+        parent = None
     if parent:
-        pdoc = await db.categories.find_one({"name": parent})
-        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
-        # No page context here — default to page 1
+        try:
+            pdoc2 = await db.categories.find_one({"name": parent}, projection={"path": 1})
+            ppath = pdoc2.get('path') if pdoc2 and pdoc2.get('path') else parent
+        except Exception:
+            ppath = parent
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, 1))])
     else:
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+
+    # Add quick Next button if more pages exist
+    try:
+        total_items = await _get_courses_count(db, cat_path)
+        total_pages = math.ceil(total_items / page_size) if total_items > 0 else 1
+        if total_pages > 1:
+            keyboard.append([InlineKeyboardButton("➡️ Next", callback_data=f"courses::category::{urllib.parse.quote_plus(cat_path)}::2")])
+    except Exception:
+        pass
+
     await safe_edit_message(query, f'📚 Tap any course to open its link:', reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     
 async def handle_course_selection(update: Update, context: CallbackContext):
