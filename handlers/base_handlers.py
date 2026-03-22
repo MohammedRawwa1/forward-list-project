@@ -2892,6 +2892,28 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         # default fallback: global page 1
                         back_cb = "courses::global::1"
 
+            # Defensive normalization: if we know this course belongs to a
+            # category, ensure the Back callback routes to that category's
+            # courses listing (preserving page). This protects against
+            # malformed or legacy saved_back_cb values that point to the
+            # outer coach/parent view.
+            try:
+                if course_category:
+                    if not isinstance(back_cb, str) or not back_cb.startswith('courses::category::'):
+                        try:
+                            pdoc = await db.categories.find_one({"name": course_category}, projection={"path": 1})
+                            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else course_category
+                        except Exception:
+                            ppath = course_category
+                        try:
+                            page_to_use = int(origin_page or 1)
+                        except Exception:
+                            page_to_use = 1
+                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
+            except Exception:
+                # If normalization fails, keep whatever back_cb was computed
+                pass
+
             # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
                 'category': course_category,
