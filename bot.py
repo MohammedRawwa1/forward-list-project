@@ -122,6 +122,25 @@ async def create_application():
     return application
 
 
+def init_sync_mongo():
+    """Initialize synchronous pymongo client for strong-durability persisted writes.
+
+    This should be called at startup when Redis is not configured so
+    that blocking writes to MongoDB succeed from synchronous code paths.
+    """
+    mongo_uri = os.getenv("MONGODB_URL")
+    db_name = os.getenv("MONGODB_NAME")
+    if not mongo_uri or not db_name:
+        logger.warning("init_sync_mongo: MONGODB_URL or MONGODB_NAME not set; skipping sync init")
+        return
+    try:
+        from database.mongo_handler import MongoDB
+        MongoDB.initialize_sync(mongo_uri, db_name)
+        logger.info("Synchronous MongoDB client initialized (strong durability enabled)")
+    except Exception:
+        logger.exception("Failed to initialize synchronous MongoDB client")
+
+
 # ---------- register handlers ----------
 async def setup_handlers(application: Application):
     if not application:
