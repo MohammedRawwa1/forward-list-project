@@ -2771,28 +2771,78 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             # menu rather than a single-course listing. For other origins,
             # prefer saved_back_cb when present, otherwise compute a sensible
             # fallback.
-            if origin_type == 'category' and origin_page:
-                back_target = course_category or cat_name or '1'
-                try:
-                    # prefer stored path when available
-                    pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
-                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
-                except Exception:
-                    ppath = back_target
-                try:
-                    # Special sentinel: when origin/context points to the
-                    # top-level categories listing, route directly to that
-                    # page. Otherwise, prefer returning to the category's
-                    # courses listing so users remain in the course list
-                    # context rather than jumping to the broader
-                    # categories/coach view.
-                    if (ppath == 'categories') or (str(back_target).lower() == 'categories'):
-                        back_cb = f"categories_page::{origin_page or 1}"
+            if origin_type == 'category':
+                # Always route back to the category's courses listing page
+                # (not the broader coach/parent view). Preserve the
+                # originating page when available and clamp to available
+                # pages; still fall back to top-level categories if the
+                # target category can't be resolved.
+                back_target = course_category or cat_name or None
+                # Normalize any saved_back_cb that might point to a coach
+                # or parent view — prefer returning to the courses listing
+                # for the course's category.
+                if saved_back_cb:
+                    try:
+                        sb = str(saved_back_cb)
+                        if sb.startswith('courses::category::'):
+                            # Use saved category pagination if present
+                            back_cb = sb
+                        else:
+                            # Map coach/showcat/back_to_cats to category courses
+                            if (sb.startswith('courses::coach::') or sb.startswith('showcat') or sb.startswith('showcat_ref') or sb.startswith('categories_page') or sb == 'back_to_cats') and back_target:
+                                try:
+                                    pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                                except Exception:
+                                    ppath = back_target
+                                # try extract a page from saved token if present
+                                page_to_use = None
+                                try:
+                                    parts = sb.split('::')
+                                    if len(parts) >= 4:
+                                        page_to_use = int(parts[-1])
+                                except Exception:
+                                    page_to_use = None
+                                page_to_use = page_to_use or origin_page or 1
+                                back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
+                            else:
+                                # Unknown saved token: prefer courses listing if we have a target
+                                if back_target:
+                                    try:
+                                        pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                                        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                                    except Exception:
+                                        ppath = back_target
+                                    back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{origin_page or 1}"
+                                else:
+                                    back_cb = sb
+                    except Exception:
+                        back_cb = None
+
+                if not back_cb:
+                    # Compute page count and clamp even when the category has
+                    # zero courses — we still route to the category courses
+                    # page (which may display "empty") rather than the
+                    # parent/coach listing.
+                    back_target = back_target or 'categories'
+                    try:
+                        pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                    except Exception:
+                        ppath = back_target
+                    try:
+                        total_items = await _get_courses_count(db, back_target)
+                    except Exception:
+                        total_items = 0
+                    total_pages = math.ceil(total_items / PAGE_SIZE) if total_items > 0 else 1
+                    try:
+                        clamped_page = max(1, min(int(origin_page or 1), max(1, int(total_pages))))
+                    except Exception:
+                        clamped_page = origin_page or 1
+                    if str(ppath).lower() == 'categories' and back_target == 'categories':
+                        back_cb = f"categories_page::{clamped_page}"
                     else:
-                        # return to the course listing for the category
-                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{origin_page}"
-                except Exception:
-                    back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
+                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{clamped_page}"
                 logger.debug("handle_course_selection: computed category back_cb=%s", back_cb)
             else:
                 if saved_back_cb:
