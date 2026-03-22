@@ -66,6 +66,28 @@ async def startup_event():
     global application
 
     await initialize_db()
+    # Rehydrate any persisted callback refs so inline buttons keep working
+    # across restarts when Redis is not configured.
+    try:
+        from handlers.base_handlers import _rehydrate_callback_map
+        try:
+            await _rehydrate_callback_map()
+        except Exception:
+            logger.exception("Failed to rehydrate callback refs on startup")
+    except Exception:
+        # best-effort: skip if import fails
+        logger.debug("Rehydrate helper not available; skipping")
+    # If Redis is not configured, initialize a synchronous pymongo client
+    # so synchronous code paths can perform blocking durable writes.
+    try:
+        if not os.getenv('REDIS_URL'):
+            from bot import init_sync_mongo
+            try:
+                init_sync_mongo()
+            except Exception:
+                logger.exception("Failed to initialize sync mongo client on startup")
+    except Exception:
+        logger.exception("Error while attempting sync mongo init check")
     # Index creation managed manually; automatic ensure_indexes disabled.
     logger.info("Skipping automatic ensure_indexes (manual index management)")
 
@@ -92,6 +114,29 @@ async def startup_event():
     except NotImplementedError:
         # add_signal_handler may not be available on all platforms (e.g., Windows)
         logger.info("Signal handlers not supported on this platform; skipping registration.")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully shutdown the Telegram `Application` and close DB connections."""
+    global application
+    logger.info("Shutdown event triggered; attempting graceful stop of bot application")
+    try:
+        if application is not None:
+            try:
+                await application.shutdown()
+            except Exception:
+                logger.exception("Error during application.shutdown()")
+            try:
+                await application.stop()
+            except Exception:
+                logger.exception("Error during application.stop()")
+    except Exception:
+        logger.exception("Failed to gracefully stop application")
+    try:
+        await MongoDB.close()
+    except Exception:
+        logger.exception("Error closing MongoDB connection during shutdown")
 
 
 # ---------- webhook ----------
