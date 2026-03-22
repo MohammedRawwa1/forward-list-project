@@ -2053,7 +2053,12 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     # Current page for this category view (used when linking to coaches)
     page = page_from_callback or 1
-    cat_path = urllib.parse.unquote_plus(encoded)
+    # Normalize the encoded token: strip whitespace and unquote safely.
+    try:
+        encoded = (encoded or "").strip()
+        cat_path = urllib.parse.unquote_plus(encoded)
+    except Exception:
+        cat_path = (encoded or "").strip()
     # Persist originating categories page into user_data so other flows
     # (e.g., add-course) can reference the page the user came from.
     try:
@@ -2065,11 +2070,29 @@ async def showcat_handler(update: Update, context: CallbackContext):
     except Exception:
         pass
     db = await get_db()
-    # Try to resolve by `path` first, then by `name` for legacy docs
-    category_doc = await db.categories.find_one({"path": cat_path})
-    if not category_doc:
-        category_doc = await db.categories.find_one({"name": cat_path})
-    if not category_doc:
+    # Try multiple resolution strategies to handle encoded/unencoded and
+    # legacy name/path mismatches. Try exact path, exact name, then
+    # fall back to the raw encoded token as well.
+    category_doc = None
+    try:
+        # Exact path match
+        category_doc = await db.categories.find_one({"path": cat_path})
+        if not category_doc:
+            # Exact name match
+            category_doc = await db.categories.find_one({"name": cat_path})
+        if not category_doc and encoded and encoded != cat_path:
+            # Try using the raw encoded token too (some callbacks send unquoted)
+            category_doc = await db.categories.find_one({"path": encoded}) or await db.categories.find_one({"name": encoded})
+        if not category_doc:
+            # Last-ditch case-insensitive match on name (handles minor casing/whitespace)
+            try:
+                category_doc = await db.categories.find_one({"name": {"$regex": f"^{re.escape(cat_path)}$", "$options": "i"}})
+            except Exception:
+                category_doc = None
+        if not category_doc:
+            await safe_edit_message(query, f'Category “{cat_path}” not found.', action_key=getattr(query, 'data', None))
+            return
+    except Exception:
         await safe_edit_message(query, f'Category “{cat_path}” not found.', action_key=getattr(query, 'data', None))
         return
 
