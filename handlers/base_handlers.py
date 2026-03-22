@@ -83,6 +83,48 @@ async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int =
     return cnt
 
 
+async def _get_courses_count(db, category: str, ttl: int = 60):
+    """Return the number of courses stored in a category, with in-process
+    caching and optional Redis backing. This avoids repeated aggregations
+    for hot categories and speeds up pagination/back-button computations.
+    """
+    key = f"count:category_courses:{category}"
+    now = time.time()
+    entry = _COUNT_CACHE.get(key)
+    if entry and entry[1] > now:
+        return entry[0]
+    # Try Redis first (best-effort)
+    try:
+        if _redis is not None:
+            val = await _redis.get(key)
+            if val is not None:
+                try:
+                    cnt = int(val)
+                except Exception:
+                    cnt = 0
+                _COUNT_CACHE[key] = (cnt, now + ttl)
+                return cnt
+    except Exception:
+        pass
+
+    # Fallback: aggregation to compute array size
+    try:
+        pipeline = [{"$match": {"name": category}}, {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}}]
+        agg = await db.categories.aggregate(pipeline).to_list(length=1)
+        cnt = int(agg[0].get('n', 0)) if agg else 0
+    except Exception:
+        cnt = 0
+
+    _COUNT_CACHE[key] = (cnt, now + ttl)
+    try:
+        if _redis is not None:
+            # best-effort async set
+            asyncio.create_task(_redis.set(key, str(cnt), ex=ttl))
+    except Exception:
+        pass
+    return cnt
+
+
 def schedule_close_inline_message(message, delay: int = None, notice: str = "(Session closed due to inactivity)"):
     """Schedule removal of inline keyboard from a sent Message after `delay` seconds.
 
@@ -2743,8 +2785,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                 {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}}
                             ]
                             try:
-                                agg = await db.categories.aggregate(pipeline).to_list(length=1)
-                                total_items = int(agg[0].get('n', 0)) if agg else 0
+                                total_items = await _get_courses_count(db, back_target)
                             except Exception:
                                 total_items = 0
                             total_pages = math.ceil(total_items / PAGE_SIZE) if total_items > 0 else 1
