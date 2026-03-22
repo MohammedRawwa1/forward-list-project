@@ -525,15 +525,21 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
 
     page_cats = cats
 
+    # Batch-check which categories on this page have children to avoid N queries
+    cat_names = [c.get('name') for c in page_cats if c.get('name')]
+    parent_has_children = {}
+    if cat_names:
+        try:
+            docs = await db.categories.find({"parent": {"$in": cat_names}}, {"parent": 1}).to_list(length=len(cat_names))
+            parents_with_children = {d.get('parent') for d in docs if d.get('parent')}
+            parent_has_children = {name: (name in parents_with_children) for name in cat_names}
+        except Exception:
+            parent_has_children = {name: False for name in cat_names}
+
     keyboard = []
     for c in page_cats:
         try:
-            has_children = False
-            try:
-                cdoc = await db.categories.find_one({"parent": c.get('name')}, projection={"_id": 1})
-                has_children = bool(cdoc)
-            except Exception:
-                has_children = False
+            has_children = parent_has_children.get(c.get('name'))
             courses = c.get('courses', []) if isinstance(c, dict) else []
             is_empty = (not has_children) and (not courses)
         except Exception:
