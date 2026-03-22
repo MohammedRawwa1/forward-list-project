@@ -1,6 +1,7 @@
 import logging
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
+import pymongo
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,6 +15,8 @@ class MongoConnectionError(Exception):
 class MongoDB:
     _client = None
     _db = None
+    _sync_client = None
+    _sync_db = None
 
     @classmethod
     async def initialize(cls, mongo_uri: str, db_name: str):
@@ -48,6 +51,18 @@ class MongoDB:
             logger.info("MongoDB connection closed.")
         else:
             logger.warning("MongoDB connection is not initialized, nothing to close.")
+        # Close synchronous client if present
+        try:
+            if cls._sync_client:
+                try:
+                    cls._sync_client.close()
+                except Exception:
+                    pass
+                cls._sync_client = None
+                cls._sync_db = None
+                logger.info("Sync MongoDB client closed.")
+        except Exception:
+            logger.exception("Error while closing sync MongoDB client")
 
     @classmethod
     async def delete_all_data(cls):
@@ -75,6 +90,46 @@ class MongoDB:
         except Exception as e:
             logger.error(f"Error occurred while counting categories: {e}")
             raise MongoConnectionError(f"Failed to count categories: {e}")
+
+    @classmethod
+    def initialize_sync(cls, mongo_uri: str, db_name: str):
+        """Initialize a synchronous pymongo client for blocking writes.
+
+        This is useful for performing strong-durability writes from
+        synchronous code paths when Redis isn't configured.
+        """
+        if cls._sync_client is not None:
+            logger.debug("Sync MongoDB client already initialized")
+            return
+        try:
+            cls._sync_client = pymongo.MongoClient(mongo_uri)
+            cls._sync_db = cls._sync_client[db_name]
+            logger.info(f"Sync MongoDB client initialized for database: {db_name}")
+        except Exception as e:
+            logger.exception("Failed to initialize sync pymongo client: %s", e)
+            cls._sync_client = None
+            cls._sync_db = None
+
+    @classmethod
+    def get_sync_db(cls):
+        """Return the synchronous pymongo database instance, initializing lazily.
+
+        Raises MongoConnectionError if the sync client cannot be initialized.
+        """
+        if cls._sync_db is not None:
+            return cls._sync_db
+        # Attempt to lazily initialize using environment variables
+        mongo_uri = os.getenv("MONGODB_URL")
+        db_name = os.getenv("MONGODB_NAME")
+        if not mongo_uri or not db_name:
+            raise MongoConnectionError("MONGODB_URL and MONGODB_NAME must be set for sync client")
+        try:
+            cls.initialize_sync(mongo_uri, db_name)
+            if cls._sync_db is None:
+                raise MongoConnectionError("Failed to initialize sync MongoDB client")
+            return cls._sync_db
+        except Exception as e:
+            raise MongoConnectionError(f"Failed to get sync DB: {e}")
 
     @classmethod
     async def get_all_categories(cls, page: int = 1, page_size: int = 20):
