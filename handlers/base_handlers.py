@@ -2854,28 +2854,14 @@ async def handle_course_selection(update: Update, context: CallbackContext):
         # Prefer an explicit appended back token, otherwise fall back to saved payload
         saved_back_cb = appended_back or payload.get('back_cb')
     else:
-        # Expect callback format: course::{category}::{course}
-        data = data.replace("course::", "", 1)
-        # Extract optional origin info appended as `::from::{origin_type}::{page}`
-        if "::from::" in data:
-            data, from_part = data.rsplit("::from::", 1)
-            try:
-                origin_type, origin_page_s = from_part.split("::", 1)
-                origin_page = int(origin_page_s)
-            except Exception:
-                origin_type = None
-                origin_page = 1
-
-        parts = data.split("::", 1)
-        if len(parts) == 2:
-            encoded_cat, encoded_course = parts
-            cat_name = urllib.parse.unquote_plus(encoded_cat)
-            course_name = urllib.parse.unquote_plus(encoded_course)
-            course_id = None
-        else:
-            cat_name = None
-            course_name = urllib.parse.unquote_plus(data)
-            course_id = None
+        # Legacy inline `course::` callback format has been removed.
+        # All current course selections use persisted `course_ref::` references.
+        await safe_edit_message(
+            query,
+            "This action used a legacy callback format which has been removed. Please reopen the list and try again.",
+            action_key=getattr(query, 'data', None),
+        )
+        return
 
     db = await get_db()
     if db is None:
@@ -2885,19 +2871,44 @@ async def handle_course_selection(update: Update, context: CallbackContext):
     try:
         course = None
         if cat_name:
-            category_doc = await db.categories.find_one({"name": cat_name})
+            # Resolve by name OR path to handle mixed payloads
+            category_doc = await db.categories.find_one({"$or": [{"name": cat_name}, {"path": cat_name}]})
             if category_doc:
                 for crs in category_doc.get('courses', []):
                     # Prefer id-based match when available
                     if course_id and crs.get('id') == course_id:
-                        course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": cat_name}
+                        course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
                         break
                     if (not course_id) and crs.get('name') == course_name:
-                        course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": cat_name}
+                        course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
                         break
+            else:
+                # If we couldn't resolve the category by name/path, fall back
+                # to searching across all categories for the course so Details
+                # still open even when payload carried a different token.
+                try:
+                    if course_id:
+                        category_doc = await db.categories.find_one({"courses.id": course_id}, projection={"name": 1, "courses": 1})
+                        if category_doc:
+                            for crs in category_doc.get('courses', []):
+                                if crs.get('id') == course_id:
+                                    course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
+                                    break
+                    else:
+                        category_doc = await db.categories.find_one({"courses.name": course_name}, projection={"name": 1, "courses": 1})
+                        if category_doc:
+                            for crs in category_doc.get('courses', []):
+                                if crs.get('name') == course_name:
+                                    course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
+                                    break
+                except Exception:
+                    category_doc = None
         else:
-            # search across categories: find the first category document that
-            # contains the requested course and examine only its courses array.
+            # Nested isolation policy: do NOT resolve course names across
+            # categories. Only allow lookup by explicit course `id` (unique
+            # identifier) when no category context is provided. This enforces
+            # that course names are namespaced to their category and avoids
+            # ambiguous cross-category matches.
             if course_id:
                 category_doc = await db.categories.find_one({"courses.id": course_id}, projection={"name": 1, "courses": 1})
                 if category_doc:
@@ -2906,12 +2917,11 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
                             break
             else:
-                category_doc = await db.categories.find_one({"courses.name": course_name}, projection={"name": 1, "courses": 1})
-                if category_doc:
-                    for crs in category_doc.get('courses', []):
-                        if crs.get('name') == course_name:
-                            course = {"id": crs.get('id'), "name": crs.get('name'), "link": crs.get('link'), "category": category_doc.get('name')}
-                            break
+                # Ambiguous name without category context — refuse to resolve
+                # across categories. Prompt the user to open the course from
+                # its category listing so the Details view is unambiguous.
+                await safe_edit_message(query, "Course name is ambiguous. Open the course from its category list to view details.", action_key=getattr(query, 'data', None))
+                return
                 # no outer loop to break from here; continue processing
 
         if course:
