@@ -56,6 +56,7 @@ from contextlib import asynccontextmanager
 # Simple in-memory TTL cache for inexpensive totals; keyed by JSON'd filter.
 _COUNT_CACHE = {}
 _PAGE_CACHE = {}  # key -> (payload, expire_ts)
+PAGE_CACHE_TTL = int(os.getenv("PAGE_CACHE_TTL", "3"))
 
 @asynccontextmanager
 async def _db_timing(name: str):
@@ -94,6 +95,12 @@ def _get_cached_page(key: str):
 
 def _set_cached_page(key: str, payload, ttl: int = 3):
     _PAGE_CACHE[key] = (payload, time.time() + ttl)
+    # best-effort Redis backing for multi-process deployments
+    try:
+        if _redis is not None:
+            asyncio.create_task(_redis.set(key, json.dumps(payload), ex=ttl))
+    except Exception:
+        pass
 
 
 async def _get_courses_count(db, category: str, ttl: int = 60):
@@ -2798,9 +2805,14 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         try:
                             parts = sb.split('::')
                             # parts: ['courses','coach','<slug>','<page>']
-                            if len(parts) >= 3:
+                            # If the saved callback already includes a page, preserve it.
+                            if len(parts) >= 4:
                                 coach_slug = parts[2]
-                                back_cb = f"courses::coach::{coach_slug}::1"
+                                coach_page = parts[3]
+                                back_cb = f"courses::coach::{coach_slug}::{coach_page}"
+                            elif len(parts) == 3:
+                                coach_slug = parts[2]
+                                back_cb = f"courses::coach::{coach_slug}::{origin_page}"
                             else:
                                 back_cb = sb
                         except Exception:
@@ -2809,10 +2821,11 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         back_cb = saved_back_cb
                 else:
                     if origin_type == 'coach' and origin_page:
-                        # Always route coach-origin details back to the
-                        # coach's top-level course list (page 1).
-                        back_target = course_category or cat_name or '1'
-                        back_cb = f"courses::coach::{urllib.parse.quote_plus(str(back_target))}::1"
+                        # Route coach-origin details back to the same coach
+                        # listing page the user came from (preserve page).
+                        coach_slug = origin_context or course_category or cat_name or ''
+                        coach_slug_enc = urllib.parse.quote_plus(str(coach_slug))
+                        back_cb = f"courses::coach::{coach_slug_enc}::{origin_page}"
                         logger.debug("handle_course_selection: computed back_cb=%s", back_cb)
                     elif origin_type == 'global' and origin_page:
                         back_cb = f"courses::global::{origin_page}"
@@ -2972,21 +2985,52 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         return []
 
     try:
-        # Use server-side aggregation to paginate embedded `courses` array
+        # Fast path: use projection + $slice to pull only the requested
+        # window of the embedded `courses` array. This avoids an
+        # expensive `$unwind` over the whole array and is much faster for
+        # large arrays when sorting by course name is not required.
         start = (page - 1) * page_size
-        items_pipeline = [
-            {"$match": {"name": category}},
-            {"$unwind": "$courses"},
-            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
-            {"$sort": {"name": 1}},
-            {"$skip": start},
-            {"$limit": page_size}
-        ]
+        cache_key = f"page:category:{urllib.parse.quote_plus(str(category))}:{page}:{page_size}"
+        cached = _get_cached_page(cache_key)
+        if cached is not None:
+            return cached
+
         async with _db_timing(f"get_courses_by_category:{category}:{page}"):
             try:
-                items = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                # Try find_one with $slice projection (fast, single-doc read)
+                proj = {"courses": {"$slice": [start, page_size]}, "name": 1}
+                doc = await db.categories.find_one({"name": category}, projection=proj)
+                if doc and isinstance(doc.get('courses'), list):
+                    items = [{"name": c.get('name'), "link": c.get('link'), "category": doc.get('name')} for c in doc.get('courses')]
+                else:
+                    items = []
             except Exception:
                 items = []
+
+        # Fallback: if we couldn't get items via $slice (e.g., need server-side
+        # sort by course name), fall back to the unwind/skip/limit pipeline.
+        if not items:
+            try:
+                items_pipeline = [
+                    {"$match": {"name": category}},
+                    {"$unwind": "$courses"},
+                    {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                    {"$sort": {"name": 1}},
+                    {"$skip": start},
+                    {"$limit": page_size}
+                ]
+                try:
+                    items = await db.categories.aggregate(items_pipeline).to_list(length=page_size)
+                except Exception:
+                    items = []
+            except Exception:
+                items = []
+
+        # Cache the page payload short-term to speed up rapid navigation.
+        try:
+            _set_cached_page(cache_key, items, ttl=PAGE_CACHE_TTL)
+        except Exception:
+            pass
         return items
     except Exception as e:
         logger.error(f"Error while fetching courses for category '{category}': {str(e)}")
