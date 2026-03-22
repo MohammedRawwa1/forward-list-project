@@ -2802,17 +2802,26 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     # partial page.
                     sb = str(saved_back_cb)
                     if origin_type == 'coach' and sb.startswith('courses::coach::'):
+                        # Translate coach listing callbacks into the category's
+                        # courses listing so Back returns to "Courses in
+                        # category ... (page X)" instead of the outer coach
+                        # listing. Preserve the page when possible.
                         try:
-                            parts = sb.split('::')
-                            # parts: ['courses','coach','<slug>','<page>']
-                            # If the saved callback already includes a page, preserve it.
-                            if len(parts) >= 4:
-                                coach_slug = parts[2]
-                                coach_page = parts[3]
-                                back_cb = f"courses::coach::{coach_slug}::{coach_page}"
-                            elif len(parts) == 3:
-                                coach_slug = parts[2]
-                                back_cb = f"courses::coach::{coach_slug}::{origin_page}"
+                            # prefer the category that the course belongs to
+                            back_target = course_category or cat_name
+                            if back_target:
+                                try:
+                                    pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                                except Exception:
+                                    ppath = back_target
+                                # try to preserve a page from the saved sb if present
+                                parts = sb.split('::')
+                                coach_page = None
+                                if len(parts) >= 4:
+                                    coach_page = parts[3]
+                                page_to_use = coach_page or origin_page or 1
+                                back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
                             else:
                                 back_cb = sb
                         except Exception:
