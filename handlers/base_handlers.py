@@ -171,10 +171,51 @@ def _store_callback_payload(payload: dict) -> str:
         pass
     # best-effort background persist to Redis or Mongo so refs survive restarts
     try:
-        asyncio.create_task(_persist_callback_payload(key, payload))
+        # If Redis is configured, persist asynchronously as before.
+        if _redis is not None:
+            try:
+                asyncio.create_task(_persist_callback_payload(key, payload))
+            except Exception:
+                # fall back to scheduling not-critical background task
+                pass
+        else:
+            # Redis not configured -> strong durability requested: perform
+            # synchronous blocking write to MongoDB so callers return only
+            # after the ref is durably stored.
+            try:
+                _persist_callback_payload_sync(key, payload)
+            except Exception:
+                # If sync persist fails, still return the key (in-memory map)
+                logger.exception("Synchronous persist to MongoDB failed for key=%s", key)
     except Exception:
         pass
     return key
+
+
+def _persist_callback_payload_sync(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
+    """Synchronously persist callback payload to MongoDB using pymongo.
+
+    This blocks the current thread until the write completes and is used
+    when Redis is not configured to provide stronger durability guarantees.
+    """
+    try:
+        try:
+            sync_db = MongoDB.get_sync_db()
+        except Exception:
+            logger.exception("_persist_callback_payload_sync: failed to get sync DB")
+            return
+        expire_at = datetime.utcnow() + timedelta(seconds=ttl)
+        try:
+            # Ensure TTL index exists (idempotent). Using sync driver.
+            try:
+                sync_db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
+            except Exception:
+                pass
+            sync_db.callback_refs.update_one({"_id": key}, {"$set": {"payload": payload, "expireAt": expire_at}}, upsert=True)
+        except Exception:
+            logger.exception("_persist_callback_payload_sync: write failed for key=%s", key)
+    except Exception:
+        logger.exception("_persist_callback_payload_sync: unexpected error for key=%s", key)
 
 
 def _shorten_showcat_cb(path: str, page: int, from_parent: Optional[str] = None, parent_page: Optional[int] = None):
@@ -279,6 +320,51 @@ async def _resolve_callback_payload(key: str):
         logger.error("Failed to read callback payload from MongoDB")
 
     return None
+
+
+async def _rehydrate_callback_map(limit: int = None):
+    """Load recent unexpired callback refs from Mongo into in-memory map.
+
+    This helps survive process restarts when Redis isn't configured.
+    `limit` controls the maximum number of docs to load (None -> env or 10000).
+    """
+    try:
+        cfg_limit = int(os.getenv('CALLBACK_REHYDRATE_LIMIT', '10000'))
+    except Exception:
+        cfg_limit = 10000
+    if limit is None:
+        limit = cfg_limit
+
+    try:
+        db = await get_db()
+        if db is None:
+            return 0
+        now = datetime.utcnow()
+        try:
+            # Ensure TTL index exists idempotently
+            try:
+                await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
+            except Exception:
+                pass
+            cursor = db.callback_refs.find({"expireAt": {"$gt": now}}).limit(limit)
+            docs = await cursor.to_list(length=limit)
+            count = 0
+            for d in docs:
+                try:
+                    key = d.get('_id')
+                    payload = d.get('payload')
+                    if key and payload:
+                        CALLBACK_MAP[key] = payload
+                        count += 1
+                except Exception:
+                    continue
+            logger.info("Rehydrated %s callback refs from MongoDB", count)
+            return count
+        except Exception as e:
+            logger.exception("_rehydrate_callback_map: failed to load callback refs: %s", e)
+            return 0
+    except Exception:
+        return 0
 
 # Simple in-memory debounce/rate-limit to ignore very fast repeated
 # callback presses from the same user. This reduces duplicated edits and
@@ -1156,19 +1242,25 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     # the callback_data remains under Telegram's 64-byte limit. Payload
     # includes child path and parent page info so the child can return to
     # the same parent page via its Up/Back buttons.
+    # Batch-check which of the page children have their own children to
+    # avoid N queries. This mirrors the optimization used in
+    # `categories_page` above.
+    child_names = [c.get('name') for c in page_children if c.get('name')]
+    names_with_children = set()
+    if child_names:
+        try:
+            docs = await db.categories.find({"parent": {"$in": child_names}}, {"parent": 1}).to_list(length=len(child_names))
+            names_with_children = {d.get('parent') for d in docs if d.get('parent')}
+        except Exception:
+            names_with_children = set()
+
     keyboard = []
     for child in page_children:
         child_path = child.get('path') or child.get('name')
         payload = {"type": "showcat", "path": child_path, "from_parent": parent, "parent_page": page}
         key = _store_callback_payload(payload)
-        # Mark child as empty when it has neither children nor courses
         try:
-            has_children = False
-            try:
-                cdoc = await db.categories.find_one({"parent": child.get('name')}, projection={"_id": 1})
-                has_children = bool(cdoc)
-            except Exception:
-                has_children = False
+            has_children = child.get('name') in names_with_children
             courses = child.get('courses', []) if isinstance(child, dict) else []
             is_empty = (not has_children) and (not courses)
         except Exception:
@@ -2075,15 +2167,20 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
             await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
             return
         keyboard = []
+        # Batch-check which top-level categories have children to avoid N queries
+        cat_names = [c.get('name') for c in categories if c.get('name')]
+        parent_has_children = {}
+        if cat_names:
+            try:
+                docs = await db.categories.find({"parent": {"$in": cat_names}}, {"parent": 1}).to_list(length=len(cat_names))
+                parents_with_children = {d.get('parent') for d in docs if d.get('parent')}
+                parent_has_children = {name: (name in parents_with_children) for name in cat_names}
+            except Exception:
+                parent_has_children = {name: False for name in cat_names}
+
         for cat in categories:
             try:
-                # consider non-empty if has children or courses
-                has_children = False
-                try:
-                    cdoc = await db.categories.find_one({"parent": cat.get('name')}, projection={"_id": 1})
-                    has_children = bool(cdoc)
-                except Exception:
-                    has_children = False
+                has_children = parent_has_children.get(cat.get('name'))
                 courses = cat.get('courses', []) if isinstance(cat, dict) else []
                 is_empty = (not has_children) and (not courses)
             except Exception:
@@ -2558,12 +2655,15 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 try:
                     # Special sentinel: when origin/context points to the
                     # top-level categories listing, route directly to that
-                    # page instead of attempting to open a category named
-                    # "categories" which does not exist.
+                    # page. Otherwise, prefer returning to the category's
+                    # courses listing so users remain in the course list
+                    # context rather than jumping to the broader
+                    # categories/coach view.
                     if (ppath == 'categories') or (str(back_target).lower() == 'categories'):
                         back_cb = f"categories_page::{origin_page or 1}"
                     else:
-                        back_cb = _shorten_showcat_cb(ppath, origin_page)
+                        # return to the course listing for the category
+                        back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{origin_page}"
                 except Exception:
                     back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{origin_page}"
                 logger.debug("handle_course_selection: computed category back_cb=%s", back_cb)
@@ -2618,17 +2718,10 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         if sb.startswith('showcat') or sb.startswith('showcat_ref') or sb.startswith('categories_page') or sb == 'back_to_cats':
                             back_cb = sb
                         elif sb.startswith('courses::category::'):
-                            try:
-                                parts_sb = sb.split('::')
-                                if len(parts_sb) >= 4:
-                                    cat_enc = parts_sb[2]
-                                    pg = int(parts_sb[3]) if parts_sb[3].isdigit() else 1
-                                    cat_un = urllib.parse.unquote_plus(cat_enc)
-                                    back_cb = _shorten_showcat_cb(cat_un, pg)
-                                else:
-                                    back_cb = sb
-                            except Exception:
-                                back_cb = sb
+                            # Keep category-course pagination callbacks as-is so
+                            # Back returns to the courses listing for that
+                            # category (not the top-level categories view).
+                            back_cb = sb
                         else:
                             back_cb = sb
                 except Exception:
@@ -2651,10 +2744,12 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         except Exception:
                             clamped_page = origin_page or 1
                         # Prefer returning to the category main `showcat` view
-                        if (str(ppath).lower() == 'categories'):
-                            back_cb = f"categories_page::{clamped_page}"
-                        else:
-                            back_cb = _shorten_showcat_cb(str(ppath), clamped_page)
+                        # Return to the category's course listing page so the
+                        # user remains in the same context they were browsing.
+                        try:
+                            back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{clamped_page}"
+                        except Exception:
+                            back_cb = f"courses::category::{urllib.parse.quote_plus(str(back_target))}::{clamped_page}"
                     except Exception:
                         back_cb = f"courses::global::{origin_page}"
 
