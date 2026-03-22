@@ -2732,10 +2732,22 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     try:
                         # Determine the display path for the target category
                         try:
-                            cdoc = await db.categories.find_one({"name": back_target}, projection={"courses": 1, "path": 1})
-                            total_items = len(cdoc.get('courses', [])) if cdoc and isinstance(cdoc.get('courses', None), list) else 0
+                            # Fetch only the path and compute the courses array length
+                            # via aggregation so we don't transfer the entire array
+                            # payload into memory (which can be slow for large arrays).
+                            pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
+                            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
+                            # Aggregation to compute size of courses array efficiently
+                            pipeline = [
+                                {"$match": {"name": back_target}},
+                                {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}}
+                            ]
+                            try:
+                                agg = await db.categories.aggregate(pipeline).to_list(length=1)
+                                total_items = int(agg[0].get('n', 0)) if agg else 0
+                            except Exception:
+                                total_items = 0
                             total_pages = math.ceil(total_items / PAGE_SIZE) if total_items > 0 else 1
-                            ppath = cdoc.get('path') if cdoc and cdoc.get('path') else back_target
                         except Exception:
                             total_pages = origin_page or 1
                             ppath = back_target
