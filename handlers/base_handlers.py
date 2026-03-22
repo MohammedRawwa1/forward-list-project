@@ -424,6 +424,82 @@ async def _rehydrate_callback_map(limit: int = None):
         db = await get_db()
         if db is None:
             return 0
+
+
+        async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, origin_page: int = None):
+            """Verify that `back_cb` actually resolves to a non-empty courses page.
+            If it doesn't, try alternate lookups (unquote, name/path swap) and
+            clamp the page to an available range. Returns a possibly-modified
+            `back_cb` that is more likely to show the user useful results.
+            """
+            try:
+                if not back_cb or not isinstance(back_cb, str):
+                    return back_cb
+
+                # Only reconcile category-course callbacks for now
+                if back_cb.startswith('courses::category::'):
+                    parts = back_cb.split('::')
+                    if len(parts) >= 4:
+                        raw_cat = urllib.parse.unquote_plus(parts[2])
+                        try:
+                            page = int(parts[3])
+                        except Exception:
+                            page = int(origin_page or 1)
+
+                        # try the requested page first
+                        try:
+                            items = await get_courses_by_category(None, raw_cat, page)
+                        except Exception:
+                            # get_courses_by_category expects a user_id first in newer signature
+                            try:
+                                items = await get_courses_by_category(0, raw_cat, page)
+                            except Exception:
+                                items = []
+
+                        if items and _has_real_courses(items):
+                            return back_cb
+
+                        # If empty, try unquoting/alternative category representations
+                        alternates = [raw_cat]
+                        try:
+                            # If the stored category looks like a path, also try matching by name
+                            doc = await db.categories.find_one({"$or": [{"path": raw_cat}, {"name": raw_cat}]}, projection={"name": 1, "path": 1})
+                            if doc:
+                                alternates.append(doc.get('name') or raw_cat)
+                                alternates.append(doc.get('path') or raw_cat)
+                        except Exception:
+                            pass
+
+                        # Try alternates and also clamp to page 1 if necessary
+                        for alt in alternates:
+                            try:
+                                items = await get_courses_by_category(0, alt, page)
+                            except Exception:
+                                try:
+                                    items = await get_courses_by_category(None, alt, page)
+                                except Exception:
+                                    items = []
+                            if items and _has_real_courses(items):
+                                new_cb = f"courses::category::{urllib.parse.quote_plus(str(alt))}::{page}"
+                                return new_cb
+
+                        # try clamping to page 1 as a last-ditch
+                        for alt in alternates:
+                            try:
+                                items = await get_courses_by_category(0, alt, 1)
+                            except Exception:
+                                try:
+                                    items = await get_courses_by_category(None, alt, 1)
+                                except Exception:
+                                    items = []
+                            if items and _has_real_courses(items):
+                                new_cb = f"courses::category::{urllib.parse.quote_plus(str(alt))}::1"
+                                return new_cb
+
+                # For other callback kinds, leave unchanged
+                return back_cb
+            except Exception:
+                return back_cb
         now = datetime.utcnow()
         try:
             # Ensure TTL index exists idempotently
@@ -2868,6 +2944,13 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     else:
                         back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{clamped_page}"
                 logger.debug("handle_course_selection: computed category back_cb=%s", back_cb)
+                try:
+                    # Verify and reconcile the computed back callback to avoid
+                    # routing users to empty/invalid pages (auto-fix Option C).
+                    back_cb = await _reconcile_back_cb(db, back_cb, course_category=course_category, origin_page=origin_page)
+                    logger.debug("handle_course_selection: reconciled category back_cb=%s", back_cb)
+                except Exception:
+                    pass
             else:
                 if saved_back_cb:
                     # If saved back token points to a coach listing, normalize
@@ -3021,6 +3104,12 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     except Exception:
                         back_cb = f"courses::global::{origin_page}"
 
+                # Reconcile computed back callback before building navigation
+                try:
+                    back_cb = await _reconcile_back_cb(db, back_cb, course_category=course.get('category') or cat_name, origin_page=origin_page)
+                except Exception:
+                    pass
+
                 nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
                 extra_row = []
                 try:
@@ -3110,11 +3199,13 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
 
         async with _db_timing(f"get_courses_by_category:{category}:{page}"):
             try:
-                # Try find_one with $slice projection (fast, single-doc read)
-                proj = {"courses": {"$slice": [start, page_size]}, "name": 1}
-                doc = await db.categories.find_one({"name": category}, projection=proj)
+                # Try find_one with $slice projection (fast, single-doc read).
+                # Match by either `name` or `path` because callbacks sometimes
+                # encode the category `path` while other places use `name`.
+                proj = {"courses": {"$slice": [start, page_size]}, "name": 1, "path": 1}
+                doc = await db.categories.find_one({"$or": [{"name": category}, {"path": category}]}, projection=proj)
                 if doc and isinstance(doc.get('courses'), list):
-                    items = [{"name": c.get('name'), "link": c.get('link'), "category": doc.get('name')} for c in doc.get('courses')]
+                    items = [{"name": c.get('name'), "link": c.get('link'), "category": (doc.get('name') or doc.get('path'))} for c in doc.get('courses')]
                 else:
                     items = []
                 logger.debug("get_courses_by_category: fetched slice start=%s len=%s from category=%s", start, len(items), category)
@@ -3126,7 +3217,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         if not items:
             try:
                 items_pipeline = [
-                    {"$match": {"name": category}},
+                    {"$match": {"$or": [{"name": category}, {"path": category}]}},
                     {"$unwind": "$courses"},
                     {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
                     {"$sort": {"name": 1}},
