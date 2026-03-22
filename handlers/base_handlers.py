@@ -3086,6 +3086,87 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 # If normalization fails, keep whatever back_cb was computed
                 pass
 
+            # Verify the computed `back_cb` actually leads to a page that
+            # contains this course. If not, search the DB for the course's
+            # true category and compute the page where it appears so Back
+            # returns the user to a list that includes the course.
+            try:
+                # Only validate category-style back targets
+                if back_cb and isinstance(back_cb, str) and back_cb.startswith('courses::category::') and course and course.get('name'):
+                    parts = back_cb.split('::')
+                    if len(parts) >= 4:
+                        target_cat = urllib.parse.unquote_plus(parts[2])
+                        target_page = int(parts[3]) if parts[3].isdigit() else 1
+                        # Check whether the target category actually contains this course
+                        try:
+                            # Use aggregation to build an ordered list of course names (server-side sort)
+                            pipeline = [
+                                {"$match": {"$or": [{"name": target_cat}, {"path": target_cat}]}},
+                                {"$unwind": "$courses"},
+                                {"$project": {"name": "$courses.name", "id": "$courses.id"}},
+                                {"$sort": {"name": 1}}
+                            ]
+                            course_list = await db.categories.aggregate(pipeline).to_list(length=10000)
+                            found_index = None
+                            for idx, item in enumerate(course_list):
+                                try:
+                                    if course.get('id') and item.get('id') == course.get('id'):
+                                        found_index = idx
+                                        break
+                                    if item.get('name') == course.get('name'):
+                                        found_index = idx
+                                        break
+                                except Exception:
+                                    continue
+                            if found_index is not None:
+                                computed_page = (found_index // PAGE_SIZE) + 1
+                                if computed_page != target_page:
+                                    # Update back_cb to the page where the course actually appears
+                                    pdoc = await db.categories.find_one({"$or": [{"name": target_cat}, {"path": target_cat}]}, projection={"path": 1})
+                                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else target_cat
+                                    back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{computed_page}"
+                                    logger.debug("handle_course_selection: adjusted back_cb to page containing course: %s", back_cb)
+                            else:
+                                # Course not found in the computed category — try locating it anywhere
+                                try:
+                                    if course.get('id'):
+                                        found = await db.categories.find_one({"courses.id": course.get('id')}, projection={"name": 1})
+                                    else:
+                                        found = await db.categories.find_one({"courses.name": course.get('name')}, projection={"name": 1})
+                                    if found:
+                                        true_cat = found.get('name')
+                                        # compute page by enumerating sorted course names for true_cat
+                                        pipeline2 = [
+                                            {"$match": {"name": true_cat}},
+                                            {"$unwind": "$courses"},
+                                            {"$project": {"name": "$courses.name", "id": "$courses.id"}},
+                                            {"$sort": {"name": 1}}
+                                        ]
+                                        clist = await db.categories.aggregate(pipeline2).to_list(length=10000)
+                                        fidx = None
+                                        for idx, item in enumerate(clist):
+                                            try:
+                                                if course.get('id') and item.get('id') == course.get('id'):
+                                                    fidx = idx
+                                                    break
+                                                if item.get('name') == course.get('name'):
+                                                    fidx = idx
+                                                    break
+                                            except Exception:
+                                                continue
+                                        if fidx is not None:
+                                            computed_page = (fidx // PAGE_SIZE) + 1
+                                            pdoc = await db.categories.find_one({"name": true_cat}, projection={"path": 1})
+                                            ppath = pdoc.get('path') if pdoc and pdoc.get('path') else true_cat
+                                            back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{computed_page}"
+                                            logger.debug("handle_course_selection: located course in different category, updated back_cb=%s", back_cb)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
                 'category': course_category,
