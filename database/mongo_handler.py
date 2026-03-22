@@ -181,6 +181,12 @@ class MongoDB:
             if 'courses.name_1' not in info:
                 await coll.create_index('courses.name')
                 logger.info("Index on categories.courses.name created")
+            if 'courses.id_1' not in info:
+                try:
+                    await coll.create_index('courses.id')
+                    logger.info("Index on categories.courses.id created")
+                except Exception:
+                    logger.exception("Failed to create index on categories.courses.id")
         except Exception as e:
             logger.exception("ensure_indexes failed: %s", e)
 
