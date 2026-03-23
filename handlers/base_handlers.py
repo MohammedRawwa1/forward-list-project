@@ -83,6 +83,26 @@ def _set_callback_resolve_cache(key: str, payload, ttl: int = 60):
     except Exception:
         pass
 
+# Tracks sessions (chat_id, message_id) that should be kept open
+# when the scheduled close worker runs. Handlers that render coach
+# lists set this so the session isn't closed while the user is browsing.
+_SESSION_KEEP_OPEN = set()
+
+
+def _set_session_keep_open(message, keep: bool = True):
+    try:
+        chat_id = getattr(message, 'chat', None).id if getattr(message, 'chat', None) else None
+        msg_id = getattr(message, 'message_id', None)
+        if chat_id is None or msg_id is None:
+            return
+        key = (int(chat_id), int(msg_id))
+        if keep:
+            _SESSION_KEEP_OPEN.add(key)
+        else:
+            _SESSION_KEEP_OPEN.discard(key)
+    except Exception:
+        pass
+
 @asynccontextmanager
 async def _db_timing(name: str):
     t0 = time.time()
@@ -203,6 +223,16 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
     async def _worker():
         await asyncio.sleep(delay)
         try:
+            # If this message has been marked to keep open (e.g., coach view),
+            # skip auto-closing.
+            try:
+                chat_id = getattr(message, 'chat', None).id if getattr(message, 'chat', None) else None
+                msg_id = getattr(message, 'message_id', None)
+                if chat_id is not None and msg_id is not None and (int(chat_id), int(msg_id)) in _SESSION_KEEP_OPEN:
+                    return
+            except Exception:
+                pass
+
             orig = getattr(message, 'text', None) or getattr(message, 'caption', None) or ''
             # Try removing inline keyboard first
             try:
@@ -1162,7 +1192,7 @@ MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
 PAGE_SIZE = 50  # Default number of items per page for pagination
 
 
-def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None, total_count: int = None, is_page: bool = False):
+def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', category: str = None, origin_context: str = None, origin_context_page: int = None, total_count: int = None, is_page: bool = False, store_page_ref: bool = False):
     """Builds the text and InlineKeyboardMarkup for a courses page.
 
     `all_courses` may be either the full list of items or, when
@@ -1236,11 +1266,30 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     pagination_buttons = []
     if start > 0:
         if origin_type == 'category' and category:
-            prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page-1}"
-            # preserve origin context and origin page so Prev/Next keep the
-            # same parent pagination when navigating between course pages
-            if origin_context:
-                prev_cb = prev_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+            if store_page_ref:
+                # store compact page payload and link to it
+                try:
+                    items_to_store = []
+                    for it in display:
+                        items_to_store.append({
+                            'name': it.get('name') if isinstance(it, dict) else str(it),
+                            'link': it.get('link') if isinstance(it, dict) else None,
+                            'category': it.get('category') if isinstance(it, dict) else category,
+                            'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                        })
+                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page-1, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    key = _store_callback_payload(page_payload)
+                    prev_cb = f"courses_ref::{key}"
+                except Exception:
+                    prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page-1}"
+                    if origin_context:
+                        prev_cb = prev_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+            else:
+                prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page-1}"
+                # preserve origin context and origin page so Prev/Next keep the
+                # same parent pagination when navigating between course pages
+                if origin_context:
+                    prev_cb = prev_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
         elif origin_type == 'coach' and category:
             prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page-1}"
         else:
@@ -1248,11 +1297,45 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
     if effective_total > start + page_size:
         if origin_type == 'category' and category:
-            next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page+1}"
-            if origin_context:
-                next_cb = next_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+            if store_page_ref:
+                try:
+                    items_to_store = []
+                    for it in display:
+                        items_to_store.append({
+                            'name': it.get('name') if isinstance(it, dict) else str(it),
+                            'link': it.get('link') if isinstance(it, dict) else None,
+                            'category': it.get('category') if isinstance(it, dict) else category,
+                            'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                        })
+                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page+1, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    key = _store_callback_payload(page_payload)
+                    next_cb = f"courses_ref::{key}"
+                except Exception:
+                    next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page+1}"
+                    if origin_context:
+                        next_cb = next_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+            else:
+                next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page+1}"
+                if origin_context:
+                    next_cb = next_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
         elif origin_type == 'coach' and category:
-            next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page+1}"
+            if store_page_ref:
+                try:
+                    items_to_store = []
+                    for it in display:
+                        items_to_store.append({
+                            'name': it.get('name') if isinstance(it, dict) else str(it),
+                            'link': it.get('link') if isinstance(it, dict) else None,
+                            'category': it.get('category') if isinstance(it, dict) else category,
+                            'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                        })
+                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page+1, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    key = _store_callback_payload(page_payload)
+                    next_cb = f"courses_ref::{key}"
+                except Exception:
+                    next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page+1}"
+            else:
+                next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page+1}"
         else:
             next_cb = f"courses::global::{page+1}"
         pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
@@ -1342,13 +1425,47 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         if total_pages > 1 and page < total_pages:
             # build end callback depending on origin type
             if origin_type == 'category' and category:
-                end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
-                if origin_context:
-                    end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                if store_page_ref:
+                    try:
+                        items_to_store = []
+                        for it in display:
+                            items_to_store.append({
+                                'name': it.get('name') if isinstance(it, dict) else str(it),
+                                'link': it.get('link') if isinstance(it, dict) else None,
+                                'category': it.get('category') if isinstance(it, dict) else category,
+                                'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                            })
+                        page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': total_pages, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                        key = _store_callback_payload(page_payload)
+                        end_cb = f"courses_ref::{key}"
+                    except Exception:
+                        end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
+                        if origin_context:
+                            end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                else:
+                    end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
+                    if origin_context:
+                        end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
             elif origin_type == 'global':
                 end_cb = f"courses::global::{total_pages}"
             elif origin_type == 'coach' and category:
-                end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
+                if store_page_ref:
+                    try:
+                        items_to_store = []
+                        for it in display:
+                            items_to_store.append({
+                                'name': it.get('name') if isinstance(it, dict) else str(it),
+                                'link': it.get('link') if isinstance(it, dict) else None,
+                                'category': it.get('category') if isinstance(it, dict) else category,
+                                'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                            })
+                        page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': total_pages, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                        key = _store_callback_payload(page_payload)
+                        end_cb = f"courses_ref::{key}"
+                    except Exception:
+                        end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
+                else:
+                    end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
             else:
                 end_cb = f"courses::global::{total_pages}"
             breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
@@ -1920,7 +2037,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
         coach_courses = items[:page_size]
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
         total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
-        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True)
+        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True, store_page_ref=True)
     except Exception as e:
         logger.error("Error showing coach courses: %s", e)
         await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
@@ -2049,10 +2166,14 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         page_items = coach_courses[start:start + page_size]
-        text, reply_markup = build_courses_page(page_items, page=page, origin_type='coach', category=coach_name, origin_context=origin_ctx, origin_context_page=parent_origin_page, total_count=total_courses, is_page=True)
+        text, reply_markup = build_courses_page(page_items, page=page, origin_type='coach', category=coach_name, origin_context=origin_ctx, origin_context_page=parent_origin_page, total_count=total_courses, is_page=True, store_page_ref=True)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
             return
+        try:
+            _set_session_keep_open(query.message, True)
+        except Exception:
+            pass
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error("Error fetching coach courses in category: %s", e)
@@ -2147,6 +2268,12 @@ async def showtype_handler(update: Update, context: CallbackContext):
             )
             return
 
+        # Keep this session open while browsing coach lists to avoid
+        # scheduled session closure interfering with navigation.
+        try:
+            _set_session_keep_open(query.message, True)
+        except Exception:
+            pass
         await safe_edit_message(
             query,
             text=text,
@@ -2627,7 +2754,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             except Exception:
                 origin_ctx = parent
 
-    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=cat_name, origin_context=origin_ctx, origin_context_page=parent_origin_page)
+    text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=cat_name, origin_context=origin_ctx, origin_context_page=parent_origin_page, store_page_ref=True)
     if not text:
         await safe_edit_message(query, f"No courses found in '{cat_name}' on page {page}.", action_key=getattr(query, 'data', None))
         return
@@ -3652,6 +3779,30 @@ async def courses_callback(update: Update, context: CallbackContext):
     page_size = PAGE_SIZE
 
     try:
+        # Support stored page refs: courses_ref::<key>
+        if data.startswith('courses_ref::'):
+            key = data.split('::', 1)[1]
+            payload = await _resolve_callback_payload(key)
+            if not payload:
+                await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
+                return
+            # payload expected: type='courses_page', items, page, origin_type, category, origin_context, origin_context_page, total_count
+            if payload.get('type') == 'courses_page':
+                items = payload.get('items') or []
+                page = int(payload.get('page', 1) or 1)
+                origin_type = payload.get('origin_type') or 'global'
+                category = payload.get('category')
+                origin_ctx = payload.get('origin_context')
+                origin_ctx_page = payload.get('origin_context_page')
+                total_count = int(payload.get('total_count')) if payload.get('total_count') is not None else None
+                # rebuild the page; items are already the page slice
+                text, reply_markup = build_courses_page(items, page=page, origin_type=origin_type, category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page, total_count=total_count, is_page=True, store_page_ref=False)
+                if not text:
+                    await safe_edit_message(query, "No courses found.", action_key=getattr(query, 'data', None))
+                    return
+                await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+                return
+
         # New format supports: courses::{category}::{page} or courses::{page} for global
         if data.startswith("courses::"):
             payload = data.replace("courses::", "", 1)
@@ -3747,7 +3898,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             except Exception:
                                 origin_ctx = None
                         total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(courses))
-                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page, total_count=total_courses, is_page=True)
+                        text, reply_markup = build_courses_page(courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=origin_ctx_page, total_count=total_courses, is_page=True, store_page_ref=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
@@ -3780,7 +3931,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         coach_courses = items[:page_size]
                         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
                         total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
-                        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True)
+                        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True, store_page_ref=True)
                         if not text:
                             await safe_edit_message(query, f"No courses found for coach '{coach_name}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
