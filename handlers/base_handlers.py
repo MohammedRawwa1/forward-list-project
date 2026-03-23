@@ -512,49 +512,57 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                     pass
 
                 # Try alternates and also clamp to page 1 if necessary
-                        for alt in alternates:
-                            try:
-                                # Evict cached page for alternate
+                for alt in alternates:
+                    try:
+                        # Evict cached page for alternate
+                        try:
+                            alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:{page}:{PAGE_SIZE}"
+                            _PAGE_CACHE.pop(alt_cache, None)
+                            if _redis is not None:
                                 try:
-                                    alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:{page}:{PAGE_SIZE}"
-                                    _PAGE_CACHE.pop(alt_cache, None)
-                                    if _redis is not None:
-                                        try:
-                                            asyncio.create_task(_redis.delete(alt_cache))
-                                        except Exception:
-                                            pass
+                                    asyncio.create_task(_redis.delete(alt_cache))
                                 except Exception:
                                     pass
-                                items = await get_courses_by_category(0, alt, page)
+                        except Exception:
+                            pass
+                        try:
+                            items = await get_courses_by_category(0, alt, page)
+                        except Exception:
+                            try:
+                                items = await get_courses_by_category(None, alt, page)
                             except Exception:
-                                try:
-                                    items = await get_courses_by_category(None, alt, page)
-                                except Exception:
-                                    items = []
+                                items = []
+                    except Exception:
+                        items = []
+
                     if items and _has_real_courses(items):
                         new_cb = f"courses::category::{urllib.parse.quote_plus(str(alt))}::{page}"
                         return new_cb
 
                 # try clamping to page 1 as a last-ditch
-                        for alt in alternates:
-                            try:
-                                # Evict cached page for alternate page 1
+                for alt in alternates:
+                    try:
+                        # Evict cached page for alternate page 1
+                        try:
+                            alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:1:{PAGE_SIZE}"
+                            _PAGE_CACHE.pop(alt_cache, None)
+                            if _redis is not None:
                                 try:
-                                    alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:1:{PAGE_SIZE}"
-                                    _PAGE_CACHE.pop(alt_cache, None)
-                                    if _redis is not None:
-                                        try:
-                                            asyncio.create_task(_redis.delete(alt_cache))
-                                        except Exception:
-                                            pass
+                                    asyncio.create_task(_redis.delete(alt_cache))
                                 except Exception:
                                     pass
-                                items = await get_courses_by_category(0, alt, 1)
+                        except Exception:
+                            pass
+                        try:
+                            items = await get_courses_by_category(0, alt, 1)
+                        except Exception:
+                            try:
+                                items = await get_courses_by_category(None, alt, 1)
                             except Exception:
-                                try:
-                                    items = await get_courses_by_category(None, alt, 1)
-                                except Exception:
-                                    items = []
+                                items = []
+                    except Exception:
+                        items = []
+
                     if items and _has_real_courses(items):
                         new_cb = f"courses::category::{urllib.parse.quote_plus(str(alt))}::1"
                         return new_cb
