@@ -1554,7 +1554,8 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         logger.debug("categories_page: requested page=%s total_est=%s got=%s have_more=%s", page, total, len(cats), have_more)
         # Fallback: some data models store top-level categories with parent==None
         # or an empty string. If we got no results, try relaxed filter once.
-        if not cats and total == 0:
+        page_cats = cats
+        if not page_cats and total == 0:
             try:
                 alt_filter = TOP_LEVEL_FILTER
                 async with _db_timing(f"categories_page:fallback:{page}"):
@@ -1564,40 +1565,43 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                 alt_cats = alt_raw[:page_size] if alt_have_more else alt_raw
                 logger.debug("categories_page: fallback total_est=%s got=%s", alt_total, len(alt_cats))
                 if alt_cats:
-                    keyboard = []
-                    for cat in page_cats:
-                        cat_path = cat.get('path') or cat.get('name')
-                        # Persist a short ref including the current categories page so
-                        # returning from the category view restores the same page.
-                        payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
-                        key = _store_callback_payload(payload)
-                        try:
-                            logger.debug("categories_page: created showcat_ref key=%s path=%s parent_page=%s", key, cat_path, page)
-                        except Exception:
-                            pass
-                        display_name = cat.get('name')
-                        cb = f"showcat_ref::{key}"
-                        keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
-            has_children = parent_has_children.get(cat.get('name'))
-            courses = cat.get('courses', []) if isinstance(cat, dict) else []
-            is_empty = (not has_children) and (not _has_real_courses(courses))
-        except Exception:
-            is_empty = True
-        display_name = cat.get('name')
-        cb = f"showcat_ref::{key}"
-        # Debug: log creation details for buttons to help diagnose encoding/empty-label issues
-        # Only emit minimal debug for non-empty categories; skip expensive
-        # full-document lookups and per-button info logs to speed up listing.
-        try:
-            if not is_empty:
-                sample_first = None
-                if isinstance(courses, list) and len(courses) > 0:
-                    c0 = courses[0]
-                    sample_first = c0.get('name') if isinstance(c0, dict) else str(c0)
-                logger.debug("categories_page: button name=%r path=%r is_empty=%s sample_course=%r", cat.get('name'), cat_path, is_empty, sample_first)
-        except Exception:
-            pass
-        keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
+                    page_cats = alt_cats
+            except Exception:
+                page_cats = []
+
+        # Batch-check which of the page categories have children to avoid N queries.
+        cat_names = [c.get('name') for c in page_cats if isinstance(c, dict) and c.get('name')]
+        names_with_children = set()
+        if cat_names:
+            try:
+                docs = await db.categories.find({"parent": {"$in": cat_names}}, {"parent": 1}).to_list(length=len(cat_names))
+                names_with_children = {d.get('parent') for d in docs if d.get('parent')}
+            except Exception:
+                names_with_children = set()
+
+        keyboard = []
+        for cat in page_cats:
+            cat_path = cat.get('path') or cat.get('name')
+            # Persist a short ref including the current categories page so
+            # returning from the category view restores the same page.
+            payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
+            key = _store_callback_payload(payload)
+            try:
+                logger.debug("categories_page: created showcat_ref key=%s path=%s parent_page=%s", key, cat_path, page)
+            except Exception:
+                pass
+
+            # For top-level categories we deliberately do not append an '(empty)'
+            # suffix — child/course checks are deferred until the user opens
+            # the category (AJAX-style).
+            display_name = cat.get('name') if isinstance(cat, dict) else str(cat)
+            cb = f"showcat_ref::{key}"
+            try:
+                logger.debug("categories_page: button name=%r path=%r", display_name, cat_path)
+            except Exception:
+                pass
+
+            keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
