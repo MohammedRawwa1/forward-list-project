@@ -11,7 +11,7 @@ from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
 import difflib
-from handlers.base_handlers import safe_edit_message, _store_callback_payload, safe_answer
+from handlers.base_handlers import safe_edit_message, _store_callback_payload, safe_answer, _has_real_courses
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -455,7 +455,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                 {"parent": None},
                 {"parent": ""}
             ]
-        }).project({"name": 1, "parent": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
+        }, {"name": 1, "parent": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
 
         if not cats:
             await update.message.reply_text("No parent categories available to delete.")
