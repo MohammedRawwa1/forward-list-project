@@ -156,22 +156,13 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
 
     try:
         if data.startswith("delete_item::"):
-            # This is an empty category or a single course
+            # Delete a single course from a category
             parts = data.split("::", 2)
             if len(parts) == 3:
                 cat_name = urllib.parse.unquote_plus(parts[1])
                 item_name = urllib.parse.unquote_plus(parts[2])
             else:
                 await safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
-                return
-
-            # If item_name is "(empty)" → delete category
-            if item_name == "(empty)":
-                res = await db["categories"].delete_one({"name": cat_name})
-                if res.deleted_count > 0:
-                    await safe_edit_message(query, f"Empty category '{cat_name}' deleted successfully! 🎉", action_key=getattr(query, "data", None))
-                else:
-                    await safe_edit_message(query, f"Category '{cat_name}' not found.", action_key=getattr(query, "data", None))
                 return
 
         elif data.startswith("delete_category::"):
@@ -187,10 +178,10 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
             await safe_edit_message(query, "Unknown deletion action.", action_key=getattr(query, "data", None))
             return
 
-        # Delete the category or pull a course from it
+        # Delete the course from the category
         result = await db["categories"].update_one(
             {"name": cat_name},
-            {"$pull": {"courses": {"name": item_name}}} if item_name != "(empty)" else {}
+            {"$pull": {"courses": {"name": item_name}}}
         )
 
         if result.modified_count > 0:
@@ -262,13 +253,14 @@ async def delete_item_start(update: Update, context: CallbackContext):
             for crs in courses:
                 course_name = (crs.get("name") or "").strip()
                 all_items.append({
+                    "type": "course",
                     "name": course_name,
                     "category": category_name
                 })
         else:
-            # No courses → treat as empty folder
+            # No courses → offer deleting the category itself
             all_items.append({
-                "name": "(empty)",
+                "type": "category",
                 "category": category_name
             })
 
@@ -278,16 +270,26 @@ async def delete_item_start(update: Update, context: CallbackContext):
 
     keyboard = []
     for c in all_items:
-        cat = urllib.parse.quote_plus(c["category"])
-        name = urllib.parse.quote_plus(c["name"])
-        # Display differently if it's an empty folder
-        display_text = f"{c['category']} (empty)" if c["name"] == "(empty)" else f"{c['category']} → {c['name']}"
-        keyboard.append([
-            InlineKeyboardButton(
-                display_text,
-                callback_data=f"delete_item::{cat}::{name}"
-            )
-        ])
+        if c.get('type') == 'category':
+            # Empty category — show category name and delete_category callback
+            cat = urllib.parse.quote_plus(c["category"])
+            display_text = f"{c['category']}"
+            keyboard.append([
+                InlineKeyboardButton(
+                    display_text,
+                    callback_data=f"delete_category::{cat}"
+                )
+            ])
+        else:
+            cat = urllib.parse.quote_plus(c["category"])
+            name = urllib.parse.quote_plus(c["name"])
+            display_text = f"{c['category']} → {c['name']}"
+            keyboard.append([
+                InlineKeyboardButton(
+                    display_text,
+                    callback_data=f"delete_item::{cat}::{name}"
+                )
+            ])
 
     # Always append Cancel button
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
@@ -333,9 +335,9 @@ async def delete_category_start(update: Update, context: CallbackContext):
         for cat in page_cats:
             name = (cat.get("name") or "").strip()
             courses = cat.get("courses")
-            display_name = f"{name} (empty)" if not courses else name
+            display_name = f"{name} (empty)" if not _has_real_courses(courses) else name
             encoded_name = urllib.parse.quote_plus(name)
-            cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category_{encoded_name}"
+            cb = f"delete_category::{encoded_name}"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
         # Pagination nav: Prev (left), Home (center when not on page 1), Next (right), End always at the end
@@ -408,9 +410,9 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     for cat in page_cats:
         name = (cat.get("name") or "").strip()
         courses = cat.get("courses")
-        display_name = f"{name} (empty)" if not courses else name
+        display_name = f"{name} (empty)" if not _has_real_courses(courses) else name
         encoded_name = urllib.parse.quote_plus(name)
-        cb = f"delete_item::{encoded_name}::(empty)" if not courses else f"delete_category_{encoded_name}"
+        cb = f"delete_category::{encoded_name}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
@@ -449,7 +451,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
     try:
         cats = await db["categories"].find({
             "$or": [
-                {"parent": {"$exists": False}},
+                {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]},
                 {"parent": None},
                 {"parent": ""}
             ]
