@@ -107,7 +107,7 @@ def _has_real_courses(courses):
             else:
                 # allow legacy string entries
                 name = c
-            if name and str(name).strip() and str(name).strip() != '(empty)':
+            if name and str(name).strip():
                 return True
     except Exception:
         return False
@@ -1567,7 +1567,7 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             is_empty = (not has_children) and (not _has_real_courses(courses))
         except Exception:
             is_empty = True
-        display_name = f"{cat.get('name')}{' (empty)' if is_empty else ''}"
+        display_name = cat.get('name')
         cb = f"showcat_ref::{key}"
         # Debug: log creation details for buttons to help diagnose encoding/empty-label issues
         try:
@@ -2443,7 +2443,7 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
                 is_empty = (not has_children) and (not _has_real_courses(courses))
             except Exception:
                 is_empty = True
-            display = f"{cat.get('name')}{' (empty)' if is_empty else ''}"
+            display = cat.get('name')
             keyboard.append([InlineKeyboardButton(display, callback_data=_shorten_showcat_cb(cat.get('path') or cat.get('name'), 1))])
         await safe_edit_message(query, "Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     except Exception as e:
@@ -3028,38 +3028,10 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     pass
             else:
                 if saved_back_cb:
-                    # If saved back token points to a coach listing, normalize
-                    # it to the top-level coach listing (page 1) so users are
-                    # returned to the full coach list rather than a small
-                    # partial page.
-                    sb = str(saved_back_cb)
-                    if origin_type == 'coach' and sb.startswith('courses::coach::'):
-                        # Translate coach listing callbacks into the category's
-                        # courses listing so Back returns to "Courses in
-                        # category ... (page X)" instead of the outer coach
-                        # listing. Preserve the page when possible.
-                        try:
-                            # prefer the category that the course belongs to
-                            back_target = course_category or cat_name
-                            if back_target:
-                                try:
-                                    pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
-                                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else back_target
-                                except Exception:
-                                    ppath = back_target
-                                # try to preserve a page from the saved sb if present
-                                parts = sb.split('::')
-                                coach_page = None
-                                if len(parts) >= 4:
-                                    coach_page = parts[3]
-                                page_to_use = coach_page or origin_page or 1
-                                back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
-                            else:
-                                back_cb = sb
-                        except Exception:
-                            back_cb = sb
-                    else:
-                        back_cb = saved_back_cb
+                    # Preserve saved back token for coach-origin details so
+                    # Back returns to the same coach listing the user came
+                    # from. Do not remap coach callbacks to category lists.
+                    back_cb = str(saved_back_cb)
                 else:
                     if origin_type == 'coach' and origin_page:
                         # Route coach-origin details back to the same coach
