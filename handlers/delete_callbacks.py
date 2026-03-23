@@ -36,7 +36,7 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
                     {"parent": curr},
                     {"path": {"$regex": f'^{re.escape(curr)}/'}}
                 ]
-                }).project({"name": 1}).to_list(length=BATCH_LIMIT)
+                }, {"name": 1}).to_list(length=BATCH_LIMIT)
             for ch in children:
                 name = ch.get('name')
                 if name and name not in to_delete:
@@ -65,17 +65,7 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         if len(parts) == 2:
             cat = urllib.parse.unquote_plus(parts[0])
             item = urllib.parse.unquote_plus(parts[1])
-            # If the item is the special marker for empty folder, delete the
-            # category document instead of trying to pull a course.
-            if item == "(empty)":
-                res = await db['categories'].delete_one({"name": cat})
-                if getattr(res, 'deleted_count', 0) > 0:
-                    await safe_edit_message(query, f"Empty category '{cat}' deleted successfully! 🎉", action_key=getattr(query, 'data', None))
-                else:
-                    await safe_edit_message(query, f"Category '{cat}' not found. ❌", action_key=getattr(query, 'data', None))
-                return
-
-            # remove from category embedded array
+            # remove the course from the category
             res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
             if res.modified_count:
                 await safe_edit_message(query, f"Course ‘{item}’ deleted from category ‘{cat}’. ✅", action_key=getattr(query, 'data', None))
@@ -243,7 +233,7 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                             {"parent": curr},
                             {"path": {"$regex": f'^{re.escape(curr)}/'}}
                         ]
-                        }).project({"name": 1}).to_list(length=BATCH_LIMIT)
+                        }, {"name": 1}).to_list(length=BATCH_LIMIT)
                     for ch in children:
                         name = ch.get('name')
                         if name and name not in to_delete:
@@ -351,7 +341,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                         {"parent": curr},
                         {"path": {"$regex": f'^{re.escape(curr)}/'}}
                     ]
-                }).project({"name": 1}).to_list(length=BATCH_LIMIT)
+                }, {"name": 1}).to_list(length=BATCH_LIMIT)
                 for ch in children:
                     name = ch.get('name')
                     if name and name not in to_delete:
@@ -421,7 +411,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                         {"parent": curr},
                         {"path": {"$regex": f'^{re.escape(curr)}/'}}
                     ]
-                    }).project({"name": 1}).to_list(length=BATCH_LIMIT)
+                    }, {"name": 1}).to_list(length=BATCH_LIMIT)
                 for ch in children:
                     name = ch.get('name')
                     if name and name not in to_delete:
