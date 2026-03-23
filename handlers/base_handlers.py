@@ -1596,13 +1596,13 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
         child_path = child.get('path') or child.get('name')
         payload = {"type": "showcat", "path": child_path, "from_parent": parent, "parent_page": page}
         key = _store_callback_payload(payload)
-            # Prefetch the child's first courses page in background to
-            # improve perceived responsiveness when users open it.
-            try:
-                if _redis is not None:
-                    asyncio.create_task(_prefetch_category_page(child_path, page=1))
-            except Exception:
-                pass
+        # Prefetch the child's first courses page in background to
+        # improve perceived responsiveness when users open it.
+        try:
+            if _redis is not None:
+                asyncio.create_task(_prefetch_category_page(child_path, page=1))
+        except Exception:
+            pass
         try:
             has_children = child.get('name') in names_with_children
             courses = child.get('courses', []) if isinstance(child, dict) else []
