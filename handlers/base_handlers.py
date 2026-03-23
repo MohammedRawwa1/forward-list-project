@@ -3504,8 +3504,11 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 origin_ctx = None
                         # Use aggregation to avoid loading the full category document
                         start = (page - 1) * page_size
+                        # Match by either category `name` or `path` so stored
+                        # callbacks that use full paths (e.g. "Sex/Kenneth Play")
+                        # still resolve to the correct category document.
                         items_pipeline = [
-                            {"$match": {"name": category}},
+                            {"$match": {"$or": [{"name": category}, {"path": category}]}},
                             {"$unwind": "$courses"},
                             {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
                             {"$sort": {"name": 1}},
@@ -3522,10 +3525,11 @@ async def courses_callback(update: Update, context: CallbackContext):
                         # compute origin_context (parent path) — fetch parent path if we don't already have origin_ctx
                         if origin_ctx is None:
                             try:
-                                pdoc = await db.categories.find_one({"name": category}, projection={"parent": 1})
+                                # Resolve parent by matching name or path
+                                pdoc = await db.categories.find_one({"$or": [{"name": category}, {"path": category}]}, projection={"parent": 1})
                                 parent = pdoc.get('parent') if pdoc else None
                                 if parent:
-                                    pp = await db.categories.find_one({"name": parent}, projection={"path": 1})
+                                    pp = await db.categories.find_one({"$or": [{"name": parent}, {"path": parent}]}, projection={"path": 1})
                                     origin_ctx = pp.get('path') if pp and pp.get('path') else parent
                             except Exception:
                                 origin_ctx = None
