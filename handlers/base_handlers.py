@@ -1603,6 +1603,17 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
 
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
+    except Exception:
+        try:
+            logger.exception("categories_page: unexpected error building page")
+        except Exception:
+            pass
+        if is_query:
+            await safe_edit_message(query, "Error: failed to load categories.", action_key=getattr(query, 'data', None))
+        else:
+            await update_or_message.reply_text("Error: failed to load categories.")
+        return
+
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
