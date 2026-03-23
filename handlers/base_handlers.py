@@ -45,7 +45,7 @@ def _parse_ttl(value, default=300):
 
 GUI_SESSION_TTL = _parse_ttl(os.getenv("GUI_SESSION_TTL", "300"), 300)
 logger = logging.getLogger(__name__)
-logger.info("GUI_SESSION_TTL=%s seconds (env=%r)", GUI_SESSION_TTL, os.getenv("GUI_SESSION_TTL"))
+logger.debug("GUI_SESSION_TTL=%s seconds (env=%r)", GUI_SESSION_TTL, os.getenv("GUI_SESSION_TTL"))
 
 # Reusable filter for top-level categories that handles missing, null, or empty-string parents
 TOP_LEVEL_FILTER = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
@@ -66,7 +66,7 @@ async def _db_timing(name: str):
     finally:
         elapsed = time.time() - t0
         try:
-            logger.info("[DB-TIME] %s %.3fs", name, elapsed)
+            logger.debug("[DB-TIME] %s %.3fs", name, elapsed)
         except Exception:
             pass
 
@@ -446,7 +446,7 @@ async def _rehydrate_callback_map(limit: int = None):
                         count += 1
                 except Exception:
                     continue
-            logger.info("Rehydrated %s callback refs from MongoDB", count)
+            logger.debug("Rehydrated %s callback refs from MongoDB", count)
             return count
         except Exception as e:
             logger.exception("_rehydrate_callback_map: failed to load callback refs: %s", e)
@@ -642,7 +642,7 @@ if REDIS_URL:
             finally:
                 elapsed = time.time() - t0
                 try:
-                    logger.info("[DB-TIME] %s %.3fs", name, elapsed)
+                    logger.debug("[DB-TIME] %s %.3fs", name, elapsed)
                 except Exception:
                     pass
 
@@ -702,7 +702,7 @@ if '_db_timing' not in globals():
         finally:
             elapsed = time.time() - t0
             try:
-                logger.info("[DB-TIME] %s %.3fs", name, elapsed)
+                logger.debug("[DB-TIME] %s %.3fs", name, elapsed)
             except Exception:
                 pass
 
@@ -935,7 +935,7 @@ async def start_redis_retry_worker(application):
     This is safe to call even if Redis is not configured; it will just return.
     """
     if _redis is None:
-        logger.info("Redis not configured; skipping redis retry worker")
+        logger.debug("Redis not configured; skipping redis retry worker")
         return
 
     async def _worker():
@@ -1347,7 +1347,7 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         except Exception:
             page = 1
 
-    logger.info("createcat_page invoked: page=%s is_query=%s", page, is_query)
+    logger.debug("createcat_page invoked: page=%s is_query=%s", page, is_query)
     try:
         db = await get_db()
         logger.debug("createcat_page: db=%s", getattr(db, 'name', None))
@@ -1539,14 +1539,15 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        # Use server-side pagination for categories listing. Fetch minimal
-        # fields and only a single course element to decide emptiness.
+        # Use server-side pagination for categories listing. Fetch only
+        # the minimal fields (name/path) and defer any child/course
+        # checks until the user actually opens a parent (AJAX-style).
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         async with _db_timing(f"categories_page:{page}"):
             filter_q = TOP_LEVEL_FILTER
             total = await _get_total_count(db, 'categories', filter_q, ttl=30)
-            proj = {"name": 1, "path": 1, "parent": 1, "_id": 1, "courses": {"$slice": 1}}
+            proj = {"name": 1, "path": 1, "parent": 1, "_id": 1}
             raw = await db.categories.find(filter_q, proj).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1)
         have_more = len(raw) > page_size
         cats = raw[:page_size] if have_more else raw
@@ -1561,52 +1562,22 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                     alt_raw = await db.categories.find(alt_filter, proj).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1)
                 alt_have_more = len(alt_raw) > page_size
                 alt_cats = alt_raw[:page_size] if alt_have_more else alt_raw
-                logger.info("categories_page: fallback total_est=%s got=%s", alt_total, len(alt_cats))
+                logger.debug("categories_page: fallback total_est=%s got=%s", alt_total, len(alt_cats))
                 if alt_cats:
-                    cats = alt_cats
-                    total = alt_total
-                    have_more = alt_have_more
-            except Exception:
-                logger.exception("categories_page: fallback query failed")
-    except Exception:
-        cats = []
-        total = 0
-
-    # cats already contains only the current page slice (server-side)
-    page_cats = cats
-
-    if not page_cats:
-        if is_query:
-            await safe_edit_message(query, "No categories available on this page.", action_key=getattr(query, 'data', None))
-        else:
-            await update_or_message.reply_text("No categories available. Use /create_category to create one.")
-        return
-
-    keyboard = []
-    # Batch-check which page categories have children to avoid N queries
-    cat_names = [c.get('name') for c in page_cats if c.get('name')]
-    parent_has_children = {}
-    if cat_names:
-        try:
-            docs = await db.categories.find({"parent": {"$in": cat_names}}, {"parent": 1}).to_list(length=len(cat_names))
-            parents_with_children = {d.get('parent') for d in docs if d.get('parent')}
-            parent_has_children = {name: (name in parents_with_children) for name in cat_names}
-        except Exception:
-            parent_has_children = {name: False for name in cat_names}
-
-    for cat in page_cats:
-        cat_path = cat.get('path') or cat.get('name')
-        # Persist a short ref including the current categories page so
-        # returning from the category view restores the same page.
-        payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
-        key = _store_callback_payload(payload)
-        try:
-            logger.debug("categories_page: created showcat_ref key=%s path=%s parent_page=%s", key, cat_path, page)
-        except Exception:
-            pass
-        # Indicate empty categories visually: we sliced one course element
-        # above, so `courses` truthiness indicates at least one course.
-        try:
+                    keyboard = []
+                    for cat in page_cats:
+                        cat_path = cat.get('path') or cat.get('name')
+                        # Persist a short ref including the current categories page so
+                        # returning from the category view restores the same page.
+                        payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
+                        key = _store_callback_payload(payload)
+                        try:
+                            logger.debug("categories_page: created showcat_ref key=%s path=%s parent_page=%s", key, cat_path, page)
+                        except Exception:
+                            pass
+                        display_name = cat.get('name')
+                        cb = f"showcat_ref::{key}"
+                        keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
             has_children = parent_has_children.get(cat.get('name'))
             courses = cat.get('courses', []) if isinstance(cat, dict) else []
             is_empty = (not has_children) and (not _has_real_courses(courses))
@@ -2034,7 +2005,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     #  - showcat::{path_or_name}::from_parent::{parent_path}::{parent_page}
     raw = query.data
     try:
-        logger.info("showcat_handler: raw callback_data=%r", raw)
+        logger.debug("showcat_handler: raw callback_data=%r", raw)
     except Exception:
         pass
     page_from_callback = None
@@ -2098,7 +2069,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         else:
             parts = raw.split("::")
             try:
-                logger.info("showcat_handler: parts=%r", parts)
+                logger.debug("showcat_handler: parts=%r", parts)
             except Exception:
                 pass
             encoded = parts[1] if len(parts) > 1 else ""
@@ -2159,7 +2130,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 matched_on = 'name'
             else:
                 matched_on = 'fallback'
-            logger.info("showcat_handler: resolved category_doc name=%r path=%r matched_on=%s encoded=%r", category_doc.get('name'), category_doc.get('path'), matched_on, encoded)
+            logger.debug("showcat_handler: resolved category_doc name=%r path=%r matched_on=%s encoded=%r", category_doc.get('name'), category_doc.get('path'), matched_on, encoded)
         except Exception:
             pass
     except Exception:
@@ -2200,7 +2171,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # First: show any child categories (sub-categories)
     try:
         try:
-            logger.info("showcat_handler: parsed page_from_callback=%r parent_origin=%r parent_origin_page=%r encoded=%r", page_from_callback, parent_origin, parent_origin_page, encoded)
+            logger.debug("showcat_handler: parsed page_from_callback=%r parent_origin=%r parent_origin_page=%r encoded=%r", page_from_callback, parent_origin, parent_origin_page, encoded)
         except Exception:
             pass
         # Server-side pagination for child categories under this category
@@ -2209,7 +2180,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         start = (page - 1) * page_size
         children = await db.categories.find({"parent": cat_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
         try:
-            logger.info("showcat_handler: total_children=%s page=%s start=%s fetched_children=%s", total_children, page, start, len(children) if children is not None else 0)
+            logger.debug("showcat_handler: total_children=%s page=%s start=%s fetched_children=%s", total_children, page, start, len(children) if children is not None else 0)
         except Exception:
             pass
     except Exception:
@@ -2370,7 +2341,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     # Fallback: show courses if no coaches found
     courses = category_doc.get('courses', [])
-    logger.info("showcat_handler: category=%s courses_count=%s", cat_name, len(courses))
+    logger.debug("showcat_handler: category=%s courses_count=%s", cat_name, len(courses))
     if not courses:
         # Offer a Back button so the user stays in the browsing flow instead
         # of being dropped out with a plain message.
