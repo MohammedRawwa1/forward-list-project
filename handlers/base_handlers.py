@@ -1270,11 +1270,19 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         if origin_type == 'global':
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::global::1")]
         elif origin_type == 'coach' and category:
-            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::coach::{urllib.parse.quote_plus(category)}::1")]
-        elif origin_type == 'category' and origin_context == 'categories':
-            # When the courses page was opened from the paginated top-level
-            # categories view, Home should return to page 1 of categories.
-            # Hide the Home button when already on page 1.
+            # If this coach page was opened from within a category (origin_context set),
+            # prefer Home -> top-level categories page (page 1) and hide on page 1.
+            if origin_context:
+                if page > 1:
+                    breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="categories_page::1")]
+                else:
+                    breadcrumb_buttons = None
+            else:
+                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::coach::{urllib.parse.quote_plus(category)}::1")]
+        elif origin_type == 'category':
+            # For category-origin pages, Home should return to the top-level
+            # categories listing (page 1). Hide the Home button when already
+            # on page 1 so the row doesn't offer a no-op action.
             if page > 1:
                 breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="categories_page::1")]
             else:
