@@ -572,6 +572,59 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
     except Exception:
         return back_cb
 
+
+async def _get_children_flags(db, names, ttl: int = 30):
+    """Return a set of names that have children. Uses Redis as a cache when available.
+
+    `names` is an iterable of category names. The function will check Redis
+    first (mget) and only query MongoDB for misses, then populate Redis for
+    future hits. Returns a set of names that have children.
+    """
+    if not names:
+        return set()
+    names = list(names)
+    have = set()
+    misses = []
+    try:
+        if _redis is not None:
+            keys = [f"cat:has_children:{urllib.parse.quote_plus(n)}" for n in names]
+            try:
+                vals = await _redis.mget(*keys)
+            except Exception:
+                vals = [None] * len(keys)
+            for n, v in zip(names, vals):
+                if v is None:
+                    misses.append(n)
+                else:
+                    try:
+                        s = v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
+                        if s in ('1', 'true', 'True'):
+                            have.add(n)
+                    except Exception:
+                        pass
+        else:
+            misses = names
+    except Exception:
+        misses = names
+
+    if misses:
+        try:
+            docs = await db.categories.find({"parent": {"$in": misses}}, {"parent": 1}).to_list(length=len(misses))
+            parents = {d.get('parent') for d in docs if d.get('parent')}
+        except Exception:
+            parents = set()
+        # populate Redis for misses
+        if _redis is not None:
+            for n in misses:
+                key = f"cat:has_children:{urllib.parse.quote_plus(n)}"
+                val = '1' if n in parents else '0'
+                try:
+                    await _redis.setex(key, ttl, val)
+                except Exception:
+                    pass
+        have |= parents
+    return have
+
 # Simple in-memory debounce/rate-limit to ignore very fast repeated
 # callback presses from the same user. This reduces duplicated edits and
 # avoids hitting Telegram's flood limits when users rapidly navigate pages.
@@ -1212,14 +1265,23 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         # explicit `courses::global::<page>` callbacks; category pages
         # use `courses::category::<category>::<page>` so the handler can
         # unambiguously route the request.
+        breadcrumb_buttons = None
+        # Decide Home callback and visibility based on origin
         if origin_type == 'global':
-            home_cb = f"courses::global::1"
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::global::1")]
         elif origin_type == 'coach' and category:
-            home_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::1"
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::coach::{urllib.parse.quote_plus(category)}::1")]
+        elif origin_type == 'category' and origin_context == 'categories':
+            # When the courses page was opened from the paginated top-level
+            # categories view, Home should return to page 1 of categories.
+            # Hide the Home button when already on page 1.
+            if page > 1:
+                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="categories_page::1")]
+            else:
+                breadcrumb_buttons = None
         else:
             # Default Home goes to the top-level categories view
-            home_cb = "back_to_cats"
-        breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=home_cb)]
+            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
         if total_pages > 1 and page < total_pages:
             # build end callback depending on origin type
             if origin_type == 'category' and category:
@@ -1233,8 +1295,9 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
             else:
                 end_cb = f"courses::global::{total_pages}"
             breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
-        # insert breadcrumb row (Home +/- End); omit the current category button
-        keyboard.insert(0, breadcrumb_buttons)
+        # insert breadcrumb row (Home +/- End) when present
+        if breadcrumb_buttons:
+            keyboard.insert(0, breadcrumb_buttons)
 
         # prepend breadcrumb text for visual context when available (condensed)
         try:
@@ -1467,8 +1530,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     names_with_children = set()
     if child_names:
         try:
-            docs = await db.categories.find({"parent": {"$in": child_names}}, {"parent": 1}).to_list(length=len(child_names))
-            names_with_children = {d.get('parent') for d in docs if d.get('parent')}
+            names_with_children = await _get_children_flags(db, child_names, ttl=60)
         except Exception:
             names_with_children = set()
 
@@ -2215,8 +2277,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         names_with_children = set()
         if child_names:
             try:
-                docs = await db.categories.find({"parent": {"$in": child_names}}, {"parent": 1}).to_list(length=len(child_names))
-                names_with_children = {d.get('parent') for d in docs if d.get('parent')}
+                names_with_children = await _get_children_flags(db, child_names, ttl=60)
             except Exception:
                 names_with_children = set()
 
