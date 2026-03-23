@@ -544,7 +544,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
             is_empty = (not has_children) and (not _has_real_courses(courses))
         except Exception:
             is_empty = True
-        display = f"{c.get('name')}{' (empty)' if is_empty else ''}"
+        display = c.get('name')
         keyboard.append([InlineKeyboardButton(display, callback_data=f"addcat::{urllib.parse.quote_plus(c.get('name'))}::{page}")])
 
     nav = []
