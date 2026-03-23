@@ -1592,9 +1592,20 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             names_with_children = set()
 
     keyboard = []
+    # Capture a compact parent index (paths or names) to persist with
+    # child callbacks. This hidden tracker lets us reconstruct the
+    # parent's full index quickly on Back/Forward without extra DB hits.
+    try:
+        parent_index = [
+            {"path": (c.get('path') if c.get('path') is not None else None), "name": (c.get('name') if c.get('name') is not None else None)}
+            for c in children if isinstance(c, dict) and (c.get('path') or c.get('name'))
+        ]
+    except Exception:
+        parent_index = []
+
     for child in page_children:
         child_path = child.get('path') or child.get('name')
-        payload = {"type": "showcat", "path": child_path, "from_parent": parent, "parent_page": page}
+        payload = {"type": "showcat", "path": child_path, "from_parent": parent, "parent_page": page, "parent_index": parent_index}
         key = _store_callback_payload(payload)
         # Prefetch the child's first courses page in background to
         # improve perceived responsiveness when users open it.
@@ -2175,7 +2186,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if not payload:
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
-        # payload should contain `path`, optional `from_parent` and `parent_page`
+        # payload may contain `path`, optional `from_parent`, `parent_page`, and hidden `parent_index`
         cat_path = payload.get('path')
         parent_origin = payload.get('from_parent')
         # parent_page may be stored as int or string; normalize to int when present
@@ -2185,6 +2196,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 parent_origin_page = int(payload.get('parent_page'))
         except Exception:
             parent_origin_page = None
+        # capture any hidden parent_index (list of {path,name}) for fast Back/Forward
+        parent_index = None
+        try:
+            if 'parent_index' in payload and isinstance(payload.get('parent_index'), (list, tuple)):
+                parent_index = payload.get('parent_index')
+        except Exception:
+            parent_index = None
         # child page (if stored) — preserve when provided
         page_from_callback = None
         try:
@@ -2197,6 +2215,51 @@ async def showcat_handler(update: Update, context: CallbackContext):
             encoded = urllib.parse.quote_plus(cat_path) if cat_path else ""
         except Exception:
             encoded = ""
+
+        # If this payload is a parent-index back reference, render the parent
+        # page directly from the stored `parent_index` without extra DB hits.
+        try:
+            if payload.get('type') == 'parent_index_back' and parent_index is not None:
+                # parent name/path
+                parent_name = payload.get('parent')
+                page = int(payload.get('parent_page') or 1)
+                page_size = int(payload.get('page_size') or PAGE_SIZE)
+                total = len(parent_index)
+                start = (page - 1) * page_size
+                slice_items = parent_index[start:start + page_size]
+                keyboard = []
+                for item in slice_items:
+                    # item expected to be dict {path, name} or fallback string
+                    if isinstance(item, dict):
+                        item_path = item.get('path') or item.get('name')
+                        item_name = item.get('name') or item.get('path') or str(item_path)
+                    else:
+                        item_path = str(item)
+                        item_name = item_path
+                    # create standard showcat payloads for the child entries
+                    child_payload = {"type": "showcat", "path": item_path, "from_parent": parent_name, "parent_page": page, "parent_index": parent_index}
+                    key2 = _store_callback_payload(child_payload)
+                    keyboard.append([InlineKeyboardButton(item_name, callback_data=f"showcat_ref::{key2}")])
+
+                # Navigation row
+                nav = []
+                total_pages = (total - 1) // page_size + 1 if total else 1
+                last_page = max(1, total_pages)
+                if page > 1:
+                    nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(parent_name, page - 1)))
+                nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent_name, 1)))
+                if page < last_page:
+                    nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent_name, page + 1)))
+                if total_pages > 1:
+                    nav.append(InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(parent_name, last_page)))
+                if nav:
+                    keyboard.append(nav)
+
+                title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
+                await safe_edit_message(query, title, reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+                return
+        except Exception:
+            pass
     else:
         # Handle from_parent suffix first (preserves parent page info while
         # allowing child to open at page 1)
@@ -2414,12 +2477,20 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 # top-level categories view rather than trying to open a
                 # category literally called 'categories'. Handle that case
                 # explicitly here.
-                if parent_origin == 'categories':
-                    back_cb = f"categories_page::{parent_origin_page or 1}"
+                if parent_index:
+                    # Create a stored back-ref that contains the parent's
+                    # compact index so we can render the parent page without
+                    # additional DB round-trips.
+                    back_payload = {"type": "parent_index_back", "parent": parent_origin, "parent_page": parent_origin_page or 1, "parent_index": parent_index, "page_size": PAGE_SIZE}
+                    key = _store_callback_payload(back_payload)
+                    back_cb = f"showcat_ref::{key}"
                 else:
-                    pdoc = await db.categories.find_one({"name": parent_origin})
-                    ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent_origin
-                    back_cb = _shorten_showcat_cb(ppath, parent_origin_page or 1)
+                    if parent_origin == 'categories':
+                        back_cb = f"categories_page::{parent_origin_page or 1}"
+                    else:
+                        pdoc = await db.categories.find_one({"name": parent_origin})
+                        ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent_origin
+                        back_cb = _shorten_showcat_cb(ppath, parent_origin_page or 1)
             except Exception:
                 back_cb = "back_to_cats"
             keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=back_cb)])
