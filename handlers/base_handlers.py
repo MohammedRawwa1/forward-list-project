@@ -1270,21 +1270,18 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         if origin_type == 'global':
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::global::1")]
         elif origin_type == 'coach' and category:
-            # If this coach page was opened from within a category (origin_context set),
-            # prefer Home -> top-level categories page (page 1) and hide on page 1.
-            if origin_context:
-                if page > 1:
-                    breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="categories_page::1")]
-                else:
-                    breadcrumb_buttons = None
-            else:
-                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::coach::{urllib.parse.quote_plus(category)}::1")]
-        elif origin_type == 'category':
-            # For category-origin pages, Home should return to the top-level
-            # categories listing (page 1). Hide the Home button when already
-            # on page 1 so the row doesn't offer a no-op action.
+            # For coach-origin pages, Home should return to the coach's
+            # course list page 1. Hide the Home button when already on page 1.
             if page > 1:
-                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="categories_page::1")]
+                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::coach::{urllib.parse.quote_plus(category)}::1")]
+            else:
+                breadcrumb_buttons = None
+        elif origin_type == 'category' and category:
+            # For category-origin pages, Home should return to the category's
+            # course list page 1 (keep user inside the same category). Hide
+            # the Home button when already on page 1.
+            if page > 1:
+                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::category::{urllib.parse.quote_plus(category)}::1")]
             else:
                 breadcrumb_buttons = None
         else:
@@ -1967,7 +1964,14 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         # Back returns to the correct parent page.
         if parent_origin:
             origin_ctx = parent_origin
-        text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='category', category=category, origin_context=origin_ctx, origin_context_page=parent_origin_page)
+        # Ensure coach lists are fully paginated server-side: compute total
+        # and slice the requested page, then pass `is_page=True` with
+        # `total_count` so `build_courses_page` doesn't re-slice incorrectly.
+        total_courses = len(coach_courses)
+        page_size = PAGE_SIZE
+        start = (page - 1) * page_size
+        page_items = coach_courses[start:start + page_size]
+        text, reply_markup = build_courses_page(page_items, page=page, origin_type='coach', category=coach_name, origin_context=origin_ctx, origin_context_page=parent_origin_page, total_count=total_courses, is_page=True)
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
             return
