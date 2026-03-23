@@ -56,7 +56,32 @@ from contextlib import asynccontextmanager
 # Simple in-memory TTL cache for inexpensive totals; keyed by JSON'd filter.
 _COUNT_CACHE = {}
 _PAGE_CACHE = {}  # key -> (payload, expire_ts)
-PAGE_CACHE_TTL = int(os.getenv("PAGE_CACHE_TTL", "3"))
+PAGE_CACHE_TTL = int(os.getenv("PAGE_CACHE_TTL", "30"))
+# Short in-memory cache for resolved callback payloads to avoid Redis/Mongo
+# round-trips for hot refs. Values: key -> (payload, expire_ts)
+_CALLBACK_RESOLVE_CACHE = {}
+_CALLBACK_RESOLVE_CACHE_MAX = int(os.getenv('CALLBACK_RESOLVE_CACHE_MAX', '2000'))
+
+
+def _set_callback_resolve_cache(key: str, payload, ttl: int = 60):
+    """Set a payload into the small in-process resolve cache with TTL
+    and enforce a maximum size to avoid unbounded memory growth.
+    """
+    try:
+        expire = time.time() + ttl
+        _CALLBACK_RESOLVE_CACHE[key] = (payload, expire)
+        # prune if too large: remove entries with oldest expiry first
+        if len(_CALLBACK_RESOLVE_CACHE) > _CALLBACK_RESOLVE_CACHE_MAX:
+            # sort by expire_ts ascending and drop oldest quarter
+            items = sorted(_CALLBACK_RESOLVE_CACHE.items(), key=lambda kv: kv[1][1])
+            drop = max(1, len(items) // 4)
+            for k, _ in items[:drop]:
+                try:
+                    del _CALLBACK_RESOLVE_CACHE[k]
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 @asynccontextmanager
 async def _db_timing(name: str):
@@ -373,9 +398,19 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
 
 async def _resolve_callback_payload(key: str):
     """Resolve a callback payload by checking in-memory map, then Redis, then MongoDB."""
-    # In-memory first
+    # Short in-process cache for recently-resolved payloads
+    try:
+        now = time.time()
+        entry = _CALLBACK_RESOLVE_CACHE.get(key)
+        if entry and entry[1] > now:
+            return entry[0]
+    except Exception:
+        pass
+
+    # In-memory primary map
     payload = CALLBACK_MAP.get(key)
     if payload:
+        _set_callback_resolve_cache(key, payload, ttl=60)
         return payload
 
     # Redis
@@ -386,6 +421,7 @@ async def _resolve_callback_payload(key: str):
                 import json as _json
                 payload = _json.loads(val)
                 CALLBACK_MAP[key] = payload
+                _set_callback_resolve_cache(key, payload, ttl=60)
                 return payload
     except Exception:
         logger.error("Failed to read callback payload from Redis")
@@ -400,6 +436,7 @@ async def _resolve_callback_payload(key: str):
             payload = doc.get('payload')
             if payload:
                 CALLBACK_MAP[key] = payload
+                _set_callback_resolve_cache(key, payload, ttl=60)
                 return payload
     except Exception:
         logger.error("Failed to read callback payload from MongoDB")
@@ -624,6 +661,21 @@ async def _get_children_flags(db, names, ttl: int = 30):
                     pass
         have |= parents
     return have
+
+
+async def _prefetch_category_page(category_name: str, page: int = 1, page_size: int = None):
+    """Background prefetch: fetch page for `category_name` and warm caches.
+
+    This is fire-and-forget: callers should schedule with
+    `asyncio.create_task(_prefetch_category_page(...))` so UI isn't blocked.
+    """
+    try:
+        if page_size is None:
+            page_size = PAGE_SIZE
+        # call the main fetcher which itself will populate _PAGE_CACHE and Redis
+        await get_courses_by_category(None, category_name, page=page, page_size=page_size)
+    except Exception:
+        pass
 
 # Simple in-memory debounce/rate-limit to ignore very fast repeated
 # callback presses from the same user. This reduces duplicated edits and
@@ -1544,6 +1596,13 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
         child_path = child.get('path') or child.get('name')
         payload = {"type": "showcat", "path": child_path, "from_parent": parent, "parent_page": page}
         key = _store_callback_payload(payload)
+            # Prefetch the child's first courses page in background to
+            # improve perceived responsiveness when users open it.
+            try:
+                if _redis is not None:
+                    asyncio.create_task(_prefetch_category_page(child_path, page=1))
+            except Exception:
+                pass
         try:
             has_children = child.get('name') in names_with_children
             courses = child.get('courses', []) if isinstance(child, dict) else []
@@ -1665,6 +1724,14 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             cb = f"showcat_ref::{key}"
             try:
                 logger.debug("categories_page: button name=%r path=%r", display_name, cat_path)
+            except Exception:
+                pass
+
+            # Prefetch the child's first courses page in background to
+            # improve perceived responsiveness when users open it.
+            try:
+                if _redis is not None:
+                    asyncio.create_task(_prefetch_category_page(cat_path, page=1))
             except Exception:
                 pass
 
@@ -3432,11 +3499,27 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         # large arrays when sorting by course name is not required.
         start = (page - 1) * page_size
         cache_key = f"page:category:{urllib.parse.quote_plus(str(category))}:{page}:{page_size}"
+        # First check in-memory short cache
         cached = _get_cached_page(cache_key)
-        logger.debug("get_courses_by_category: category=%s page=%s page_size=%s cache_key=%s cached=%s", category, page, page_size, cache_key, bool(cached))
+        logger.debug("get_courses_by_category: category=%s page=%s page_size=%s cache_key=%s cached_mem=%s", category, page, page_size, cache_key, bool(cached))
         if cached is not None:
-            logger.debug("get_courses_by_category: returning cached page len=%d", len(cached) if hasattr(cached, '__len__') else 0)
+            logger.debug("get_courses_by_category: returning cached page len=%d (mem)", len(cached) if hasattr(cached, '__len__') else 0)
             return cached
+        # Try Redis-backed page cache (best-effort) to avoid DB read
+        try:
+            if _redis is not None:
+                val = await _redis.get(cache_key)
+                if val is not None:
+                    try:
+                        items = json.loads(val)
+                        # warm in-memory cache and return
+                        _set_cached_page(cache_key, items, ttl=PAGE_CACHE_TTL)
+                        logger.debug("get_courses_by_category: returning cached page len=%d (redis)", len(items) if hasattr(items, '__len__') else 0)
+                        return items
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         async with _db_timing(f"get_courses_by_category:{category}:{page}"):
             try:
