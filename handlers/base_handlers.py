@@ -3826,7 +3826,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             {"$skip": start},
                             {"$limit": page_size + 1}
                         ]
-                        cache_key = f"page:coach:{coach_name}:{page}"
+                        cache_key = f"page:global:{page}"
                         cached = _get_cached_page(cache_key)
                         if cached is not None:
                             items = cached
