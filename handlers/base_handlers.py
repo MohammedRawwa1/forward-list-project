@@ -475,11 +475,23 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                 except Exception:
                     page = int(origin_page or 1)
 
-                # try the requested page first
+                # Evict any short-lived cached page for this category/page
+                try:
+                    cache_key = f"page:category:{urllib.parse.quote_plus(str(raw_cat))}:{page}:{PAGE_SIZE}"
+                    _PAGE_CACHE.pop(cache_key, None)
+                    if _redis is not None:
+                        try:
+                            asyncio.create_task(_redis.delete(cache_key))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # try the requested page first (fresh fetch)
                 try:
                     items = await get_courses_by_category(None, raw_cat, page)
                 except Exception:
-                    # get_courses_by_category expects a user_id first in newer signature
+                    # get_courses_by_category accepts a user_id first in some calls
                     try:
                         items = await get_courses_by_category(0, raw_cat, page)
                     except Exception:
@@ -500,27 +512,49 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                     pass
 
                 # Try alternates and also clamp to page 1 if necessary
-                for alt in alternates:
-                    try:
-                        items = await get_courses_by_category(0, alt, page)
-                    except Exception:
-                        try:
-                            items = await get_courses_by_category(None, alt, page)
-                        except Exception:
-                            items = []
+                        for alt in alternates:
+                            try:
+                                # Evict cached page for alternate
+                                try:
+                                    alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:{page}:{PAGE_SIZE}"
+                                    _PAGE_CACHE.pop(alt_cache, None)
+                                    if _redis is not None:
+                                        try:
+                                            asyncio.create_task(_redis.delete(alt_cache))
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                items = await get_courses_by_category(0, alt, page)
+                            except Exception:
+                                try:
+                                    items = await get_courses_by_category(None, alt, page)
+                                except Exception:
+                                    items = []
                     if items and _has_real_courses(items):
                         new_cb = f"courses::category::{urllib.parse.quote_plus(str(alt))}::{page}"
                         return new_cb
 
                 # try clamping to page 1 as a last-ditch
-                for alt in alternates:
-                    try:
-                        items = await get_courses_by_category(0, alt, 1)
-                    except Exception:
-                        try:
-                            items = await get_courses_by_category(None, alt, 1)
-                        except Exception:
-                            items = []
+                        for alt in alternates:
+                            try:
+                                # Evict cached page for alternate page 1
+                                try:
+                                    alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:1:{PAGE_SIZE}"
+                                    _PAGE_CACHE.pop(alt_cache, None)
+                                    if _redis is not None:
+                                        try:
+                                            asyncio.create_task(_redis.delete(alt_cache))
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                                items = await get_courses_by_category(0, alt, 1)
+                            except Exception:
+                                try:
+                                    items = await get_courses_by_category(None, alt, 1)
+                                except Exception:
+                                    items = []
                     if items and _has_real_courses(items):
                         new_cb = f"courses::category::{urllib.parse.quote_plus(str(alt))}::1"
                         return new_cb
@@ -1508,7 +1542,7 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             raw = await db.categories.find(filter_q, proj).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1)
         have_more = len(raw) > page_size
         cats = raw[:page_size] if have_more else raw
-        logger.info("categories_page: requested page=%s total_est=%s got=%s have_more=%s", page, total, len(cats), have_more)
+        logger.debug("categories_page: requested page=%s total_est=%s got=%s have_more=%s", page, total, len(cats), have_more)
         # Fallback: some data models store top-level categories with parent==None
         # or an empty string. If we got no results, try relaxed filter once.
         if not cats and total == 0:
@@ -1573,32 +1607,15 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         display_name = cat.get('name')
         cb = f"showcat_ref::{key}"
         # Debug: log creation details for buttons to help diagnose encoding/empty-label issues
+        # Only emit minimal debug for non-empty categories; skip expensive
+        # full-document lookups and per-button info logs to speed up listing.
         try:
-            sample_first = None
-            if isinstance(courses, list) and len(courses) > 0:
-                c0 = courses[0]
-                if isinstance(c0, dict):
-                    sample_first = c0.get('name')
-                else:
-                    sample_first = str(c0)
-            # If we believe the category is empty but DB might have more
-            # courses (slice returned none), fetch the full doc for debug.
-            if is_empty:
-                try:
-                    full_doc = await db.categories.find_one({"name": cat.get('name')}, projection={"courses": 1})
-                    full_count = len(full_doc.get('courses', [])) if full_doc and isinstance(full_doc.get('courses', []), list) else 0
-                    sample_names = []
-                    if full_count > 0:
-                        for i, cc in enumerate(full_doc.get('courses', [])[:3]):
-                            try:
-                                sample_names.append(cc.get('name') if isinstance(cc, dict) else str(cc))
-                            except Exception:
-                                sample_names.append(str(cc))
-                    logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s slice_len=%s full_count=%s sample_course=%r sample_names=%r", cat.get('name'), cat_path, cb, is_empty, len(courses) if isinstance(courses, list) else 'N/A', full_count, sample_first, sample_names)
-                except Exception:
-                    logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s sample_course=%r (full doc lookup failed)", cat.get('name'), cat_path, cb, is_empty, sample_first)
-            else:
-                logger.info("categories_page: button created name=%r path=%r cb=%r is_empty=%s sample_course=%r", cat.get('name'), cat_path, cb, is_empty, sample_first)
+            if not is_empty:
+                sample_first = None
+                if isinstance(courses, list) and len(courses) > 0:
+                    c0 = courses[0]
+                    sample_first = c0.get('name') if isinstance(c0, dict) else str(c0)
+                logger.debug("categories_page: button name=%r path=%r is_empty=%s sample_course=%r", cat.get('name'), cat_path, is_empty, sample_first)
         except Exception:
             pass
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
