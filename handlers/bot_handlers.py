@@ -165,9 +165,9 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
                 await safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
                 return
 
-        elif data.startswith("delete_category::"):
-            # Deleting category with courses
-            parts = data.split("::", 1)
+        elif data.startswith("delete_category_"):
+            # Deleting category with courses (underscore-separated)
+            parts = data.split("_", 1)
             if len(parts) == 2:
                 cat_name = urllib.parse.unquote_plus(parts[1])
             else:
@@ -277,7 +277,7 @@ async def delete_item_start(update: Update, context: CallbackContext):
             keyboard.append([
                 InlineKeyboardButton(
                     display_text,
-                    callback_data=f"delete_category::{cat}"
+                    callback_data=f"delete_category_{cat}"
                 )
             ])
         else:
@@ -337,7 +337,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
             courses = cat.get("courses")
             display_name = f"{name} (empty)" if not _has_real_courses(courses) else name
             encoded_name = urllib.parse.quote_plus(name)
-            cb = f"delete_category::{encoded_name}"
+            cb = f"delete_category_{encoded_name}"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
         # Pagination nav: Prev (left), Home (center when not on page 1), Next (right), End always at the end
@@ -412,7 +412,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         courses = cat.get("courses")
         display_name = f"{name} (empty)" if not _has_real_courses(courses) else name
         encoded_name = urllib.parse.quote_plus(name)
-        cb = f"delete_category::{encoded_name}"
+        cb = f"delete_category_{encoded_name}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
@@ -481,8 +481,9 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                 cb = f"delete_summary::category::{key}"
             except Exception:
                 encoded_name = urllib.parse.quote_plus(name)
-                encoded_parent = urllib.parse.quote_plus(parent or "")
-                cb = f"delete_category::{encoded_parent}::{encoded_name}" 
+                # Fallback: use underscore-style single-parameter callback so
+                # the registered `handle_category_deletion` can handle it.
+                cb = f"delete_category_{encoded_name}"
 
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
