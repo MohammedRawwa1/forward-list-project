@@ -327,8 +327,33 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
         if not cat:
             await safe_edit_message(query, "Cannot determine category to summarize. Aborting.", action_key=getattr(query, 'data', None))
             return
-        # collect category + descendants
         try:
+            # Fast-path: if the selected category has no courses and no child categories,
+            # show a quick confirm message without scanning the whole subtree.
+            cat_doc = await db['categories'].find_one({"name": cat}, projection={"courses": 1})
+            if cat_doc is None:
+                await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, 'data', None))
+                return
+
+            has_courses = bool(cat_doc.get('courses'))
+            # Check for any child categories (either explicit parent or path prefix).
+            child_exists = await db['categories'].find_one({
+                "$or": [
+                    {"parent": cat},
+                    {"path": {"$regex": f'^{re.escape(cat)}/'}}
+                ]
+            }, projection={"_id": 1})
+
+            if not has_courses and not child_exists:
+                msg = f"Category '{cat}' is empty. Delete it?"
+                kb = [
+                    [InlineKeyboardButton("Yes, delete", callback_data=f"delete_confirm::category::{key}")],
+                    [InlineKeyboardButton("Cancel", callback_data=f"cancel_delete::{key}")],
+                ]
+                await safe_edit_message(query, msg, reply_markup=InlineKeyboardMarkup(kb), action_key=getattr(query, 'data', None))
+                return
+
+            # Otherwise, fall back to existing behavior: collect category + descendants
             to_delete = set()
             stack = [cat]
             while stack:
@@ -418,19 +443,17 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                         stack.append(name)
 
             cat_count = len(to_delete)
-            course_count = 0
-            for name in to_delete:
-                doc = await db['categories'].find_one({"name": name})
-                if doc:
-                    course_count += len(doc.get('courses', []))
+            # Bulk-fetch documents for all affected categories to avoid N database calls
+            docs = await db['categories'].find({"name": {"$in": list(to_delete)}}, projection={"name": 1, "courses": 1}).to_list(length=cat_count)
+            doc_map = {d.get('name'): d for d in docs}
+            course_count = sum(len(d.get('courses', [])) for d in docs)
 
             # Prepare preview of affected category names (truncate to first 10)
             preview_limit = 10
             entries = []
             for n in to_delete:
                 try:
-                    doc = await db['categories'].find_one({"name": n})
-                    cnt = len(doc.get('courses', [])) if doc else 0
+                    cnt = len(doc_map.get(n, {}).get('courses', []))
                 except Exception:
                     cnt = 0
                 entries.append((n, cnt))
