@@ -11,7 +11,7 @@ from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
 import difflib
-from handlers.base_handlers import safe_edit_message, _store_callback_payload, safe_answer, _has_real_courses
+import handlers.base_handlers as base_handlers
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -111,7 +111,7 @@ async def delete_category(user_id, category_name, db):
             # otherwise proceed with subtree deletion for the selected doc.
             if len(docs) > 1:
                 # Identify empty docs (no real courses)
-                empty_docs = [d for d in docs if not _has_real_courses(d.get('courses'))]
+                empty_docs = [d for d in docs if not base_handlers._has_real_courses(d.get('courses'))]
                 if empty_docs:
                     ids = [d.get('_id') for d in empty_docs]
                     res = await db['categories'].delete_many({"_id": {"$in": ids}})
@@ -178,13 +178,13 @@ async def delete_category(user_id, category_name, db):
 async def handle_course_deletion(update: Update, context: CallbackContext):
     """Handle deletion of courses or empty categories."""
     query = update.callback_query
-    await safe_answer(query)
+    await base_handlers.safe_answer(query)
     data = query.data
     logger.info("[DEL-COURSE] callback data=%s", data)
 
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+        await base_handlers.safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
         return
 
     try:
@@ -195,7 +195,7 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
                 cat_name = urllib.parse.unquote_plus(parts[1])
                 item_name = urllib.parse.unquote_plus(parts[2])
             else:
-                await safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
+                await base_handlers.safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
                 return
 
         elif data.startswith("delete_category_"):
@@ -204,11 +204,11 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
             if len(parts) == 2:
                 cat_name = urllib.parse.unquote_plus(parts[1])
             else:
-                await safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
+                await base_handlers.safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
                 return
 
         else:
-            await safe_edit_message(query, "Unknown deletion action.", action_key=getattr(query, "data", None))
+            await base_handlers.safe_edit_message(query, "Unknown deletion action.", action_key=getattr(query, "data", None))
             return
 
         # Delete the course from the category
@@ -218,27 +218,27 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
         )
 
         if result.modified_count > 0:
-            await safe_edit_message(query, f"Course '{item_name}' deleted successfully from '{cat_name}'! 🎉", action_key=getattr(query, "data", None))
+            await base_handlers.safe_edit_message(query, f"Course '{item_name}' deleted successfully from '{cat_name}'! 🎉", action_key=getattr(query, "data", None))
         else:
             # Category exists but course not found or category was empty
             cat_doc = await db["categories"].find_one({"name": cat_name})
             if cat_doc is None:
-                await safe_edit_message(query, f"Category '{cat_name}' not found.", action_key=getattr(query, "data", None))
+                await base_handlers.safe_edit_message(query, f"Category '{cat_name}' not found.", action_key=getattr(query, "data", None))
             else:
-                await safe_edit_message(query, f"No course named '{item_name}' found in category '{cat_name}'.", action_key=getattr(query, "data", None))
+                await base_handlers.safe_edit_message(query, f"No course named '{item_name}' found in category '{cat_name}'.", action_key=getattr(query, "data", None))
 
     except Exception as e:
         logger.error(f"Error deleting course or category '{cat_name}': {e}", exc_info=True)
-        await safe_edit_message(query, "An error occurred while deleting. Please try again later.", action_key=getattr(query, "data", None))
+        await base_handlers.safe_edit_message(query, "An error occurred while deleting. Please try again later.", action_key=getattr(query, "data", None))
         
 async def handle_cancel_delete_callback(update: Update, context: CallbackContext):
     """Handle cancel_delete_{type}::{encoded_name} and simple cancel_delete callbacks."""
     query = update.callback_query
-    await safe_answer(query)
+    await base_handlers.safe_answer(query)
     data = query.data
     # Accept a variety of cancel formats so all cancel buttons behave nicely.
     if data in ("cancel", "cancel_delete", "cancel_delete_all", "cancel_delete_all_data"):
-        await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
+        await base_handlers.safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
         return
 
     # Normalize payload prefixes created by different flows: "cancel_delete_..." or "cancel_delete::..."
@@ -255,7 +255,7 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
             item_name = urllib.parse.unquote_plus(enc_name)
         except Exception:
             item_name = enc_name
-        await safe_edit_message(
+        await base_handlers.safe_edit_message(
             query,
             f"Deletion of {item_type} '{item_name}' canceled.",
             action_key=getattr(query, "data", None),
@@ -263,7 +263,7 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
         return
 
     # Fallback: just show a friendly cancel message instead of an "Invalid" one.
-    await safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
+    await base_handlers.safe_edit_message(query, "Deletion canceled.", action_key=getattr(query, "data", None))
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
@@ -368,7 +368,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
         for cat in page_cats:
             name = (cat.get("name") or "").strip()
             courses = cat.get("courses")
-            display_name = f"{name} (empty)" if not _has_real_courses(courses) else name
+            display_name = f"{name} (empty)" if not base_handlers._has_real_courses(courses) else name
             encoded_name = urllib.parse.quote_plus(name)
             cb = f"delete_category_{encoded_name}"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
@@ -413,7 +413,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     Callback format: `delete_category_page::<page>`
     """
     query = update.callback_query
-    await safe_answer(query)
+    await base_handlers.safe_answer(query)
     data = query.data
     try:
         _, page_s = data.split("::", 1)
@@ -423,7 +423,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
 
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.")
+        await base_handlers.safe_edit_message(query, "Error: Unable to connect to the database.")
         return
 
     # Only page through child categories (exclude parents/top-level folders)
@@ -443,7 +443,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     for cat in page_cats:
         name = (cat.get("name") or "").strip()
         courses = cat.get("courses")
-        display_name = f"{name} (empty)" if not _has_real_courses(courses) else name
+        display_name = f"{name} (empty)" if not base_handlers._has_real_courses(courses) else name
         encoded_name = urllib.parse.quote_plus(name)
         cb = f"delete_category_{encoded_name}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
@@ -470,7 +470,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
 
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
-    await safe_edit_message(query, "Choose a category to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+    await base_handlers.safe_edit_message(query, "Choose a category to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         
 async def delete_parent_start(update: Update, context: CallbackContext):
     """Show top-level parent categories for deletion."""
@@ -510,7 +510,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                     "category": name,
                     "parent": parent
                 }
-                key = _store_callback_payload(payload)
+                key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_summary::category::{key}"
             except Exception:
                 encoded_name = urllib.parse.quote_plus(name)
@@ -552,7 +552,7 @@ async def delete_all_data_start(update: Update, context: CallbackContext):
 async def confirm_delete_all(update: Update, context: CallbackContext):
     """Confirm and delete all categories and courses."""
     query = update.callback_query
-    await safe_answer(query)  # Acknowledge the callback query
+    await base_handlers.safe_answer(query)  # Acknowledge the callback query
 
     user_id = update.effective_user.id
 
@@ -560,7 +560,7 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
         db = await get_db()  # Await the database connection
         if db is None:
             logger.error(f"Database connection failed for user {user_id}.")
-            await safe_edit_message(query, "Error: Unable to connect to the database. Please try again later.", action_key=getattr(query, 'data', None))
+            await base_handlers.safe_edit_message(query, "Error: Unable to connect to the database. Please try again later.", action_key=getattr(query, 'data', None))
             return ConversationHandler.END
 
         # Perform the deletion of categories (courses embedded inside will be removed)
@@ -568,27 +568,27 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
 
         if result.deleted_count > 0:
             logger.info(f"All categories deleted successfully for user {user_id}.")
-            await safe_edit_message(query, "All categories and their embedded courses have been deleted. 😞", action_key=getattr(query, 'data', None))
+            await base_handlers.safe_edit_message(query, "All categories and their embedded courses have been deleted. 😞", action_key=getattr(query, 'data', None))
         else:
             logger.warning(f"No categories found to delete for user {user_id}.")
-            await safe_edit_message(query, "No categories found to delete. 😞", action_key=getattr(query, 'data', None))
+            await base_handlers.safe_edit_message(query, "No categories found to delete. 😞", action_key=getattr(query, 'data', None))
     except Exception as e:
         logger.error(f"Error confirming delete all data for user {user_id}: {e}", exc_info=True)
-        await safe_edit_message(query, "An error occurred while deleting all data. Please try again later.", action_key=getattr(query, 'data', None))
+        await base_handlers.safe_edit_message(query, "An error occurred while deleting all data. Please try again later.", action_key=getattr(query, 'data', None))
     
     return ConversationHandler.END
     
 # Cancel deletion of all user data
 async def cancel_delete_all_data(update: Update, context: CallbackContext) -> int:
     """Cancel the deletion of all user data."""
-    await safe_answer(update.callback_query)
-    await safe_edit_message(update.callback_query, "Deletion of all data has been canceled.", action_key=getattr(update.callback_query, 'data', None))
+    await base_handlers.safe_answer(update.callback_query)
+    await base_handlers.safe_edit_message(update.callback_query, "Deletion of all data has been canceled.", action_key=getattr(update.callback_query, 'data', None))
     return ConversationHandler.END
 
 async def initiate_delete_item(update: Update, context: CallbackContext, item_type: str, item_name: str):
     """Initiate the deletion of a specific item (course or category) by asking for confirmation."""
     query = update.callback_query
-    await safe_answer(query)
+    await base_handlers.safe_answer(query)
 
     # Construct the confirmation message
     confirmation_message = f"Are you sure you want to delete the {item_type} '{item_name}'? This action cannot be undone. ⚠️"
@@ -601,4 +601,4 @@ async def initiate_delete_item(update: Update, context: CallbackContext, item_ty
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     # Edit the message to prompt for confirmation
-    await safe_edit_message(query, confirmation_message, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    await base_handlers.safe_edit_message(query, confirmation_message, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
