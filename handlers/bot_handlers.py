@@ -101,9 +101,34 @@ async def delete_category(user_id, category_name, db):
     try:
         # Prefer the shared `categories` collection when present (new schema).
         if hasattr(db, 'categories') or 'categories' in getattr(db, '__dict__', {}):
-            # Recursively collect this category and all descendants
+            # Find all documents that match the given name
+            docs = await db['categories'].find({"name": category_name}).to_list(length=BATCH_LIMIT)
+            if not docs:
+                logger.warning(f"Category '{category_name}' not found in categories collection for user {user_id}.")
+                return False
+
+            # If there are multiple docs with same name, remove empty duplicates only (safe),
+            # otherwise proceed with subtree deletion for the selected doc.
+            if len(docs) > 1:
+                # Identify empty docs (no real courses)
+                empty_docs = [d for d in docs if not _has_real_courses(d.get('courses'))]
+                if empty_docs:
+                    ids = [d.get('_id') for d in empty_docs]
+                    res = await db['categories'].delete_many({"_id": {"$in": ids}})
+                    if getattr(res, 'deleted_count', 0) > 0:
+                        logger.info(f"Deleted {res.deleted_count} empty duplicate category docs for '{category_name}'.")
+                        return True
+                    else:
+                        logger.warning(f"Found empty duplicates for '{category_name}' but failed to delete them.")
+                        return False
+                # Ambiguous: multiple non-empty categories with same name — do not delete automatically
+                logger.warning(f"Multiple non-empty categories named '{category_name}' found; refusing to delete to avoid data loss.")
+                return False
+
+            # Exactly one matching document — delete it and its descendants (by name-based traversal)
+            start_doc = docs[0]
             to_delete = set()
-            stack = [category_name]
+            stack = [start_doc.get('name')]
             while stack:
                 curr = stack.pop()
                 if curr in to_delete:
@@ -114,17 +139,25 @@ async def delete_category(user_id, category_name, db):
                     name = ch.get('name')
                     if name and name not in to_delete:
                         stack.append(name)
-            if to_delete:
-                res = await db['categories'].delete_many({"name": {"$in": list(to_delete)}})
+
+            # Delete only the documents that are part of the subtree we discovered (match by _id)
+            to_remove_ids = []
+            for name in to_delete:
+                docs_with_name = await db['categories'].find({"name": name}).to_list(length=BATCH_LIMIT)
+                for d in docs_with_name:
+                    parent = d.get('parent')
+                    # Consider this doc part of the subtree if it's the start doc or its parent is in the subtree
+                    if d.get('_id') == start_doc.get('_id') or (parent in to_delete):
+                        to_remove_ids.append(d.get('_id'))
+
+            if to_remove_ids:
+                res = await db['categories'].delete_many({"_id": {"$in": to_remove_ids}})
                 if getattr(res, 'deleted_count', 0) > 0:
                     logger.info(f"Category '{category_name}' and its descendants deleted for user {user_id}.")
                     return True
                 else:
-                    logger.warning(f"Category '{category_name}' not found in categories collection for user {user_id}.")
+                    logger.warning(f"Failed to delete collected subtree documents for '{category_name}'.")
                     return False
-            else:
-                logger.warning(f"Nothing to delete for category '{category_name}'.")
-                return False
         else:
             # Fallback: legacy per-user schema stored in `users` collection
             result = await db.users.update_one(
