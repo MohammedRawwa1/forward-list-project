@@ -1218,6 +1218,15 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
 
         logger.debug("build_courses_page called: origin_type=%s category=%s page=%s total=%s", origin_type, category, page, effective_total)
 
+        # Compute total pages once and use it consistently to decide
+        # whether to show Next / End buttons. This avoids edge cases
+        # where an imprecise `effective_total` caused a Next button to
+        # appear on the final page.
+        try:
+            total_pages = math.ceil(effective_total / page_size) if effective_total is not None else page
+        except Exception:
+            total_pages = page
+
         if origin_type == 'category' and category:
             text = f"Courses in category '{category}' (page {page}):"
         else:
@@ -1305,7 +1314,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         else:
             prev_cb = f"courses::global::{page-1}"
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-    if effective_total > start + page_size:
+    if page < total_pages:
         if origin_type == 'category' and category:
             if store_page_ref:
                 try:
@@ -1401,7 +1410,7 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         if start > 0:
             prev_cb = f"courses::global::{page-1}" if origin_type == 'global' else prev_cb
             pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-        if effective_total > start + len(display):
+        if page < total_pages:
             next_cb = f"courses::global::{page+1}" if origin_type == 'global' else next_cb
             pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
         if pagination_buttons:
