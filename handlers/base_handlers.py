@@ -2094,7 +2094,18 @@ async def show_coach_handler(update: Update, context: CallbackContext):
         has_more = len(items) > page_size
         coach_courses = items[:page_size]
         coach_courses = sorted(coach_courses, key=lambda c: (c.get('name') or '').lower())
-        total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
+        # Compute accurate total for coach by aggregating on the server when possible
+        try:
+            cnt_doc = await db.categories.aggregate([
+                {"$match": {"courses.coach": coach_name}},
+                {"$unwind": "$courses"},
+                {"$match": {"courses.coach": coach_name}},
+                {"$group": {"_id": None, "count": {"$sum": 1}}}
+            ]).to_list(length=1)
+            total_courses = int(cnt_doc[0].get('count')) if cnt_doc else (page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses)))
+        except Exception:
+            total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
+
         text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True, store_page_ref=True)
     except Exception as e:
         logger.error("Error showing coach courses: %s", e)
