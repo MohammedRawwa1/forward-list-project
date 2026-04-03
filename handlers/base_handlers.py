@@ -1267,17 +1267,27 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
     if start > 0:
         if origin_type == 'category' and category:
             if store_page_ref:
-                # store compact page payload and link to it
+                # store compact page payload and link to it. When the full
+                # `all_courses` list is available we can populate the target
+                # page items; otherwise store only the metadata so the
+                # handler can fetch the page server-side on demand.
                 try:
-                    items_to_store = []
-                    for it in display:
-                        items_to_store.append({
-                            'name': it.get('name') if isinstance(it, dict) else str(it),
-                            'link': it.get('link') if isinstance(it, dict) else None,
-                            'category': it.get('category') if isinstance(it, dict) else category,
-                            'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
-                        })
-                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page-1, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    items_to_store = None
+                    if not is_page and hasattr(all_courses, '__len__'):
+                        start_prev = (page - 2) * page_size
+                        if start_prev >= 0:
+                            slice_items = all_courses[start_prev:start_prev + page_size]
+                            items_to_store = []
+                            for it in slice_items:
+                                items_to_store.append({
+                                    'name': it.get('name') if isinstance(it, dict) else str(it),
+                                    'link': it.get('link') if isinstance(it, dict) else None,
+                                    'category': it.get('category') if isinstance(it, dict) else category,
+                                    'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                                })
+                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page-1, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    if items_to_store is not None:
+                        page_payload['items'] = items_to_store
                     key = _store_callback_payload(page_payload)
                     prev_cb = f"courses_ref::{key}"
                 except Exception:
@@ -1299,15 +1309,21 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         if origin_type == 'category' and category:
             if store_page_ref:
                 try:
-                    items_to_store = []
-                    for it in display:
-                        items_to_store.append({
-                            'name': it.get('name') if isinstance(it, dict) else str(it),
-                            'link': it.get('link') if isinstance(it, dict) else None,
-                            'category': it.get('category') if isinstance(it, dict) else category,
-                            'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
-                        })
-                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page+1, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    items_to_store = None
+                    if not is_page and hasattr(all_courses, '__len__'):
+                        start_next = page * page_size
+                        slice_items = all_courses[start_next:start_next + page_size]
+                        items_to_store = []
+                        for it in slice_items:
+                            items_to_store.append({
+                                'name': it.get('name') if isinstance(it, dict) else str(it),
+                                'link': it.get('link') if isinstance(it, dict) else None,
+                                'category': it.get('category') if isinstance(it, dict) else category,
+                                'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                            })
+                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page+1, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    if items_to_store is not None:
+                        page_payload['items'] = items_to_store
                     key = _store_callback_payload(page_payload)
                     next_cb = f"courses_ref::{key}"
                 except Exception:
@@ -1321,15 +1337,21 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         elif origin_type == 'coach' and category:
             if store_page_ref:
                 try:
-                    items_to_store = []
-                    for it in display:
-                        items_to_store.append({
-                            'name': it.get('name') if isinstance(it, dict) else str(it),
-                            'link': it.get('link') if isinstance(it, dict) else None,
-                            'category': it.get('category') if isinstance(it, dict) else category,
-                            'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
-                        })
-                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page+1, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    items_to_store = None
+                    if not is_page and hasattr(all_courses, '__len__'):
+                        start_next = page * page_size
+                        slice_items = all_courses[start_next:start_next + page_size]
+                        items_to_store = []
+                        for it in slice_items:
+                            items_to_store.append({
+                                'name': it.get('name') if isinstance(it, dict) else str(it),
+                                'link': it.get('link') if isinstance(it, dict) else None,
+                                'category': it.get('category') if isinstance(it, dict) else category,
+                                'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                            })
+                    page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': page+1, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                    if items_to_store is not None:
+                        page_payload['items'] = items_to_store
                     key = _store_callback_payload(page_payload)
                     next_cb = f"courses_ref::{key}"
                 except Exception:
@@ -1422,53 +1444,66 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         else:
             # Default Home goes to the top-level categories view
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
-        if total_pages > 1 and page < total_pages:
-            # build end callback depending on origin type
-            if origin_type == 'category' and category:
-                if store_page_ref:
-                    try:
-                        items_to_store = []
-                        for it in display:
-                            items_to_store.append({
-                                'name': it.get('name') if isinstance(it, dict) else str(it),
-                                'link': it.get('link') if isinstance(it, dict) else None,
-                                'category': it.get('category') if isinstance(it, dict) else category,
-                                'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
-                            })
-                        page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': total_pages, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
-                        key = _store_callback_payload(page_payload)
-                        end_cb = f"courses_ref::{key}"
-                    except Exception:
+            if total_pages > 1 and page < total_pages:
+                # build end callback depending on origin type
+                if origin_type == 'category' and category:
+                    if store_page_ref:
+                        try:
+                            items_to_store = None
+                            # compute items for final page only when full list is available
+                            if not is_page and hasattr(all_courses, '__len__'):
+                                start_end = (total_pages - 1) * page_size
+                                slice_items = all_courses[start_end:start_end + page_size]
+                                items_to_store = []
+                                for it in slice_items:
+                                    items_to_store.append({
+                                        'name': it.get('name') if isinstance(it, dict) else str(it),
+                                        'link': it.get('link') if isinstance(it, dict) else None,
+                                        'category': it.get('category') if isinstance(it, dict) else category,
+                                        'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                                    })
+                            page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': total_pages, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                            if items_to_store is not None:
+                                page_payload['items'] = items_to_store
+                            key = _store_callback_payload(page_payload)
+                            end_cb = f"courses_ref::{key}"
+                        except Exception:
+                            end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
+                            if origin_context:
+                                end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                    else:
                         end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
                         if origin_context:
                             end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
-                else:
-                    end_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{total_pages}"
-                    if origin_context:
-                        end_cb = end_cb + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
-            elif origin_type == 'global':
-                end_cb = f"courses::global::{total_pages}"
-            elif origin_type == 'coach' and category:
-                if store_page_ref:
-                    try:
-                        items_to_store = []
-                        for it in display:
-                            items_to_store.append({
-                                'name': it.get('name') if isinstance(it, dict) else str(it),
-                                'link': it.get('link') if isinstance(it, dict) else None,
-                                'category': it.get('category') if isinstance(it, dict) else category,
-                                'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
-                            })
-                        page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': total_pages, 'items': items_to_store, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
-                        key = _store_callback_payload(page_payload)
-                        end_cb = f"courses_ref::{key}"
-                    except Exception:
+                elif origin_type == 'global':
+                    end_cb = f"courses::global::{total_pages}"
+                elif origin_type == 'coach' and category:
+                    if store_page_ref:
+                        try:
+                            items_to_store = None
+                            if not is_page and hasattr(all_courses, '__len__'):
+                                start_end = (total_pages - 1) * page_size
+                                slice_items = all_courses[start_end:start_end + page_size]
+                                items_to_store = []
+                                for it in slice_items:
+                                    items_to_store.append({
+                                        'name': it.get('name') if isinstance(it, dict) else str(it),
+                                        'link': it.get('link') if isinstance(it, dict) else None,
+                                        'category': it.get('category') if isinstance(it, dict) else category,
+                                        'id': str(it.get('id')) if isinstance(it, dict) and it.get('id') is not None else None,
+                                    })
+                            page_payload = {'type': 'courses_page', 'origin_type': origin_type, 'category': category, 'page': total_pages, 'origin_context': origin_context, 'origin_context_page': origin_context_page, 'total_count': effective_total, 'page_size': page_size}
+                            if items_to_store is not None:
+                                page_payload['items'] = items_to_store
+                            key = _store_callback_payload(page_payload)
+                            end_cb = f"courses_ref::{key}"
+                        except Exception:
+                            end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
+                    else:
                         end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
                 else:
-                    end_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{total_pages}"
-            else:
-                end_cb = f"courses::global::{total_pages}"
-            breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
+                    end_cb = f"courses::global::{total_pages}"
+                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
         # insert breadcrumb row (Home +/- End) when present
         if breadcrumb_buttons:
             keyboard.insert(0, breadcrumb_buttons)
