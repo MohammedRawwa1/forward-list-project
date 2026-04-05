@@ -116,7 +116,7 @@ async def add_course_start(update: Update, context: CallbackContext):
         nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
-    if total_pages > 1:
+    if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
     if nav:
         keyboard.append(nav)
@@ -426,7 +426,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
         if page < last_page:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
 
-        if total_pages > 1:
+        if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
         if nav:
             keyboard.append(nav)
@@ -483,7 +483,7 @@ async def addparent_page(update: Update, context: CallbackContext):
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
 
-    if total_pages > 1:
+    if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
     if nav:
         keyboard.append(nav)
@@ -560,8 +560,8 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
 
-    # End: always provide when multiple pages
-    if total_pages > 1:
+    # End: only provide when not already on the last page
+    if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
     if nav:
         keyboard.append(nav)
