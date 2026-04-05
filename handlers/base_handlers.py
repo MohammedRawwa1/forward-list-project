@@ -1674,8 +1674,8 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
     # Next (right)
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"createcat_page::{page+1}"))
-    # End (always rightmost when multiple pages)
-    if total_pages > 1:
+    # End (only show when there are more pages beyond the current one)
+    if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"createcat_page::{last_page}"))
 
     if nav:
@@ -1795,7 +1795,7 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent, 1)))
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent, page+1)))
-    if total_pages > 1:
+    if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(parent, last_page)))
     if nav:
         keyboard.append(nav)
@@ -2455,7 +2455,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent_name, 1)))
                 if page < last_page:
                     nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent_name, page + 1)))
-                if total_pages > 1:
+                # Only show End when there are pages after the current one
+                if total_pages > 1 and page < last_page:
                     nav.append(InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(parent_name, last_page)))
                 if nav:
                     keyboard.append(nav)
@@ -2649,8 +2650,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(cat_path, page-1)))
 
-        # Put End between Prev and Next; if on first page, place End at the left
-        if total_pages > 1:
+        # Put End between Prev and Next; only show it when there's a later page
+        if total_pages > 1 and page < last_page:
             end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_path, last_page))
             if page == 1:
                 nav.insert(0, end_btn)
