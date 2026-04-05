@@ -378,7 +378,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
         total_pages = (total - 1) // page_size + 1 if total else 1
         last_page = max(1, total_pages)
         # Desired order: Next (left), Home (center when applicable), End, Previous (right-most)
-        if total > (start + page_size):
+        if page < last_page:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
 
         # Home (center) — show only when not on page 1 (appears starting page 2)
@@ -386,7 +386,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
             nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"delete_category_page::1"))
 
         # End button sends user to the last page (keep near right)
-        if total_pages > 1:
+        if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
 
         if page > 1:
@@ -452,14 +452,14 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
     # Desired order: Next (left), Home (center when applicable), End, Previous (right-most)
-    if total > (start + page_size):
+    if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
 
     # Home (center) — show only when not on page 1 (appears starting page 2)
     if page > 1:
         nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"delete_category_page::1"))
 
-    if total_pages > 1:
+    if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
 
     if page > 1:
