@@ -12,6 +12,7 @@ from handlers.db_connection import get_db
 import urllib.parse
 import difflib
 import handlers.base_handlers as base_handlers
+import os
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -26,20 +27,19 @@ def normalize_name(name: str) -> str:
     return name.strip().casefold()
     
 # Helper function to generate pagination keyboard
-async def generate_pagination_keyboard(items_list, page, page_size, callback_pattern):
-    """Generate pagination buttons for lists of items."""
+async def generate_pagination_keyboard(total_count, page, page_size, callback_pattern):
+    """Generate pagination buttons for lists of items using a total count.
+
+    `total_count` is the total number of items available for pagination. Home
+    is only shown when not already on page 1.
+    """
     pagination_buttons = []
     if page > 1:
-        pagination_buttons.append(
-            InlineKeyboardButton("⬅️ Previous", callback_data=f"page_{callback_pattern}_{page-1}")
-        )
-    pagination_buttons.append(
-        InlineKeyboardButton("🏠 Home", callback_data="home")
-    )
-    if len(items_list) > page * page_size:
-        pagination_buttons.append(
-            InlineKeyboardButton("➡️ Next", callback_data=f"page_{callback_pattern}_{page+1}")
-        )
+        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"page_{callback_pattern}_{page-1}"))
+        pagination_buttons.append(InlineKeyboardButton("🏠 Home", callback_data="home"))
+    # Show Next only when there are items beyond the current page
+    if total_count > page * page_size:
+        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"page_{callback_pattern}_{page+1}"))
     return pagination_buttons
 
 
@@ -47,23 +47,31 @@ async def generate_pagination_keyboard(items_list, page, page_size, callback_pat
 async def generate_keyboard(user_id, items, callback_pattern, page=1, page_size=20):
     db = await get_db()
     try:
-        user = await db.users.find_one({"user_id": user_id})
-        if not user or items not in user:
+        # Use DB-backed pagination to avoid loading huge user arrays into memory.
+        # 1) get the total count of the array using aggregation
+        count_pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$project": {"count": {"$size": {"$ifNull": [f"${items}", []]}}}}
+        ]
+        cnt_res = await db.users.aggregate(count_pipeline).to_list(length=1)
+        total_count = int(cnt_res[0].get('count')) if cnt_res else 0
+        if total_count == 0:
             return None
 
-        items_list = user[items]
+        # 2) fetch one page slice using projection + $slice
         start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        paginated_items = items_list[start_index:end_index]
+        proj = {items: {"$slice": [start_index, page_size]}}
+        doc = await db.users.find_one({"user_id": user_id}, proj)
+        if not doc or items not in doc:
+            return None
+        paginated_items = doc[items] or []
 
         keyboard = [
             [InlineKeyboardButton(item, callback_data=f"{callback_pattern}_{item}")]
             for item in paginated_items
         ]
 
-        pagination_buttons = await generate_pagination_keyboard(
-            items_list, page, page_size, callback_pattern
-        )
+        pagination_buttons = await generate_pagination_keyboard(total_count, page, page_size, callback_pattern)
         if pagination_buttons:
             keyboard.append(pagination_buttons)
 
@@ -179,6 +187,16 @@ async def handle_course_deletion(update: Update, context: CallbackContext):
     """Handle deletion of courses or empty categories."""
     query = update.callback_query
     await base_handlers.safe_answer(query)
+    # Owner-only guard for course deletion
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return
     data = query.data
     logger.info("[DEL-COURSE] callback data=%s", data)
 
@@ -268,6 +286,16 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
 
 async def delete_item_start(update: Update, context: CallbackContext):
     """Show every course and empty category in the DB as inline buttons."""
+    # Owner-only: restrict delete UI
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(update.message.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await update.message.reply_text("Unauthorized")
+        return
     db = await get_db()
     # Fetch minimal fields and bound result size to avoid loading huge docs
     cats = await db.categories.find({}, projection={"name": 1, "courses": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
@@ -337,6 +365,17 @@ async def delete_category_start(update: Update, context: CallbackContext):
 
     Uses `delete_category_page::<n>` callbacks to navigate pages.
     """
+    # Owner-only: restrict delete UI
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(update.message.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await update.message.reply_text("Unauthorized")
+        return
+
     db = await get_db()
 
     if db is None:
@@ -414,6 +453,16 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     """
     query = update.callback_query
     await base_handlers.safe_answer(query)
+    # Owner-only guard for delete pagination callbacks
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return
     data = query.data
     try:
         _, page_s = data.split("::", 1)
@@ -475,6 +524,17 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
 async def delete_parent_start(update: Update, context: CallbackContext):
     """Show top-level parent categories for deletion."""
 
+    # Owner-only: restrict delete UI
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(update.message.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await update.message.reply_text("Unauthorized")
+        return
+
     db = await get_db()
 
     if db is None:
@@ -534,6 +594,17 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                                 
 async def delete_all_data_start(update: Update, context: CallbackContext):
     """Start the delete-all-data confirmation conversation."""
+    # Owner-only: restrict destructive action to bot owner
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(update.message.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await update.message.reply_text("Unauthorized")
+        return
+
     # Prompt user with confirmation buttons; ConversationHandler expects DELETE_ALL state
     keyboard = [
         [InlineKeyboardButton("Yes, delete all", callback_data="confirm_delete_all")],
@@ -554,7 +625,16 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
     query = update.callback_query
     await base_handlers.safe_answer(query)  # Acknowledge the callback query
 
-    user_id = update.effective_user.id
+    # Owner-only guard
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
 
     try:
         db = await get_db()  # Await the database connection
@@ -589,6 +669,16 @@ async def initiate_delete_item(update: Update, context: CallbackContext, item_ty
     """Initiate the deletion of a specific item (course or category) by asking for confirmation."""
     query = update.callback_query
     await base_handlers.safe_answer(query)
+    # Owner-only guard for initiating deletes
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return
 
     # Construct the confirmation message
     confirmation_message = f"Are you sure you want to delete the {item_type} '{item_name}'? This action cannot be undone. ⚠️"
