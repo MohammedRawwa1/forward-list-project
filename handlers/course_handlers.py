@@ -442,6 +442,13 @@ async def parent_selected(update: Update, context: CallbackContext):
             keyboard.append(nav)
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+    # Ensure Back button is present immediately (so page 1 shows it too)
+    try:
+        if parent:
+            parent_page = context.user_data.get('last_category_page', 1)
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"addparent_page::{parent_page}")])
+    except Exception:
+        pass
 
     await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     return ADD_COACH
