@@ -348,20 +348,33 @@ async def parent_selected(update: Update, context: CallbackContext):
         sorted_children = sorted(child_cats, key=lambda c: (c.get('name') or '').lower())
         page = 1
         page_size = COURSE_PAGE_SIZE
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_children = sorted_children[start:end]
+        # Use DB-provided page slice (already limited)
+        page_children = sorted_children
         for child in page_children:
             # Skip emptiness checks to keep pagination responsive in the add flow.
             display = f"{child.get('name')}"
             keyboard.append([InlineKeyboardButton(display, callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
-        # Navigation row
+        # Navigation row — follow desired ordering rules
         nav = []
         total_pages = (child_count - 1) // page_size + 1 if child_count else 1
         last_page = max(1, total_pages)
-        if total_pages > 1 and page < last_page:
-            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+        if total_pages > 1:
+            if page == 1:
+                # First page: Next, End (if there are more pages)
+                if page < last_page:
+                    nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+                    nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+            elif page < last_page:
+                # Middle pages: Prev, Home, End, Next
+                nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
+                nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
+                nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+                nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+            else:
+                # Last page: Previous and Home only
+                if page > 1:
+                    nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
+                    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
         if nav:
             keyboard.append(nav)
         # Also allow manual entry or no coach
@@ -409,9 +422,20 @@ async def parent_selected(update: Update, context: CallbackContext):
         nav = []
         total_pages = (total_coaches - 1) // page_size + 1 if total_coaches else 1
         last_page = max(1, total_pages)
-        if total_pages > 1 and page < last_page:
-            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+        if total_pages > 1:
+            if page == 1:
+                if page < last_page:
+                    nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+                    nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+            elif page < last_page:
+                nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
+                nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
+                nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
+                nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
+            else:
+                if page > 1:
+                    nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
+                    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
         if nav:
             keyboard.append(nav)
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
@@ -498,11 +522,11 @@ async def addcoach_page(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
     keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
 
-    # Insert a Back-to-parents button when a parent context exists
+    # Append a Back button (bottom-most) when a parent context exists
     try:
         if parent:
             parent_page = context.user_data.get('last_category_page', 1)
-            keyboard.insert(0, [InlineKeyboardButton("🔙 Back", callback_data=f"addparent_page::{parent_page}")])
+            keyboard.append([InlineKeyboardButton("Back", callback_data=f"addparent_page::{parent_page}")])
     except Exception:
         pass
 
@@ -554,18 +578,23 @@ async def addparent_page(update: Update, context: CallbackContext):
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
-    if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
-
-    # Show Home for add flow only when not on the first page
-    if page > 1:
-        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
-
-    if page < last_page:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
-
-    if total_pages > 1 and page < last_page:
-        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
+    if total_pages > 1:
+        if page == 1:
+            # First page: Next, End
+            if page < last_page:
+                nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
+                nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
+        elif page < last_page:
+            # Middle pages: Prev, Home, End, Next
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
+            nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
+            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page+1}"))
+        else:
+            # Last page: Previous and Home only
+            if page > 1:
+                nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page-1}"))
+                nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addparent_page::1"))
     if nav:
         keyboard.append(nav)
 
@@ -642,19 +671,23 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
     # Layout: Prev (left), Home (center), Next (right); End always at the end.
-    if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page-1}"))
-
-    # Home for /add (go to first page) — show only when not on page 1
-    if page > 1:
-        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcat_page::1"))
-
-    if page < last_page:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
-
-    # End: only provide when not already on the last page
-    if total_pages > 1 and page < last_page:
-        nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
+    if total_pages > 1:
+        if page == 1:
+            # First page: Next, End
+            if page < last_page:
+                nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
+                nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
+        elif page < last_page:
+            # Middle pages: Prev, Home, End, Next
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page-1}"))
+            nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcat_page::1"))
+            nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
+        else:
+            # Last page: Previous and Home only
+            if page > 1:
+                nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page-1}"))
+                nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcat_page::1"))
     if nav:
         keyboard.append(nav)
 
