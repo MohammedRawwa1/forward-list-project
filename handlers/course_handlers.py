@@ -6,6 +6,7 @@ from pymongo.errors import PyMongoError
 import logging
 import re
 import urllib.parse
+import os
 from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload
 import uuid
 
@@ -80,6 +81,24 @@ async def add_course_start(update: Update, context: CallbackContext):
 
     If no top-level parents exist, fall back to asking for the course name.
     """
+    # Owner-only: restrict /add to configured bot owner
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = None
+    try:
+        user_id = update.message.from_user.id if getattr(update, 'message', None) and getattr(update.message, 'from_user', None) else getattr(update.effective_user, 'id', None)
+    except Exception:
+        user_id = None
+    if owner_id is not None and user_id != owner_id:
+        try:
+            await update.message.reply_text("Unauthorized")
+        except Exception:
+            pass
+        return ConversationHandler.END
+
     try:
         db = await get_db()
         # Use server-side pagination for top-level parents
@@ -268,6 +287,16 @@ async def parent_selected(update: Update, context: CallbackContext):
     """Callback when a parent is chosen. Presents coach choices next."""
     query = update.callback_query
     await safe_answer(query)
+    # Owner-only guard for add flow callbacks
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
     raw = query.data
     parent = None
     origin_page = None
@@ -339,23 +368,46 @@ async def parent_selected(update: Update, context: CallbackContext):
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
     else:
-        # Fallback: derive coaches from existing course 'coach' fields via distinct
-        try:
-            filter_q = {"$or": [{"name": parent}, {"parent": parent}]} if parent else {}
-            coaches_list = await db.categories.distinct("courses.coach", filter_q)
-            coaches = sorted([c for c in coaches_list if c])
-        except Exception:
-            coaches = []
-        # Paginate derived coaches when many
+        # Fallback: derive coaches from existing course 'coach' fields using DB-side
+        # aggregation to avoid pulling a huge distinct list into memory.
         page = 1
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
-        end = start + page_size
-        page_coaches = coaches[start:end]
+        try:
+            filter_q = {"$or": [{"name": parent}, {"parent": parent}]} if parent else {}
+
+            # Count distinct coaches
+            count_pipeline = [
+                {"$match": filter_q},
+                {"$unwind": "$courses"},
+                {"$match": {"courses.coach": {"$exists": True, "$ne": ""}}},
+                {"$group": {"_id": "$courses.coach"}},
+                {"$count": "count"}
+            ]
+            cnt_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+            total_coaches = int(cnt_res[0].get('count')) if cnt_res else 0
+
+            # Fetch one page of distinct coach names (sorted A→Z)
+            pipeline = [
+                {"$match": filter_q},
+                {"$unwind": "$courses"},
+                {"$match": {"courses.coach": {"$exists": True, "$ne": ""}}},
+                {"$group": {"_id": "$courses.coach"}},
+                {"$sort": {"_id": 1}},
+                {"$skip": start},
+                {"$limit": page_size},
+            ]
+            docs = await db.categories.aggregate(pipeline).to_list(length=page_size)
+            page_coaches = [d.get('_id') for d in docs if d and d.get('_id')]
+        except Exception:
+            page_coaches = []
+            total_coaches = 0
+
         for coach in page_coaches:
             keyboard.append([InlineKeyboardButton(coach, callback_data=f"addcoach::{urllib.parse.quote_plus(coach)}")])
+
         nav = []
-        total_pages = (len(coaches) - 1) // page_size + 1 if coaches else 1
+        total_pages = (total_coaches - 1) // page_size + 1 if total_coaches else 1
         last_page = max(1, total_pages)
         if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
@@ -377,6 +429,16 @@ async def addcoach_page(update: Update, context: CallbackContext):
     """
     query = update.callback_query
     await safe_answer(query)
+    # Owner guard for add flow pagination
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
     data = query.data
     parts = data.split("::")
     if len(parts) < 3:
@@ -420,8 +482,9 @@ async def addcoach_page(update: Update, context: CallbackContext):
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
 
-        # Home for add flow: go to first page for this parent
-        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
+        # Home for add flow: go to first page for this parent (only show on later pages)
+        if page > 1:
+            nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
 
         if page < last_page:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
@@ -446,6 +509,16 @@ async def addparent_page(update: Update, context: CallbackContext):
     """
     query = update.callback_query
     await safe_answer(query)
+    # Owner guard for add parent pagination
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
     data = query.data
     parts = data.split("::")
     try:
@@ -504,6 +577,16 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     is_query = query is not None
     if is_query:
         await safe_answer(query)
+        # Owner guard for add cat pagination
+        try:
+            owner_env = os.getenv('BOT_OWNER_ID')
+            owner_id = int(owner_env) if owner_env else None
+        except Exception:
+            owner_id = None
+        user_id = getattr(query.from_user, 'id', None)
+        if owner_id is not None and user_id != owner_id:
+            await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+            return ConversationHandler.END
         data = query.data
         parts = data.split("::")
         try:
@@ -554,8 +637,9 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page-1}"))
 
-    # Home for /add (go to first page)
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcat_page::1"))
+    # Home for /add (go to first page) — show only when not on page 1
+    if page > 1:
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcat_page::1"))
 
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page+1}"))
@@ -579,6 +663,16 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
 async def coach_selected(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
+    # Owner guard for coach selection inside add flow
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
     encoded = query.data.split("::", 1)[1]
     if encoded == "__manual__":
         # Ask for manual entry
@@ -605,6 +699,16 @@ async def category_selected(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
     query = update.callback_query
     await safe_answer(query)
+    # Owner guard for final category selection in add flow
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
 
     # Support both legacy `addcat_<name>` and new `addcat::<name>::<page>` formats
     raw = query.data
@@ -693,6 +797,16 @@ async def add_course_category(update: Update, context: CallbackContext):
     """Save the selected category and add the course to the database."""
     query = update.callback_query
     await safe_answer(query)
+    # Owner guard for final add flow callback
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
 
     # Support both legacy `addcat_<name>` and new `addcat::<name>::<page>` formats
     raw = query.data
