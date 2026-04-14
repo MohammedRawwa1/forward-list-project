@@ -1434,7 +1434,11 @@ def build_courses_page(all_courses, page: int = 1, origin_type: str = 'global', 
         breadcrumb_buttons = None
         # Decide Home callback and visibility based on origin
         if origin_type == 'global':
-            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::global::1")]
+            # Show Home for global listing only when not on the first page
+            if page > 1:
+                breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=f"courses::global::1")]
+            else:
+                breadcrumb_buttons = None
         elif origin_type == 'coach' and category:
             # For coach-origin pages, Home should return to the coach's
             # course list page 1. Hide the Home button when already on page 1.
@@ -1792,7 +1796,8 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     last_page = max(1, total_pages)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(parent, page-1)))
-    nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent, 1)))
+        # Only show Home when not already on the first page
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent, 1)))
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent, page+1)))
     if total_pages > 1 and page < last_page:
@@ -2452,7 +2457,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 last_page = max(1, total_pages)
                 if page > 1:
                     nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(parent_name, page - 1)))
-                nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent_name, 1)))
+                    # Only show Home when not already on the first page
+                    nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent_name, 1)))
                 if page < last_page:
                     nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent_name, page + 1)))
                 # Only show End when there are pages after the current one
@@ -2993,7 +2999,10 @@ async def list_courses_by_category(update: Update, context: CallbackContext, cat
             keyboard.append(pagination_buttons)
 
         try:
-            breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
+            breadcrumb_buttons = []
+            # Show Home only when not already on the first page
+            if page > 1:
+                breadcrumb_buttons.append(InlineKeyboardButton("🏠 Home", callback_data="back_to_cats"))
             if total_pages > 1 and page < total_pages:
                 breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"))
             breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=_shorten_showcat_cb(category_name, page)))
@@ -3039,6 +3048,23 @@ async def handle_categories_pagination(update: Update, context: CallbackContext)
 logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
     # Present existing categories as optional parents
+    # Owner-only: restrict create category to bot owner
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = None
+    try:
+        user_id = getattr(update.effective_user, 'id', None) or (update.message.from_user.id if getattr(update, 'message', None) and getattr(update.message, 'from_user', None) else None)
+    except Exception:
+        user_id = None
+    if owner_id is not None and user_id != owner_id:
+        try:
+            await update.message.reply_text("Unauthorized")
+        except Exception:
+            pass
+        return ConversationHandler.END
     try:
         logger.info("create_category invoked: user=%s chat=%s", getattr(update, 'effective_user', None).id if getattr(update, 'effective_user', None) else None, getattr(update, 'effective_chat', None).id if getattr(update, 'effective_chat', None) else None)
     except Exception:
@@ -3071,6 +3097,16 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
     """Callback handler to choose a parent for a new category."""
     query = update.callback_query
     await safe_answer(query)
+    # Owner-only guard for create category callbacks
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return ConversationHandler.END
     encoded = query.data.split("::", 1)[1]
     parent = urllib.parse.unquote_plus(encoded) if encoded else None
     # Store chosen parent in user_data for the following name prompt
@@ -3094,6 +3130,24 @@ async def handle_create_category_parent_text(update: Update, context: CallbackCo
     Stores chosen parent in `context.user_data['new_cat_parent']` and prompts
     for the new category name (same as the callback-based flow).
     """
+    # Owner-only guard for message-based create flows
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = None
+    try:
+        user_id = update.message.from_user.id if getattr(update, 'message', None) and getattr(update.message, 'from_user', None) else getattr(update.effective_user, 'id', None)
+    except Exception:
+        user_id = None
+    if owner_id is not None and user_id != owner_id:
+        try:
+            await update.message.reply_text("Unauthorized")
+        except Exception:
+            pass
+        return ConversationHandler.END
+
     parent = update.message.text.strip() or None
     if parent:
         context.user_data['new_cat_parent'] = parent
@@ -3107,6 +3161,23 @@ async def handle_create_category_parent_text(update: Update, context: CallbackCo
 
 async def create_parent(update: Update, context: CallbackContext):
     """Create a top-level parent category (explicit command)."""
+    # Owner-only: restrict create parent to bot owner
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = None
+    try:
+        user_id = getattr(update.effective_user, 'id', None) or (update.message.from_user.id if getattr(update, 'message', None) and getattr(update.message, 'from_user', None) else None)
+    except Exception:
+        user_id = None
+    if owner_id is not None and user_id != owner_id:
+        try:
+            await update.message.reply_text("Unauthorized")
+        except Exception:
+            pass
+        return ConversationHandler.END
     # mark that the new category should be top-level
     context.user_data['new_cat_parent'] = None
     await update.message.reply_text("Enter the new parent category name:")
@@ -3703,7 +3774,20 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 except Exception:
                     pass
 
-                nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                # Show Delete Course only to the configured owner (if set)
+                try:
+                    user_id = getattr(query.from_user, 'id', None)
+                    owner_env = os.getenv('BOT_OWNER_ID')
+                    try:
+                        owner_id = int(owner_env) if owner_env else None
+                    except Exception:
+                        owner_id = None
+                    if owner_id is not None and user_id != owner_id:
+                        nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb)]
+                    else:
+                        nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                except Exception:
+                    nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
                 extra_row = []
                 try:
                     # Coaches are represented as child categories under the
@@ -3727,7 +3811,19 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 keyboard = [nav_row, extra_row]
             else:
                 # default behavior: show Back + Delete and an optional home/parent row
-                nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                try:
+                    user_id = getattr(query.from_user, 'id', None)
+                    owner_env = os.getenv('BOT_OWNER_ID')
+                    try:
+                        owner_id = int(owner_env) if owner_env else None
+                    except Exception:
+                        owner_id = None
+                    if owner_id is not None and user_id != owner_id:
+                        nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb)]
+                    else:
+                        nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
+                except Exception:
+                    nav_row = [InlineKeyboardButton("🔙 Back", callback_data=back_cb), InlineKeyboardButton("Delete Course", callback_data=delete_cb)]
                 extra_row = None
                 try:
                     if origin_type != 'global':
