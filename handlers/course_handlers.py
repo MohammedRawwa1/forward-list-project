@@ -49,6 +49,8 @@ async def setup_course_handlers(application):
             ADD_COACH: [
                 CallbackQueryHandler(coach_selected, pattern=r"^addcoach::"),
                 CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page::"),
+                # Allow navigating back to parent pages while in the coach-selection state
+                CallbackQueryHandler(addparent_page, pattern=r"^addparent_page::"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, coach_manual_entry),
             ],
 
@@ -526,12 +528,12 @@ async def addcoach_page(update: Update, context: CallbackContext):
     try:
         if parent:
             parent_page = context.user_data.get('last_category_page', 1)
-            keyboard.append([InlineKeyboardButton("Back", callback_data=f"addparent_page::{parent_page}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=f"addparent_page::{parent_page}")])
     except Exception:
         pass
 
     await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
-    return
+    return ADD_COACH
 
 
 async def addparent_page(update: Update, context: CallbackContext):
@@ -599,7 +601,7 @@ async def addparent_page(update: Update, context: CallbackContext):
         keyboard.append(nav)
 
     await safe_edit_message(query, f"Choose a parent category for the new course (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
-    return
+    return ADD_PARENT
 
 
 async def addcat_page(update_or_message, context: CallbackContext, *, page: int = 1):
