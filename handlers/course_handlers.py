@@ -467,28 +467,28 @@ async def addcoach_page(update: Update, context: CallbackContext):
 
     keyboard = []
     if children:
+        # `children` is already a DB-side page (skip/limit). Sort locally to be deterministic
         sorted_children = sorted(children, key=lambda c: (c.get('name') or '').lower())
+        # Use the DB count for total pages (not the length of this page)
         page_size = COURSE_PAGE_SIZE
-        start = (page - 1) * page_size
-        end = start + page_size
-        page_children = sorted_children[start:end]
-        for child in page_children:
+        total_pages = (total_children - 1) // page_size + 1 if total_children else 1
+        last_page = max(1, total_pages)
+
+        # Build coach rows from the current DB page
+        for child in sorted_children:
             keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
 
         nav = []
-        total_pages = (len(sorted_children) - 1) // page_size + 1 if sorted_children else 1
-        last_page = max(1, total_pages)
-        # Layout: Prev (left), Home (center), Next (right); End always at the end.
+        # Prev
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page-1}"))
-
-        # Home for add flow: go to first page for this parent (only show on later pages)
+        # Home (center) — show only when not on first page
         if page > 1:
             nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1"))
-
+        # Next
         if page < last_page:
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page+1}"))
-
+        # End
         if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}"))
         if nav:
@@ -497,6 +497,14 @@ async def addcoach_page(update: Update, context: CallbackContext):
     # Always include manual/no-coach options
     keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
     keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+
+    # Insert a Back-to-parents button when a parent context exists
+    try:
+        if parent:
+            parent_page = context.user_data.get('last_category_page', 1)
+            keyboard.insert(0, [InlineKeyboardButton("🔙 Back", callback_data=f"addparent_page::{parent_page}")])
+    except Exception:
+        pass
 
     await safe_edit_message(query, "Choose a coach for this course (or enter one manually):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
     return
