@@ -2905,7 +2905,7 @@ async def list_courses(update: Update, context: CallbackContext):
         start = (page - 1) * page_size
         items_pipeline = [
             {"$unwind": "$courses"},
-            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "id": "$courses.id"}},
             {"$sort": {"name": 1}},
             {"$skip": start},
             {"$limit": page_size + 1}
@@ -3230,8 +3230,9 @@ async def handle_category_name(update: Update, context: CallbackContext):
         # categories; otherwise show the parent's children list.
         try:
             if not parent:
-                # Show top-level categories using paginated view
-                await createcat_page(update.message, context, page=1)
+                # Show top-level categories using the same paginated view as `/categories`
+                # so newly-created parents behave like the categories listing.
+                await categories_page(update.message, context, page=1)
             else:
                 # Show paginated children of the parent including the newly created category
                 await children_page(update.message, context, parent, page=1)
@@ -3910,7 +3911,14 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
                 proj = {"courses": {"$slice": [start, page_size]}, "name": 1, "path": 1}
                 doc = await db.categories.find_one({"$or": [{"name": category}, {"path": category}]}, projection=proj)
                 if doc and isinstance(doc.get('courses'), list):
-                    items = [{"name": c.get('name'), "link": c.get('link'), "category": (doc.get('name') or doc.get('path'))} for c in doc.get('courses')]
+                    # Include the embedded course `id` (when present) and optional coach
+                    items = [{
+                        "id": (c.get('id') if isinstance(c, dict) else None),
+                        "name": (c.get('name') if isinstance(c, dict) else None),
+                        "link": (c.get('link') if isinstance(c, dict) else None),
+                        "category": (doc.get('name') or doc.get('path')),
+                        "coach": (c.get('coach') if isinstance(c, dict) else None),
+                    } for c in doc.get('courses')]
                 else:
                     items = []
                 logger.debug("get_courses_by_category: fetched slice start=%s len=%s from category=%s", start, len(items), category)
@@ -3924,7 +3932,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
                 items_pipeline = [
                     {"$match": {"$or": [{"name": category}, {"path": category}]}},
                     {"$unwind": "$courses"},
-                    {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                    {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "id": "$courses.id", "coach": "$courses.coach"}},
                     {"$sort": {"name": 1}},
                     {"$skip": start},
                     {"$limit": page_size}
