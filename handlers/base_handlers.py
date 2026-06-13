@@ -8,6 +8,15 @@ import re  # For URL validation
 from pymongo.errors import DuplicateKeyError
 import urllib.parse
 import os
+import uuid
+UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
+
+def is_uuid(s: str) -> bool:
+    try:
+        return bool(UUID_RE.match(str(s).strip()))
+    except Exception:
+        return False
 from datetime import datetime, timedelta
 import hashlib
 import json
@@ -3208,13 +3217,42 @@ async def handle_category_name(update: Update, context: CallbackContext):
 
         # Check for a chosen parent stored in user_data
         parent = context.user_data.pop('new_cat_parent', None)
-        doc = {"name": category_name, "created_by": user_id}
+        # assign a stable UUID for categories so parents/coaches can be
+        # referenced by id like courses do. Keep Mongo _id untouched.
+        doc = {"name": category_name, "created_by": user_id, "id": str(uuid.uuid4())}
         if parent:
-            # try to resolve parent's path if present
+            # try to resolve parent's path if present; parent is stored as
+            # name for backward-compatibility. Keep parent field as name.
             parent_doc = await db.categories.find_one({"name": parent})
             parent_path = parent_doc.get('path') if parent_doc and parent_doc.get('path') else parent
             doc['parent'] = parent
             doc['path'] = f"{parent_path}/{category_name}"
+
+        # Duplicate checks: detect same-name siblings or top-level parents
+        try:
+            if parent:
+                # same parent + name conflict
+                existing_child = await coll.find_one({"name": category_name, "parent": parent})
+                if existing_child:
+                    await update.message.reply_text(f"A child category named '{category_name}' already exists under '{parent}' (id: {existing_child.get('id') or existing_child.get('_id')}). Please choose a different name.")
+                    return CREATE_CAT_NAME
+                # warn if there are existing courses under the parent that use this name as a coach
+                try:
+                    coach_conflict = await coll.count_documents({"name": parent, "courses.coach": category_name})
+                    if coach_conflict > 0:
+                        await update.message.reply_text(f"Warning: There are existing courses under '{parent}' with a coach name '{category_name}'. Creating a child category with the same name may cause ambiguity. Please pick a different name.")
+                        return CREATE_CAT_NAME
+                except Exception:
+                    pass
+            else:
+                # top-level parent duplicate check (name or path)
+                existing_parent = await coll.find_one({"$or": [{"name": category_name}, {"path": category_name}]})
+                if existing_parent:
+                    await update.message.reply_text(f"A parent category named '{category_name}' already exists (id: {existing_parent.get('id') or existing_parent.get('_id')}). Please choose a different name.")
+                    return CREATE_CAT_NAME
+        except Exception:
+            # non-fatal; proceed to attempt insert which may still fail with DuplicateKeyError
+            pass
 
         result = await coll.insert_one(doc)
         logger.info(f"[CAT-INSERT-DONE] _id={result.inserted_id}")
