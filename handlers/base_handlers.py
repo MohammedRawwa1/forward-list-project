@@ -2580,6 +2580,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # category display name and path
     cat_name = category_doc.get('name')
     cat_path = category_doc.get('path') or cat_name
+    # Remember the last viewed category so `/add` can preselect it
+    try:
+        context.user_data['last_viewed_category'] = cat_path
+    except Exception:
+        pass
     if not category_doc:
         await safe_edit_message(query, f'Category “{cat_name}” not found.', action_key=getattr(query, 'data', None))
         return
@@ -2821,6 +2826,24 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, page))])
             else:
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+
+        # Provide an inline "Add course" button that starts the /add flow with
+        # this category preselected. Store a short payload reference so the
+        # ConversationHandler can be entered via callback without exceeding
+        # Telegram callback_data limits.
+        try:
+            payload = {"category": cat_name}
+            try:
+                # include stable id when available so handlers can prefer it
+                if category_doc and category_doc.get('id'):
+                    payload['category_id'] = category_doc.get('id')
+            except Exception:
+                pass
+            key = _store_callback_payload(payload)
+            keyboard.append([InlineKeyboardButton("➕ Add course", callback_data=f"addparent_ref::{key}")])
+        except Exception:
+            # Non-fatal: fall back to text hint only
+            pass
 
         await safe_edit_message(
             query,

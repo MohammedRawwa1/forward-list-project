@@ -7,7 +7,7 @@ import logging
 import re
 import urllib.parse
 import os
-from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload
+from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload, _resolve_callback_payload
 import uuid
 
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 async def setup_course_handlers(application):
     application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("add", add_course_start)],
+        entry_points=[CommandHandler("add", add_course_start), CallbackQueryHandler(parent_selected, pattern=r"^addparent_ref::")],
         states={
             # First: pick a parent/top-level category
             ADD_PARENT: [
@@ -103,12 +103,55 @@ async def add_course_start(update: Update, context: CallbackContext):
 
     try:
         db = await get_db()
+    except Exception:
+        db = None
+
+    # If the user recently viewed a category, preselect it as the parent for /add.
+    last_viewed = None
+    try:
+        last_viewed = context.user_data.pop('last_viewed_category', None)
+    except Exception:
+        last_viewed = None
+
+    if last_viewed and db is not None:
+        try:
+            # Resolve either by name or path to get the canonical category name
+            parent_doc = await db.categories.find_one({"$or": [{"name": last_viewed}, {"path": last_viewed}]})
+            parent_name = parent_doc.get('name') if parent_doc else last_viewed
+            context.user_data['course_parent'] = parent_name
+            # Immediately show coach-selection UI (message reply) and continue the conversation
+            # Replicate parent_selected's child-category-as-coach behavior but as a message response
+            try:
+                # Find child categories (coaches represented as categories)
+                child_count = await db.categories.count_documents({"parent": parent_name})
+                page_size = COURSE_PAGE_SIZE
+                start = 0
+                child_cats = await db.categories.find({"parent": parent_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+                keyboard = []
+                if child_cats:
+                    for child in child_cats:
+                        keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
+                    keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
+                    keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+                    # Back button returns to categories listing
+                    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+                    await update.message.reply_text(f"Choose a coach for new course under '{parent_name}':", reply_markup=InlineKeyboardMarkup(keyboard))
+                    return ADD_COACH
+            except Exception:
+                # If anything fails, fall back to the normal flow below
+                context.user_data.pop('course_parent', None)
+        except Exception:
+            # ignore and continue to default add flow
+            context.user_data.pop('course_parent', None)
+
+    # Default behavior: list top-level parents for selection
+    try:
         # Use server-side pagination for top-level parents
-        total = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]})
+        total = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}) if db is not None else 0
         page = 1
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
-        parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size) if db is not None else []
     except Exception:
         total = 0
         parents = []
@@ -302,7 +345,15 @@ async def parent_selected(update: Update, context: CallbackContext):
     raw = query.data
     parent = None
     origin_page = None
-    if raw.startswith("addparent::"):
+    if raw.startswith("addparent_ref::"):
+        # Resolve stored payload reference created by empty-category Add button
+        key = raw.split("::", 1)[1]
+        payload = await _resolve_callback_payload(key)
+        if not payload:
+            await safe_edit_message(query, "Reference expired. Please reopen the category and try again.", action_key=getattr(query, 'data', None))
+            return ConversationHandler.END
+        parent = payload.get('category') or payload.get('category_name')
+    elif raw.startswith("addparent::"):
         parts = raw.split("::")
         # parts -> ['addparent', '<name>' (optional), '<page>' (optional)]
         if len(parts) >= 2 and parts[1] != "":
