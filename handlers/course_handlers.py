@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 async def setup_course_handlers(application):
     application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("add", add_course_start), CallbackQueryHandler(parent_selected, pattern=r"^addparent_ref::")],
+        entry_points=[CommandHandler("add", add_course_start)],
         states={
             # First: pick a parent/top-level category
             ADD_PARENT: [
@@ -106,40 +106,53 @@ async def add_course_start(update: Update, context: CallbackContext):
     except Exception:
         db = None
 
-    # If the user recently viewed a category, preselect it as the parent for /add.
+    # If the user recently viewed a category (or coach), preselect it as the parent for /add.
     last_viewed = None
     try:
         last_viewed = context.user_data.pop('last_viewed_category', None)
+        if not last_viewed:
+            # fall back to stored id if available
+            last_viewed = context.user_data.pop('last_viewed_category_id', None)
     except Exception:
         last_viewed = None
 
     if last_viewed and db is not None:
         try:
-            # Resolve either by name or path to get the canonical category name
-            parent_doc = await db.categories.find_one({"$or": [{"name": last_viewed}, {"path": last_viewed}]})
-            parent_name = parent_doc.get('name') if parent_doc else last_viewed
-            context.user_data['course_parent'] = parent_name
-            # Immediately show coach-selection UI (message reply) and continue the conversation
-            # Replicate parent_selected's child-category-as-coach behavior but as a message response
-            try:
-                # Find child categories (coaches represented as categories)
-                child_count = await db.categories.count_documents({"parent": parent_name})
-                page_size = COURSE_PAGE_SIZE
-                start = 0
-                child_cats = await db.categories.find({"parent": parent_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
-                keyboard = []
-                if child_cats:
-                    for child in child_cats:
-                        keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
-                    keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
-                    keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
-                    # Back button returns to categories listing
-                    keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-                    await update.message.reply_text(f"Choose a coach for new course under '{parent_name}':", reply_markup=InlineKeyboardMarkup(keyboard))
-                    return ADD_COACH
-            except Exception:
-                # If anything fails, fall back to the normal flow below
-                context.user_data.pop('course_parent', None)
+            # Resolve by name/path/id to get the canonical category doc
+            query_q = {"$or": [{"name": last_viewed}, {"path": last_viewed}, {"id": last_viewed}]}
+            parent_doc = await db.categories.find_one(query_q)
+            if parent_doc:
+                # If the resolved doc has a parent, it is a child category (coach)
+                if parent_doc.get('parent'):
+                    # The user is viewing a coach child — preselect the parent and coach
+                    context.user_data['course_parent'] = parent_doc.get('parent')
+                    context.user_data['course_coach'] = parent_doc.get('name')
+                    await update.message.reply_text(f"Adding a course inside '{parent_doc.get('name')}' (coach).\nEnter the course name:")
+                    return ADD_NAME
+                else:
+                    # It's a top-level parent — preselect it and show coach-selection UI
+                    parent_name = parent_doc.get('name')
+                    context.user_data['course_parent'] = parent_name
+                    try:
+                        child_count = await db.categories.count_documents({"parent": parent_name})
+                        page_size = COURSE_PAGE_SIZE
+                        start = 0
+                        child_cats = await db.categories.find({"parent": parent_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+                        keyboard = []
+                        if child_cats:
+                            for child in child_cats:
+                                keyboard.append([InlineKeyboardButton(child.get('name'), callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}")])
+                            keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
+                            keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
+                            # Back button returns to categories listing
+                            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+                            await update.message.reply_text(f"Choose a coach for new course under '{parent_name}':", reply_markup=InlineKeyboardMarkup(keyboard))
+                            return ADD_COACH
+                    except Exception:
+                        context.user_data.pop('course_parent', None)
+            else:
+                # resolved doc not found — fall back to default UI
+                pass
         except Exception:
             # ignore and continue to default add flow
             context.user_data.pop('course_parent', None)

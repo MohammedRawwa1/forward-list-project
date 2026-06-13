@@ -2214,6 +2214,26 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             # use child's embedded courses
             for crs in coach_child.get('courses', []):
                 coach_courses.append({"name": crs.get('name'), "link": crs.get('link'), "category": coach_name})
+            # Remember that the user is viewing this coach child category so
+            # `/add` can automatically target this exact location (child category).
+            try:
+                # prefer storing the canonical path when available
+                last_view = coach_child.get('path') or coach_child.get('name')
+                context.user_data['last_viewed_category'] = last_view
+                # also store explicit ids to allow id-based resolution later
+                try:
+                    if coach_child.get('id'):
+                        context.user_data['last_viewed_category_id'] = coach_child.get('id')
+                except Exception:
+                    pass
+                # store parent for quick resolution
+                try:
+                    if coach_child.get('parent'):
+                        context.user_data['last_viewed_category_parent'] = coach_child.get('parent')
+                except Exception:
+                    pass
+            except Exception:
+                pass
         else:
             # Fallback: look for courses in the parent category that have a 'coach' field
             category_doc = await db.categories.find_one({'name': category})
@@ -2831,20 +2851,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
         # this category preselected. Store a short payload reference so the
         # ConversationHandler can be entered via callback without exceeding
         # Telegram callback_data limits.
-        try:
-            payload = {"category": cat_name}
-            try:
-                # include stable id when available so handlers can prefer it
-                if category_doc and category_doc.get('id'):
-                    payload['category_id'] = category_doc.get('id')
-            except Exception:
-                pass
-            key = _store_callback_payload(payload)
-            keyboard.append([InlineKeyboardButton("➕ Add course", callback_data=f"addparent_ref::{key}")])
-        except Exception:
-            # Non-fatal: fall back to text hint only
-            pass
-
         await safe_edit_message(
             query,
             f'Category “{cat_name}” is empty.\nUse /add to populate it.',
