@@ -127,7 +127,13 @@ async def add_course_start(update: Update, context: CallbackContext):
                     # The user is viewing a coach child — preselect the parent and coach
                     context.user_data['course_parent'] = parent_doc.get('parent')
                     context.user_data['course_coach'] = parent_doc.get('name')
-                    await update.message.reply_text(f"Adding a course inside '{parent_doc.get('name')}' (coach).\nEnter the course name:")
+                    # Mention the coach and its parent in plain text (not breadcrumb)
+                    coach_name = parent_doc.get('name')
+                    coach_parent = parent_doc.get('parent')
+                    if coach_parent:
+                        await update.message.reply_text(f"Adding a course inside coach '{coach_name}' under parent '{coach_parent}'.\nEnter the course name:")
+                    else:
+                        await update.message.reply_text(f"Adding a course inside '{coach_name}' (coach).\nEnter the course name:")
                     return ADD_NAME
                 else:
                     # It's a top-level parent — preselect it and show coach-selection UI
