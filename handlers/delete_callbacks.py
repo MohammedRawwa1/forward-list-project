@@ -4,7 +4,7 @@ from database.mongo_handler import MongoDB
 import re
 import urllib.parse
 import logging
-from handlers.base_handlers import safe_edit_message, _resolve_callback_payload, safe_answer
+from handlers.base_handlers import safe_edit_message, _resolve_callback_payload, safe_answer, is_uuid
 import os
 logger = logging.getLogger(__name__)
 # Batch limit to avoid loading very large result sets into memory
@@ -33,33 +33,84 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
         return
 
     # Recursively collect this category and all descendants, then delete them.
-    try:
-        to_delete = set()
-        stack = [cat]
-        while stack:
-            curr = stack.pop()
-            if curr in to_delete:
-                continue
-            to_delete.add(curr)
-            # Match child categories by explicit parent field or by path prefix
-            children = await db['categories'].find({
-                "$or": [
-                    {"parent": curr},
-                    {"path": {"$regex": f'^{re.escape(curr)}/'}}
-                ]
-                }, {"name": 1}).to_list(length=BATCH_LIMIT)
-            for ch in children:
-                name = ch.get('name')
-                if name and name not in to_delete:
-                    stack.append(name)
-        if to_delete:
-            res = await db['categories'].delete_many({"name": {"$in": list(to_delete)}})
-            await safe_edit_message(query, f"Deleted {getattr(res, 'deleted_count', 0)} categories (including '{cat}'). ✅", action_key=getattr(query, 'data', None))
-        else:
-            await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, 'data', None))
-    except Exception as e:
-        logger.exception("Error deleting category '%s': %s", cat, e)
-        await safe_edit_message(query, "An error occurred while deleting the category.", action_key=getattr(query, 'data', None))
+        try:
+            # Prefer id/path-based resolution to avoid removing same-named categories
+            # in unrelated parts of the tree. Fall back to name-based deletion only
+            # when path/id information cannot be resolved.
+            payload = None
+            try:
+                # If the original callback used a stored ref (delete_category_{key} or similar),
+                # the `cat` here is the quoted payload; try to resolve via CALLBACK_MAP
+                # by checking whether `cat` looks like a 16-char hex key used by _store_callback_payload.
+                if isinstance(cat, str) and len(cat) == 16 and re.match(r'^[0-9a-fA-F]{16}$', cat):
+                    from handlers.base_handlers import CALLBACK_MAP
+                    payload = CALLBACK_MAP.get(cat)
+            except Exception:
+                payload = None
+
+            cat_doc = None
+            if payload and isinstance(payload, dict) and payload.get('category'):
+                # If payload supplies an explicit category id, use it
+                try:
+                    cat_id = payload.get('category_id') or payload.get('id')
+                    if cat_id:
+                        cat_doc = await db['categories'].find_one({"id": cat_id}, projection={"path": 1, "id": 1, "name": 1})
+                except Exception:
+                    cat_doc = None
+
+            # If no payload or id-based resolve, try to find by path or name as before
+            if not cat_doc:
+                cat_doc = await db['categories'].find_one({"$or": [{"path": cat}, {"name": cat}]}, projection={"path": 1, "id": 1, "name": 1})
+
+            if cat_doc and cat_doc.get('path'):
+                base_path = cat_doc.get('path')
+                # find all documents whose path equals the base_path or starts with base_path + '/'
+                docs = await db['categories'].find({
+                    "$or": [
+                        {"path": base_path},
+                        {"path": {"$regex": f'^{re.escape(base_path)}/'}}
+                    ]
+                }, {"_id": 1, "id": 1, "name": 1, "path": 1}).to_list(length=BATCH_LIMIT)
+                if docs:
+                    ids = [d.get('_id') for d in docs if d.get('_id')]
+                    try:
+                        res = await db['categories'].delete_many({"_id": {"$in": ids}})
+                        label = f" (id: {cat_doc.get('id')})" if cat_doc and cat_doc.get('id') else ""
+                        await safe_edit_message(query, f"Deleted {getattr(res, 'deleted_count', 0)} categories (including '{cat}'){label}. ✅", action_key=getattr(query, 'data', None))
+                    except Exception as e:
+                        logger.exception("Error deleting by _id list: %s", e)
+                        await safe_edit_message(query, "Failed to delete categories. ❌", action_key=getattr(query, 'data', None))
+                else:
+                    await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, 'data', None))
+            else:
+                # Fallback: no path available — preserve existing behavior but
+                # limit the recursive discovery to explicit parent links and
+                # delete only the discovered subtree names.
+                to_delete = set()
+                stack = [cat]
+                while stack:
+                    curr = stack.pop()
+                    if curr in to_delete:
+                        continue
+                    to_delete.add(curr)
+                    children = await db['categories'].find({
+                        "$or": [
+                            {"parent": curr},
+                            {"path": {"$regex": f'^{re.escape(curr)}/'}}
+                        ]
+                    }, {"name": 1}).to_list(length=BATCH_LIMIT)
+                    for ch in children:
+                        name = ch.get('name')
+                        if name and name not in to_delete:
+                            stack.append(name)
+                if to_delete:
+                    res = await db['categories'].delete_many({"name": {"$in": list(to_delete)}})
+                    await safe_edit_message(query, f"Deleted {getattr(res, 'deleted_count', 0)} categories (including '{cat}'). ✅", action_key=getattr(query, 'data', None))
+                else:
+                    await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, 'data', None))
+        except Exception as e:
+            logger.exception("Error deleting category '%s': %s", cat, e)
+            await safe_edit_message(query, "An error occurred while deleting the category.", action_key=getattr(query, 'data', None))
 
 # ----------  delete single item  ----------
 async def handle_item_deletion(update: Update, context: CallbackContext):
@@ -80,20 +131,44 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
     data = query.data
     db = await MongoDB.get_db()
 
-    if data.startswith("delete_item::"):
-        payload = data.replace("delete_item::", "", 1)
-        parts = payload.split("::", 1)
-        if len(parts) == 2:
-            cat = urllib.parse.unquote_plus(parts[0])
-            item = urllib.parse.unquote_plus(parts[1])
-            # remove the course from the category
-            res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+        if data.startswith("delete_item_ref::"):
+            # Stored payload reference (preferred) — resolves to exact category id
+            key = data.split("::", 1)[1]
+            payload = await _resolve_callback_payload(key)
+            if not payload:
+                await safe_edit_message(query, "Reference expired. Please reopen the list and try again.", action_key=getattr(query, 'data', None))
+                return
+            cat = payload.get('category')
+            item = payload.get('name')
+            cat_id = payload.get('category_id')
+            if cat_id:
+                res = await db['categories'].update_one({"id": cat_id}, {"$pull": {"courses": {"name": item}}})
+            else:
+                res = await db['categories'].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
             if res.modified_count:
                 await safe_edit_message(query, f"Course ‘{item}’ deleted from category ‘{cat}’. ✅", action_key=getattr(query, 'data', None))
                 return
             else:
                 await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, 'data', None))
                 return
+
+        if data.startswith("delete_item::"):
+            payload = data.replace("delete_item::", "", 1)
+            parts = payload.split("::", 1)
+            if len(parts) == 2:
+                cat_raw = urllib.parse.unquote_plus(parts[0])
+                item = urllib.parse.unquote_plus(parts[1])
+                # If the category token looks like a UUID, prefer id-based deletion
+                if is_uuid(cat_raw):
+                    res = await db['categories'].update_one({"id": cat_raw}, {"$pull": {"courses": {"name": item}}})
+                else:
+                    res = await db['categories'].update_one({"name": cat_raw}, {"$pull": {"courses": {"name": item}}})
+                if res.modified_count:
+                    await safe_edit_message(query, f"Course ‘{item}’ deleted from category ‘{cat_raw}’. ✅", action_key=getattr(query, 'data', None))
+                    return
+                else:
+                    await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, 'data', None))
+                    return
 
     # legacy underscore-style fallback: pull from any category that contains the course
     item = data.split("_", 2)[2] if "_" in data else data

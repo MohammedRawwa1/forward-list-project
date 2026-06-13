@@ -13,6 +13,7 @@ import urllib.parse
 import difflib
 import handlers.base_handlers as base_handlers
 import os
+import uuid
 
 # Logger setup
 logger = logging.getLogger(__name__)
@@ -298,7 +299,17 @@ async def delete_item_start(update: Update, context: CallbackContext):
         return
     db = await get_db()
     # Fetch minimal fields and bound result size to avoid loading huge docs
-    cats = await db.categories.find({}, projection={"name": 1, "courses": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
+    cats = await db.categories.find({}, projection={"name": 1, "courses": 1, "id": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
+
+    # Ensure categories have stable UUIDs so delete actions can target by id
+    for c in cats:
+        if not c.get('id'):
+            try:
+                new_id = str(uuid.uuid4())
+                await db['categories'].update_one({'_id': c.get('_id')}, {'$set': {'id': new_id}})
+                c['id'] = new_id
+            except Exception:
+                pass
 
     # Sort categories safely
     cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
@@ -307,6 +318,7 @@ async def delete_item_start(update: Update, context: CallbackContext):
 
     for cat in cats:
         category_name = (cat.get("name") or "").strip()
+        category_id = cat.get('id')
         courses = cat.get("courses")
 
         if courses:
@@ -316,13 +328,15 @@ async def delete_item_start(update: Update, context: CallbackContext):
                 all_items.append({
                     "type": "course",
                     "name": course_name,
-                    "category": category_name
+                    "category": category_name,
+                    "category_id": category_id
                 })
         else:
             # No courses → offer deleting the category itself
             all_items.append({
                 "type": "category",
-                "category": category_name
+                "category": category_name,
+                "category_id": category_id
             })
 
     if not all_items:
@@ -333,22 +347,36 @@ async def delete_item_start(update: Update, context: CallbackContext):
     for c in all_items:
         if c.get('type') == 'category':
             # Empty category — show category name and delete_category callback
-            cat = urllib.parse.quote_plus(c["category"])
             display_text = f"{c['category']}"
+            try:
+                payload = {"category": c['category'], "id": c.get('category_id')}
+                key = base_handlers._store_callback_payload(payload)
+                cb = f"delete_category_{key}"
+            except Exception:
+                cat = urllib.parse.quote_plus(c["category"])
+                cb = f"delete_category_{cat}"
             keyboard.append([
                 InlineKeyboardButton(
                     display_text,
-                    callback_data=f"delete_category_{cat}"
+                    callback_data=cb
                 )
             ])
         else:
-            cat = urllib.parse.quote_plus(c["category"])
-            name = urllib.parse.quote_plus(c["name"])
             display_text = f"{c['category']} → {c['name']}"
+            # Persist a small payload so deletion resolves by category id
+            try:
+                payload = {"category": c['category'], "category_id": c.get('category_id'), "name": c['name']}
+                key = base_handlers._store_callback_payload(payload)
+                cb = f"delete_item_ref::{key}"
+            except Exception:
+                cat = urllib.parse.quote_plus(c["category"])
+                name = urllib.parse.quote_plus(c["name"])
+                cb = f"delete_item::{cat}::{name}"
+
             keyboard.append([
                 InlineKeyboardButton(
                     display_text,
-                    callback_data=f"delete_item::{cat}::{name}"
+                    callback_data=cb
                 )
             ])
 
@@ -403,13 +431,37 @@ async def delete_category_start(update: Update, context: CallbackContext):
             await update.message.reply_text("No categories available to delete.")
             return
 
+        # Ensure categories on this page have stable UUIDs
+        for c in page_cats:
+            if not c.get('id'):
+                try:
+                    new_id = str(uuid.uuid4())
+                    await db['categories'].update_one({'_id': c.get('_id')}, {'$set': {'id': new_id}})
+                    c['id'] = new_id
+                except Exception:
+                    pass
+
         keyboard = []
         for cat in page_cats:
             name = (cat.get("name") or "").strip()
+            parent = (cat.get("parent") or "").strip() if cat.get('parent') else None
             courses = cat.get("courses")
-            display_name = f"{name} (empty)" if not base_handlers._has_real_courses(courses) else name
-            encoded_name = urllib.parse.quote_plus(name)
-            cb = f"delete_category_{encoded_name}"
+            # Show parent context to avoid ambiguous choices: "Parent → Child"
+            if parent:
+                display_name = f"{parent} → {name}"
+            else:
+                display_name = f"{name} (no parent)"
+
+            # Persist a small payload containing the category id so deletion
+            # resolves by id rather than name. Fall back to name-based cb.
+            try:
+                payload = {"category": name, "id": cat.get('id'), "parent": parent, "path": cat.get('path')}
+                key = base_handlers._store_callback_payload(payload)
+                cb = f"delete_category_{key}"
+            except Exception:
+                encoded_name = urllib.parse.quote_plus(name)
+                cb = f"delete_category_{encoded_name}"
+
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
         # Pagination nav: Prev (left), Home (center when not on page 1), Next (right), End always at the end
@@ -488,13 +540,32 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
     page_cats = await cursor.to_list(length=page_size)
 
+    # Ensure categories on this page have stable UUIDs
+    for c in page_cats:
+        if not c.get('id'):
+            try:
+                new_id = str(uuid.uuid4())
+                await db['categories'].update_one({'_id': c.get('_id')}, {'$set': {'id': new_id}})
+                c['id'] = new_id
+            except Exception:
+                pass
+
     keyboard = []
     for cat in page_cats:
         name = (cat.get("name") or "").strip()
+        parent = (cat.get("parent") or "").strip() if cat.get('parent') else None
         courses = cat.get("courses")
-        display_name = f"{name} (empty)" if not base_handlers._has_real_courses(courses) else name
-        encoded_name = urllib.parse.quote_plus(name)
-        cb = f"delete_category_{encoded_name}"
+        if parent:
+            display_name = f"{parent} → {name}"
+        else:
+            display_name = f"{name} (no parent)"
+        try:
+            payload = {"category": name, "id": cat.get('id'), "parent": parent, "path": cat.get('path')}
+            key = base_handlers._store_callback_payload(payload)
+            cb = f"delete_category_{key}"
+        except Exception:
+            encoded_name = urllib.parse.quote_plus(name)
+            cb = f"delete_category_{encoded_name}"
         keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
     nav = []
