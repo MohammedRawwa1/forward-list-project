@@ -250,7 +250,7 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
 
         # Add a search-specific breadcrumb and back button to the keyboard
         # We need to append search nav to the existing reply_markup
-        existing_kb = reply_markup.inline_keyboard if reply_markup else []
+        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
         total_pages = max(1, math.ceil(total / page_size))
 
         # Build the search navigation row
@@ -313,7 +313,7 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
             )
             return
 
-        existing_kb = reply_markup.inline_keyboard if reply_markup else []
+        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
@@ -370,7 +370,7 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
             store_page_ref=False,
         )
 
-        existing_kb = reply_markup.inline_keyboard if reply_markup else []
+        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
@@ -489,7 +489,7 @@ async def search_category_courses_pagination_callback(update: Update, context: C
             store_page_ref=False,
         )
 
-        existing_kb = reply_markup.inline_keyboard if reply_markup else []
+        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
