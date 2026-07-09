@@ -45,6 +45,27 @@ from handlers.atlas_search import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------  helper: extract only course rows from build_courses_page keyboard  ---------------
+
+def _extract_course_rows(existing_kb: list) -> list:
+    """Filter out breadcrumb, pagination, and back-button rows from
+    `build_courses_page` output, keeping only the actual course rows.
+
+    Course rows have exactly 2 buttons where the first button has a URL
+    (the course name/link). All other rows (Home, ⏭️ End, ⬅️ Previous,
+    ➡️ Next, 🔙 Back) are stripped so search-specific nav can be added.
+    """
+    if not existing_kb:
+        return []
+    try:
+        return [
+            row for row in existing_kb
+            if len(row) == 2 and row[0].url
+        ]
+    except Exception:
+        return list(existing_kb)
+
+
 # ---------------  callback entry points  ---------------
 
 async def search_courses_callback(update: Update, context: CallbackContext):
@@ -248,9 +269,11 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
             await update.message.reply_text("No courses found matching your query. 😕")
             return
 
-        # Add a search-specific breadcrumb and back button to the keyboard
-        # We need to append search nav to the existing reply_markup
-        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
+        # Strip non-course rows from the builder's output, keeping only
+        # actual course entries. Then add search-specific navigation.
+        existing_kb = _extract_course_rows(
+            list(reply_markup.inline_keyboard) if reply_markup else []
+        )
         total_pages = max(1, math.ceil(total / page_size))
 
         # Build the search navigation row
@@ -313,7 +336,9 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
             )
             return
 
-        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
+        existing_kb = _extract_course_rows(
+            list(reply_markup.inline_keyboard) if reply_markup else []
+        )
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
@@ -370,7 +395,9 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
             store_page_ref=False,
         )
 
-        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
+        existing_kb = _extract_course_rows(
+            list(reply_markup.inline_keyboard) if reply_markup else []
+        )
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
@@ -489,7 +516,9 @@ async def search_category_courses_pagination_callback(update: Update, context: C
             store_page_ref=False,
         )
 
-        existing_kb = list(reply_markup.inline_keyboard) if reply_markup else []
+        existing_kb = _extract_course_rows(
+            list(reply_markup.inline_keyboard) if reply_markup else []
+        )
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
