@@ -81,6 +81,14 @@ from handlers.delete_callbacks import handle_category_deletion, handle_item_dele
 from handlers.delete_callbacks import handle_delete_ref, handle_delete_confirm, handle_delete_summary
 from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
 
+# Search handlers
+from handlers.search_handlers import (
+    get_search_conversation_handler,
+    search_courses_pagination_callback,
+    search_categories_pagination_callback,
+    search_category_courses_pagination_callback,
+)
+
 from dotenv import load_dotenv
 import logging
 import os
@@ -348,6 +356,18 @@ async def setup_handlers(application: Application):
 
     # ---------- thumbnails ----------
     await setup_thumbnail_handlers(application)
+
+    # ---------- search handlers ----------
+    application.add_handler(get_search_conversation_handler())
+    application.add_handler(
+        CallbackQueryHandler(search_courses_pagination_callback, pattern=r"^search_courses_pg::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(search_categories_pagination_callback, pattern=r"^search_categories_pg::")
+    )
+    application.add_handler(
+        CallbackQueryHandler(search_category_courses_pagination_callback, pattern=r"^search_cat_courses_pg::")
+    )
 
     # ---------- error handler ----------
     application.add_error_handler(course_error_handler)

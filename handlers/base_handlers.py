@@ -1956,6 +1956,9 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     except Exception:
         pass
 
+        # Add Search button for categories
+    keyboard.append([InlineKeyboardButton("🔍 Search", callback_data=f"search_categories::{page}")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     title = f"Tap a category to see its courses (page {page}/{last_page}):"
     if is_query:
@@ -2980,6 +2983,13 @@ async def list_courses(update: Update, context: CallbackContext):
             if not text:
                 await update.message.reply_text("No courses available.")
                 return
+            # Add Search button for all courses
+            try:
+                kb = list(reply_markup.inline_keyboard)
+                kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::global::{page}")])
+                reply_markup = InlineKeyboardMarkup(kb)
+            except Exception:
+                pass
             msg = await update.message.reply_text(text, reply_markup=reply_markup)
             try:
                 schedule_close_inline_message(msg)
@@ -4146,6 +4156,16 @@ async def courses_callback(update: Update, context: CallbackContext):
                 if not text:
                     await safe_edit_message(query, "No courses found.", action_key=getattr(query, 'data', None))
                     return
+                # Add Search button
+                try:
+                    kb = list(reply_markup.inline_keyboard)
+                    if origin_type == 'category' and category:
+                        kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}")])
+                    else:
+                        kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::{origin_type}::{page}")])
+                    reply_markup = InlineKeyboardMarkup(kb)
+                except Exception:
+                    pass
                 await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                 return
 
@@ -4201,6 +4221,13 @@ async def courses_callback(update: Update, context: CallbackContext):
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                             return
+                        # Add Search button for all courses
+                        try:
+                            kb = list(reply_markup.inline_keyboard)
+                            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::global::{page}")])
+                            reply_markup = InlineKeyboardMarkup(kb)
+                        except Exception:
+                            pass
                         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                         return
 
@@ -4260,6 +4287,13 @@ async def courses_callback(update: Update, context: CallbackContext):
                         if not text:
                             await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
+                        # Add Search button for courses in this category
+                        try:
+                            kb = list(reply_markup.inline_keyboard)
+                            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}")])
+                            reply_markup = InlineKeyboardMarkup(kb)
+                        except Exception:
+                            pass
                         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                         return
 
@@ -4303,6 +4337,13 @@ async def courses_callback(update: Update, context: CallbackContext):
                         if not text:
                             await safe_edit_message(query, f"No courses found for coach '{coach_name}' on page {page}.", action_key=getattr(query, 'data', None))
                             return
+                        # Add Search button for courses by this coach
+                        try:
+                            kb = list(reply_markup.inline_keyboard)
+                            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::coach::{urllib.parse.quote_plus(str(coach_name))}::{page}")])
+                            reply_markup = InlineKeyboardMarkup(kb)
+                        except Exception:
+                            pass
                         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                         return
                 else:
@@ -4338,6 +4379,13 @@ async def courses_callback(update: Update, context: CallbackContext):
                         if not text:
                             await safe_edit_message(query, f"No courses found on page {page}.", action_key=getattr(query, 'data', None))
                             return
+                        # Add Search button for all courses
+                        try:
+                            kb = list(reply_markup.inline_keyboard)
+                            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::global::{page}")])
+                            reply_markup = InlineKeyboardMarkup(kb)
+                        except Exception:
+                            pass
                         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                         return
                     # legacy category + page
@@ -4381,6 +4429,13 @@ async def courses_callback(update: Update, context: CallbackContext):
                     if not text:
                         await safe_edit_message(query, f"No courses found in category '{category}' on page {page}.", action_key=getattr(query, 'data', None))
                         return
+                    # Add Search button for courses in this category
+                    try:
+                        kb = list(reply_markup.inline_keyboard)
+                        kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}")])
+                        reply_markup = InlineKeyboardMarkup(kb)
+                    except Exception:
+                        pass
                     await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
                     return
             except Exception as e:
