@@ -209,6 +209,10 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
             key = _store_callback_payload(payload)
             cb = f"showcat_ref::{key}"
             display_name = cat.get("name") if isinstance(cat, dict) else str(cat)
+            # Show parent indicator if this category has a parent
+            parent_name = cat.get("parent") if isinstance(cat, dict) else None
+            if parent_name:
+                display_name = f"{display_name} › ({parent_name})"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
         total_pages = max(1, math.ceil(total / page_size))
@@ -224,7 +228,7 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
         keyboard.append([InlineKeyboardButton("🔙 Back to Categories", callback_data="back_to_cats")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        title = f"🔍 Results for '{query_text}' in categories (page {page}/{total_pages}):"
+        title = f"🔍 Results for '{query_text}' in all categories (page {page}/{total_pages}):"
         await update.message.reply_text(title, reply_markup=reply_markup)
 
     except Exception as e:
@@ -309,48 +313,102 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
         page = 1
 
         course_items, total, have_more = await execute_category_course_search(
-            db, query_text, category, page=page, page_size=page_size
+            db, query_text, category, page=page, page_size=page_size, include_children=True
         )
 
-        if total == 0:
+        # Also search for child categories matching the query within this parent
+        child_cats_matched = []
+        try:
+            child_cat_results, _, _ = await execute_category_search(
+                db, query_text, page=1, page_size=5, parent=category
+            )
+            if child_cat_results:
+                # Only include actual children (parent matches the category)
+                child_cats_matched = [
+                    c for c in child_cat_results
+                    if c.get("parent") == category
+                ]
+        except Exception:
+            child_cats_matched = []
+
+        # Also search for coaches matching the query within this category/children
+        coach_courses_matched = []
+        try:
+            # Use global course search but filter by coach name match within this category's scope
+            coach_items, coach_total, _ = await execute_course_search(
+                db, query_text, page=1, page_size=10
+            )
+            # Keep only courses whose coach matches AND are in this category or its children
+            if coach_items:
+                coach_courses_matched = [
+                    c for c in coach_items
+                    if c.get("coach") and query_text.lower() in c.get("coach", "").lower()
+                    and (c.get("category") == category or c.get("category") in [cc.get("name") for cc in child_cats_matched])
+                ]
+        except Exception:
+            coach_courses_matched = []
+
+        if total == 0 and not child_cats_matched and not coach_courses_matched:
             await update.message.reply_text(
-                f"No courses found matching '{query_text}' in category '{category}'. 😕"
+                f"No results found matching '{query_text}' in category '{category}' or its subcategories. 😕"
             )
             return
 
-        text, reply_markup = build_courses_page(
-            course_items,
-            page=page,
-            origin_type="category",
-            category=category,
-            origin_context="categories",
-            origin_context_page=1,
-            total_count=total,
-            is_page=True,
-            store_page_ref=False,
-        )
+        # Build the results keyboard
+        keyboard = []
 
-        if text is None:
-            await update.message.reply_text(
-                f"No courses found matching '{query_text}' in category '{category}'. 😕"
+        # Add matching child categories as navigation buttons (page 1 only)
+        if page == 1:
+            for child_cat in child_cats_matched[:5]:
+                child_path = child_cat.get("path") or child_cat.get("name")
+                payload = {"type": "showcat", "path": child_path, "from_parent": category, "parent_page": 1}
+                key = _store_callback_payload(payload)
+                keyboard.append([InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")])
+
+        # Add matching courses by coach
+        if page == 1 and coach_courses_matched:
+            for c in coach_courses_matched[:5]:
+                course_cat = c.get("category")
+                link = c.get("link")
+                name = c.get("name")
+                if name and link:
+                    keyboard.append([
+                        InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link),
+                    ])
+
+        # Add matching courses
+        if total > 0:
+            text, reply_markup = build_courses_page(
+                course_items,
+                page=page,
+                origin_type="category",
+                category=category,
+                origin_context="categories",
+                origin_context_page=1,
+                total_count=total,
+                is_page=True,
+                store_page_ref=False,
             )
-            return
 
-        existing_kb = _extract_course_rows(
-            list(reply_markup.inline_keyboard) if reply_markup else []
-        )
-        total_pages = max(1, math.ceil(total / page_size))
+            existing_kb = _extract_course_rows(
+                list(reply_markup.inline_keyboard) if reply_markup else []
+            )
+            keyboard.extend(existing_kb)
 
-        search_nav = []
-        if page > 1:
-            search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page-1}"))
-        if page < total_pages:
-            search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page+1}"))
-        if search_nav:
-            existing_kb.append(search_nav)
+            total_pages = max(1, math.ceil(total / page_size))
 
-        search_title = f"🔍 Results for '{query_text}' in '{category}' (page {page}/{total_pages}):"
-        await update.message.reply_text(search_title, reply_markup=InlineKeyboardMarkup(existing_kb))
+            search_nav = []
+            if page > 1:
+                search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page-1}"))
+            if page < total_pages:
+                search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page+1}"))
+            if search_nav:
+                keyboard.append(search_nav)
+        else:
+            total_pages = 1
+
+        search_title = f"🔍 Results for '{query_text}' in '{category}' incl. subcategories (page {page}/{total_pages}):"
+        await update.message.reply_text(search_title, reply_markup=InlineKeyboardMarkup(keyboard))
 
     except Exception as e:
         logger.exception("Error searching category courses: %s", e)
@@ -451,6 +509,10 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
             key = _store_callback_payload(payload)
             cb = f"showcat_ref::{key}"
             display_name = cat.get("name") if isinstance(cat, dict) else str(cat)
+            # Show parent indicator if this category has a parent
+            parent_name = cat.get("parent") if isinstance(cat, dict) else None
+            if parent_name:
+                display_name = f"{display_name} › ({parent_name})"
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
         total_pages = max(1, math.ceil(total / page_size))
@@ -466,7 +528,7 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
 
         await safe_edit_message(
             query,
-            f"🔍 Results for '{query_text}' in categories (page {page}/{total_pages}):",
+            f"🔍 Results for '{query_text}' in all categories (page {page}/{total_pages}):",
             reply_markup=InlineKeyboardMarkup(keyboard),
             action_key=getattr(query, "data", None),
         )
@@ -501,38 +563,102 @@ async def search_category_courses_pagination_callback(update: Update, context: C
         page_size = PAGE_SIZE
 
         course_items, total, have_more = await execute_category_course_search(
-            db, query_text, category, page=page, page_size=page_size
+            db, query_text, category, page=page, page_size=page_size, include_children=True
         )
 
-        text, reply_markup = build_courses_page(
-            course_items,
-            page=page,
-            origin_type="category",
-            category=category,
-            origin_context="categories",
-            origin_context_page=1,
-            total_count=total,
-            is_page=True,
-            store_page_ref=False,
-        )
+        # Also search for child categories matching the query within this parent
+        child_cats_matched = []
+        try:
+            child_cat_results, _, _ = await execute_category_search(
+                db, query_text, page=1, page_size=5, parent=category
+            )
+            if child_cat_results:
+                child_cats_matched = [
+                    c for c in child_cat_results
+                    if c.get("parent") == category
+                ]
+        except Exception:
+            child_cats_matched = []
 
-        existing_kb = _extract_course_rows(
-            list(reply_markup.inline_keyboard) if reply_markup else []
-        )
-        total_pages = max(1, math.ceil(total / page_size))
+        # Also search for coaches matching the query within this category/children
+        coach_courses_matched = []
+        try:
+            coach_items, coach_total, _ = await execute_course_search(
+                db, query_text, page=1, page_size=10
+            )
+            if coach_items:
+                child_cat_names = {c.get("name") for c in child_cats_matched}
+                coach_courses_matched = [
+                    c for c in coach_items
+                    if c.get("coach") and query_text.lower() in c.get("coach", "").lower()
+                    and (c.get("category") == category or c.get("category") in child_cat_names)
+                ]
+        except Exception:
+            coach_courses_matched = []
 
-        search_nav = []
-        if page > 1:
-            search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page-1}"))
-        if page < total_pages:
-            search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page+1}"))
-        if search_nav:
-            existing_kb.append(search_nav)
+        # Build the results keyboard
+        keyboard = []
+
+        # Add matching child categories as navigation buttons (page 1 only)
+        if page == 1:
+            for child_cat in child_cats_matched[:5]:
+                child_path = child_cat.get("path") or child_cat.get("name")
+                payload = {"type": "showcat", "path": child_path, "from_parent": category, "parent_page": 1}
+                key = _store_callback_payload(payload)
+                keyboard.append([InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")])
+
+        # Add matching courses by coach (page 1 only)
+        if page == 1 and coach_courses_matched:
+            for c in coach_courses_matched[:5]:
+                name = c.get("name")
+                link = c.get("link")
+                if name and link:
+                    keyboard.append([
+                        InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link),
+                    ])
+
+        if total > 0:
+            text, reply_markup = build_courses_page(
+                course_items,
+                page=page,
+                origin_type="category",
+                category=category,
+                origin_context="categories",
+                origin_context_page=1,
+                total_count=total,
+                is_page=True,
+                store_page_ref=False,
+            )
+
+            existing_kb = _extract_course_rows(
+                list(reply_markup.inline_keyboard) if reply_markup else []
+            )
+            keyboard.extend(existing_kb)
+
+            total_pages = max(1, math.ceil(total / page_size))
+
+            search_nav = []
+            if page > 1:
+                search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page-1}"))
+            if page < total_pages:
+                search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page+1}"))
+            if search_nav:
+                keyboard.append(search_nav)
+        else:
+            total_pages = 1
+
+        if not keyboard:
+            await safe_edit_message(
+                query,
+                f"No results found matching '{query_text}' in '{category}' or its subcategories. 😕",
+                action_key=getattr(query, "data", None),
+            )
+            return
 
         await safe_edit_message(
             query,
-            f"🔍 Results for '{query_text}' in '{category}' (page {page}/{total_pages}):",
-            reply_markup=InlineKeyboardMarkup(existing_kb),
+            f"🔍 Results for '{query_text}' in '{category}' incl. subcategories (page {page}/{total_pages}):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
             action_key=getattr(query, "data", None),
         )
 

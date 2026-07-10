@@ -91,8 +91,12 @@ def build_category_search_pipeline(
     page_size: int = 50,
     index_name: str = "default",
     fuzzy: bool = True,
+    parent: str = None,
 ) -> dict:
     """Build an Atlas Search pipeline for category name search.
+
+    Searches ALL categories (not just top-level) by default.
+    If `parent` is provided, searches only categories under that parent.
 
     Returns a dict with keys:
       - count_pipeline: list of stages for getting total count
@@ -102,27 +106,45 @@ def build_category_search_pipeline(
     # Build the $search stage
     search_stage = _make_text_search_stage(query_text, "name", index_name, fuzzy)
 
-    # TOP_LEVEL_FILTER: parent does not exist, is null, or is empty
-    top_level_filter = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
+    # Scope filter: if parent is provided, filter to that parent's children;
+    # otherwise search ALL categories (no parent filter)
+    if parent:
+        scope_filter = {"parent": parent}
+    else:
+        # No scope: search every category regardless of parent level
+        scope_filter = None
 
     start = (page - 1) * page_size
 
-    # Count pipeline (no skip/limit)
-    count_pipeline = [
-        search_stage,
-        {"$match": top_level_filter},
-        {"$count": "total"},
-    ]
-
-    # Data pipeline with pagination
-    data_pipeline = [
-        search_stage,
-        {"$addFields": {"_search_score": {"$meta": "searchScore"}}},
-        {"$match": top_level_filter},
-        {"$sort": {"_search_score": -1, "name": 1}},
-        {"$skip": start},
-        {"$limit": page_size + 1},
-    ]
+    if scope_filter:
+        # Count pipeline with scope filter
+        count_pipeline = [
+            search_stage,
+            {"$match": scope_filter},
+            {"$count": "total"},
+        ]
+        # Data pipeline with scope filter
+        data_pipeline = [
+            search_stage,
+            {"$addFields": {"_search_score": {"$meta": "searchScore"}}},
+            {"$match": scope_filter},
+            {"$sort": {"_search_score": -1, "name": 1}},
+            {"$skip": start},
+            {"$limit": page_size + 1},
+        ]
+    else:
+        # No scope filter: search all categories
+        count_pipeline = [
+            search_stage,
+            {"$count": "total"},
+        ]
+        data_pipeline = [
+            search_stage,
+            {"$addFields": {"_search_score": {"$meta": "searchScore"}}},
+            {"$sort": {"_search_score": -1, "name": 1}},
+            {"$skip": start},
+            {"$limit": page_size + 1},
+        ]
 
     return {
         "count_pipeline": count_pipeline,
@@ -188,36 +210,67 @@ def build_category_course_search_pipeline(
     page_size: int = 50,
     index_name: str = "default",
     fuzzy: bool = True,
+    include_children: bool = True,
 ) -> dict:
     """Build an Atlas Search pipeline for course search within a specific category.
 
-    Uses compound $search with must + filter to restrict to the given category.
+    When `include_children` is True (default), also searches courses in child
+    categories (categories whose `parent` field matches the given category).
+    Uses compound $search with must + filter to restrict to the given category
+    and its children.
     Returns dict with count_pipeline, data_pipeline, use_atlas.
     """
     pattern = re_module.escape(query_text)
     start = (page - 1) * page_size
 
-    # Use compound operator: must (text search) + filter (category equality)
-    search_stage = {
-        "$search": {
-            "index": index_name,
-            "compound": {
-                "must": [{
-                    "text": {
-                        "query": query_text,
-                        "path": "courses.name",
-                        "fuzzy": {"maxEdits": 1} if fuzzy else {},
-                    }
-                }],
-                "filter": [{
-                    "phrase": {
-                        "query": category,
-                        "path": "name",
-                    }
-                }],
-            },
+    # Build the filter clause: match the category by name OR its children by parent field
+    if include_children:
+        filter_clause = {
+            "should": [
+                {"phrase": {"query": category, "path": "name"}},
+                {"phrase": {"query": category, "path": "parent"}},
+            ],
+            "minimumShouldMatch": 1,
         }
-    }
+        search_stage = {
+            "$search": {
+                "index": index_name,
+                "compound": {
+                    "must": [{
+                        "text": {
+                            "query": query_text,
+                            "path": "courses.name",
+                            "fuzzy": {"maxEdits": 1} if fuzzy else {},
+                        }
+                    }],
+                    "filter": [{
+                        "compound": filter_clause
+                    }],
+                },
+            }
+        }
+    else:
+        # Original behavior: match category by exact name only
+        search_stage = {
+            "$search": {
+                "index": index_name,
+                "compound": {
+                    "must": [{
+                        "text": {
+                            "query": query_text,
+                            "path": "courses.name",
+                            "fuzzy": {"maxEdits": 1} if fuzzy else {},
+                        }
+                    }],
+                    "filter": [{
+                        "phrase": {
+                            "query": category,
+                            "path": "name",
+                        }
+                    }],
+                },
+            }
+        }
 
     if not fuzzy:
         search_stage["$search"]["compound"]["must"][0]["text"].pop("fuzzy", None)
@@ -261,11 +314,22 @@ def build_regex_category_search_pipeline(
     query_text: str,
     page: int = 1,
     page_size: int = 50,
+    parent: str = None,
 ) -> dict:
-    """Build a regex-based pipeline for category search (fallback when Atlas is unavailable)."""
+    """Build a regex-based pipeline for category search (fallback when Atlas is unavailable).
+
+    Searches ALL categories (not just top-level) by default.
+    If `parent` is provided, searches only categories under that parent.
+    """
     pattern = re_module.escape(query_text)
-    top_level_filter = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
-    filter_q = {"$and": [top_level_filter, {"name": {"$regex": pattern, "$options": "i"}}]}
+    
+    if parent:
+        scope_filter = {"parent": parent}
+        filter_q = {"$and": [scope_filter, {"name": {"$regex": pattern, "$options": "i"}}]}
+    else:
+        # Search ALL categories (any depth)
+        filter_q = {"name": {"$regex": pattern, "$options": "i"}}
+    
     start = (page - 1) * page_size
 
     return {
@@ -307,23 +371,45 @@ def build_regex_category_course_search_pipeline(
     category: str,
     page: int = 1,
     page_size: int = 50,
+    include_children: bool = True,
 ) -> dict:
-    """Build a regex-based pipeline for category-specific course search (fallback)."""
+    """Build a regex-based pipeline for category-specific course search (fallback).
+
+    When `include_children` is True (default), also searches courses in child
+    categories of the given category.
+    """
     pattern = re_module.escape(query_text)
 
-    pipeline = [
-        {"$match": {"$or": [{"name": category}, {"path": category}]}},
-        {"$unwind": "$courses"},
-        {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
-        {"$project": {
-            "name": "$courses.name",
-            "link": "$courses.link",
-            "category": "$name",
-            "coach": "$courses.coach",
-            "id": "$courses.id",
-        }},
-        {"$sort": {"name": 1}},
-    ]
+    if include_children:
+        # Match the category by name OR any child category (parent = category)
+        pipeline = [
+            {"$match": {"$or": [{"name": category}, {"parent": category}]}},
+            {"$unwind": "$courses"},
+            {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
+            {"$project": {
+                "name": "$courses.name",
+                "link": "$courses.link",
+                "category": "$name",
+                "coach": "$courses.coach",
+                "id": "$courses.id",
+            }},
+            {"$sort": {"name": 1}},
+        ]
+    else:
+        # Original behavior: match category by exact name or path only
+        pipeline = [
+            {"$match": {"$or": [{"name": category}, {"path": category}]}},
+            {"$unwind": "$courses"},
+            {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
+            {"$project": {
+                "name": "$courses.name",
+                "link": "$courses.link",
+                "category": "$name",
+                "coach": "$courses.coach",
+                "id": "$courses.id",
+            }},
+            {"$sort": {"name": 1}},
+        ]
 
     return {
         "pipeline_base": pipeline,
@@ -338,15 +424,19 @@ async def execute_category_search(
     query_text: str,
     page: int = 1,
     page_size: int = 50,
+    parent: str = None,
 ):
     """Execute a category search, using Atlas Search when available.
+
+    Searches ALL categories (any depth) by default.
+    If `parent` is provided, searches only categories under that parent.
 
     Returns (categories_list, total_count, have_more).
     """
     if is_atlas_search_enabled():
         index_name = get_search_index_name()
         try:
-            pipes = build_category_search_pipeline(query_text, page, page_size, index_name)
+            pipes = build_category_search_pipeline(query_text, page, page_size, index_name, parent=parent)
             # Count
             cnt_res = await db.categories.aggregate(pipes["count_pipeline"]).to_list(length=1)
             total = cnt_res[0]["total"] if cnt_res else 0
@@ -364,7 +454,7 @@ async def execute_category_search(
             # Fall through to regex
 
     # Regex fallback
-    pipes = build_regex_category_search_pipeline(query_text, page, page_size)
+    pipes = build_regex_category_search_pipeline(query_text, page, page_size, parent=parent)
     total = await _get_total_count(db, "categories", pipes["filter_q"], ttl=10)
     cats = await pipes["data_fn"](db)
     have_more = len(cats) > page_size
@@ -419,15 +509,19 @@ async def execute_category_course_search(
     category: str,
     page: int = 1,
     page_size: int = 50,
+    include_children: bool = True,
 ):
     """Execute a category-specific course search, using Atlas Search when available.
+
+    When `include_children` is True (default), also searches courses in child
+    categories of the given category.
 
     Returns (course_items, total_count, have_more).
     """
     if is_atlas_search_enabled():
         index_name = get_search_index_name()
         try:
-            pipes = build_category_course_search_pipeline(query_text, category, page, page_size, index_name)
+            pipes = build_category_course_search_pipeline(query_text, category, page, page_size, index_name, include_children=include_children)
 
             # Count
             cnt_res = await db.categories.aggregate(pipes["count_pipeline"]).to_list(length=1)
@@ -442,7 +536,7 @@ async def execute_category_course_search(
             logger.warning("Atlas Search failed for category courses, falling back to regex: %s", e)
 
     # Regex fallback
-    pipes = build_regex_category_course_search_pipeline(query_text, category, page, page_size)
+    pipes = build_regex_category_course_search_pipeline(query_text, category, page, page_size, include_children=include_children)
     pipeline = pipes["pipeline_base"]
     cnt_res = await db.categories.aggregate(pipeline + [{"$count": "total"}]).to_list(length=1)
     total = cnt_res[0]["total"] if cnt_res else 0
