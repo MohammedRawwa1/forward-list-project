@@ -2077,6 +2077,13 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
 
         text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True, store_page_ref=True)
+        # Add Search button for this coach's courses
+        try:
+            kb = list(reply_markup.inline_keyboard)
+            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::coach::{urllib.parse.quote_plus(str(coach_name))}::{page}")])
+            reply_markup = InlineKeyboardMarkup(kb)
+        except Exception:
+            pass
         if text and reply_markup:
             await safe_edit_message(query, text, reply_markup=reply_markup, action_key=raw)
         else:
@@ -2231,6 +2238,13 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         start = (page - 1) * page_size
         page_items = coach_courses[start:start + page_size]
         text, reply_markup = build_courses_page(page_items, page=page, origin_type='coach', category=coach_name, origin_context=origin_ctx, origin_context_page=parent_origin_page, total_count=total_courses, is_page=True, store_page_ref=True)
+        # Add Search button for courses in this category
+        try:
+            kb = list(reply_markup.inline_keyboard)
+            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}")])
+            reply_markup = InlineKeyboardMarkup(kb)
+        except Exception:
+            pass
         if not text:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}' in '{category}'.", action_key=getattr(query, 'data', None))
             return
@@ -2323,6 +2337,13 @@ async def showtype_handler(update: Update, context: CallbackContext):
             category=category_name,
             origin_context=origin_ctx,
         )
+        # Add Search button for courses in this category
+        try:
+            kb = list(reply_markup.inline_keyboard)
+            kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category_name))}::1")])
+            reply_markup = InlineKeyboardMarkup(kb)
+        except Exception:
+            pass
 
         if not text:
             await safe_edit_message(
@@ -2748,6 +2769,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
             else:
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+        # Add Search button for courses in this category
+        try:
+            keyboard.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(cat_name))}::{page}")])
+        except Exception:
+            pass
 
         _clear_design_pending(context)
         await safe_edit_message(query, f"{cat_path} — Subcategories (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
@@ -2849,6 +2875,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, page))])
             else:
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    # Add Search button for courses in this category
+    try:
+        keyboard.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(cat_name))}::{page}")])
+    except Exception:
+        pass
 
         # Provide an inline "Add course" button that starts the /add flow with
         # this category preselected. Store a short payload reference so the
@@ -2884,50 +2915,26 @@ async def showcat_handler(update: Update, context: CallbackContext):
     if not text:
         await safe_edit_message(query, f"No courses found in '{cat_name}' on page {page}.", action_key=getattr(query, 'data', None))
         return
+    # Add Search button for courses in this category
+    try:
+        kb = list(reply_markup.inline_keyboard)
+        kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(cat_name))}::{page}")])
+        reply_markup = InlineKeyboardMarkup(kb)
+    except Exception:
+        pass
     await _send_design_photo(query, context, text, reply_markup)
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
-    """Handle the 🔙 Back callback and show the categories list."""
+    """Handle the Back callback and show the categories list with search button."""
     query = update.callback_query
     await safe_answer(query)
+    # Delegate to the full categories_page which includes pagination, search button, etc.
     try:
-        db = await get_db()
-        # list only top-level categories (no parent) — server-side first page
-        total = await _get_total_count(db, 'categories', TOP_LEVEL_FILTER, ttl=60)
-        page_size = PAGE_SIZE
-        categories = await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).limit(page_size).to_list(length=page_size)
-        # Ensure deterministic, case-insensitive A→Z ordering for display
-        categories = sorted(categories, key=lambda c: (c.get('name') or '').lower())
-        if not categories:
-            await safe_edit_message(query, "No categories available. Use /create_category to create one.", action_key=getattr(query, 'data', None))
-            return
-        keyboard = []
-        # Batch-check which top-level categories have children to avoid N queries
-        cat_names = [c.get('name') for c in categories if c.get('name')]
-        parent_has_children = {}
-        if cat_names:
-            try:
-                docs = await db.categories.find({"parent": {"$in": cat_names}}, {"parent": 1}).to_list(length=len(cat_names))
-                parents_with_children = {d.get('parent') for d in docs if d.get('parent')}
-                parent_has_children = {name: (name in parents_with_children) for name in cat_names}
-            except Exception:
-                parent_has_children = {name: False for name in cat_names}
-
-        for cat in categories:
-            try:
-                has_children = parent_has_children.get(cat.get('name'))
-                courses = cat.get('courses', []) if isinstance(cat, dict) else []
-                is_empty = (not has_children) and (not _has_real_courses(courses))
-            except Exception:
-                is_empty = True
-            display = cat.get('name')
-            keyboard.append([InlineKeyboardButton(display, callback_data=_shorten_showcat_cb(cat.get('path') or cat.get('name'), 1))])
-        await safe_edit_message(query, "Tap a category to see its courses:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        await categories_page(update, context, page=1)
     except Exception as e:
         logger.error(f"Error returning to categories: {e}")
-        await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
-
+        await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, "data", None))
 async def list_courses(update: Update, context: CallbackContext):
     """List all available courses with pagination."""
     db = await get_db()
