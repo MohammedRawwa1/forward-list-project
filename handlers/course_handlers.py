@@ -1,6 +1,6 @@
 from telegram.ext import ConversationHandler, MessageHandler, CommandHandler, CallbackQueryHandler, filters, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from conversation_states import ADD_NAME, ADD_LINK, ADD_CATEGORY, ADD_PARENT, ADD_COACH, START_AWAIT_NAME
+from conversation_states import ADD_NAME, ADD_LINK, ADD_CATEGORY, ADD_PARENT, ADD_COACH
 from handlers.db_connection import get_db
 from pymongo.errors import PyMongoError
 import logging
@@ -36,18 +36,8 @@ logger = logging.getLogger(__name__)
 # Conversation states are defined in conversation_states.py
 
 async def setup_course_handlers(application):
-    # Start conversation: ask for user's preferred name
-    application.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            START_AWAIT_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_start_name),
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        name="start_conversation",
-        persistent=False
-    ))
+    # /start: simple welcome message using the user's Telegram name
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(ConversationHandler(
         entry_points=[CommandHandler("add", add_course_start)],
         states={
@@ -85,31 +75,18 @@ async def setup_course_handlers(application):
     ))
 
 async def start(update: Update, context: CallbackContext):
-    """Handler for the /start command - asks for the user's preferred name."""
+    """Handler for the /start command — welcomes the user with their Telegram name."""
     user = update.message.from_user
-    # Store the Telegram user's first name and ask for their preferred name
-    context.user_data['telegram_name'] = user.first_name
+    name = user.first_name or "there"
     await update.message.reply_text(
-        f"👋 Welcome to the Course Manager Bot!\n\n"
-        f"I see your name is {user.first_name}.\n"
-        f"Please enter the name you'd like me to call you (or just type your current name):"
+        f"👋 Welcome **{name}** to the Course Manager Bot! 🎉\n\n"
+        f"I'll help you organize and manage your courses. Here's what I can do:\n\n"
+        f"📚 **Browse** — Use /categories or /courses to explore\n"
+        f"➕ **Add** — Use /add to add new courses\n"
+        f"🔍 **Search** — Look for courses and categories\n"
+        f"🗑️ **Manage** — Delete courses, categories, or parents\n\n"
+        f"Type /help anytime to see all available commands. 😊"
     )
-    return START_AWAIT_NAME
-
-
-async def handle_start_name(update: Update, context: CallbackContext):
-    """Handle the name input from /start command."""
-    custom_name = update.message.text.strip()
-    if not custom_name:
-        await update.message.reply_text("Name cannot be empty. Please enter a valid name:")
-        return START_AWAIT_NAME
-    # Store the user's preferred name
-    context.user_data['user_display_name'] = custom_name
-    await update.message.reply_text(
-        f"✨ Great, I'll call you **{custom_name}** from now on!\n\n"
-        f"Type /help to see what I can do for you. 😊"
-    )
-    return ConversationHandler.END
     
 # course_handlers.py
 async def add_course_start(update: Update, context: CallbackContext):
