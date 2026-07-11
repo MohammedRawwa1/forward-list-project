@@ -7,7 +7,7 @@ import logging
 import re
 import urllib.parse
 import os
-from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload, _resolve_callback_payload
+from handlers.base_handlers import safe_edit_message, safe_answer, _shorten_showcat_cb, _store_callback_payload, _resolve_callback_payload, get_total_count, _get_total_count
 import uuid
 
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
@@ -25,7 +25,7 @@ async def _compute_category_page(db, category_name, page_size=COURSE_PAGE_SIZE):
             return 1
         key = doc.get('name') or doc.get('path') or ''
         # Count how many top-level categories sort before this one (lexicographic by name/path)
-        count = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}], "$or": [{"name": {"$lt": key}}, {"name": {"$exists": False}, "path": {"$lt": key}}]})
+        count = await _get_total_count(db, 'categories', {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}], "$or": [{"name": {"$lt": key}}, {"name": {"$exists": False}, "path": {"$lt": key}}]}, ttl=15)
         return (count // page_size) + 1
     except Exception:
         return 1
@@ -174,7 +174,7 @@ async def add_course_start(update: Update, context: CallbackContext):
                     parent_name = parent_doc.get('name')
                     context.user_data['course_parent'] = parent_name
                     try:
-                        child_count = await db.categories.count_documents({"parent": parent_name})
+                        child_count = await get_total_count(db, 'categories', {"parent": parent_name}, ttl=15)
                         page_size = COURSE_PAGE_SIZE
                         start = 0
                         child_cats = await db.categories.find({"parent": parent_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
@@ -200,7 +200,7 @@ async def add_course_start(update: Update, context: CallbackContext):
     # Default behavior: list top-level parents for selection
     try:
         # Use server-side pagination for top-level parents
-        total = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}) if db is not None else 0
+        total = await get_total_count(db, 'categories', {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}, ttl=15) if db is not None else 0
         page = 1
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
@@ -344,12 +344,27 @@ async def add_course_link(update: Update, context: CallbackContext):
         if view_cat:
             current_page = context.user_data.get("last_category_page", 1)
 
-            kb = InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "View Category",
-                    callback_data=_shorten_showcat_cb(view_cat, current_page, from_parent="categories", parent_page=current_page)
-                )
-            ]])
+            # Show navigation buttons after adding course
+            kb_buttons = []
+            # Button to view where the course was added (coach or parent)
+            kb_buttons.append(InlineKeyboardButton(
+                f"View \"{view_cat}\"",
+                callback_data=_shorten_showcat_cb(view_cat, current_page, from_parent="categories", parent_page=current_page)
+            ))
+            # If we added inside a coach (child category), also offer a quick button to the parent
+            if coach and child_doc:
+                try:
+                    kb_buttons.append(InlineKeyboardButton(
+                        f"View Parent \"{parent}\"",
+                        callback_data=_shorten_showcat_cb(parent, current_page, from_parent="categories", parent_page=current_page)
+                    ))
+                except Exception:
+                    pass
+            # Arrange buttons in rows of up to 2
+            kb_rows = []
+            for i in range(0, len(kb_buttons), 2):
+                kb_rows.append(kb_buttons[i:i+2])
+            kb = InlineKeyboardMarkup(kb_rows)
 
             await update.message.reply_text(
                 f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}",
@@ -361,7 +376,7 @@ async def add_course_link(update: Update, context: CallbackContext):
                 f"Course '{context.user_data.get('course_name')}' added successfully to '{parent}'. 🎉\nLink: {link}"
             )
             return ConversationHandler.END
-            except Exception as e:
+    except Exception as e:
         logger.exception("Error saving course link")
         # Provide a clearer message to the user and include a short hint to check logs
         try:
@@ -425,7 +440,7 @@ async def parent_selected(update: Update, context: CallbackContext):
         # find child categories of the selected parent
         if parent:
             # Use server-side pagination: count + sort + skip/limit
-            child_count = await db.categories.count_documents({"parent": parent})
+            child_count = await get_total_count(db, 'categories', {"parent": parent}, ttl=15)
             page_size = COURSE_PAGE_SIZE
             start = (1 - 1) * page_size
             child_cats = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
@@ -493,8 +508,33 @@ async def parent_selected(update: Update, context: CallbackContext):
                 {"$group": {"_id": "$courses.coach"}},
                 {"$count": "count"}
             ]
-            cnt_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
-            total_coaches = int(cnt_res[0].get('count')) if cnt_res else 0
+            # Try Redis cache for coach-distinct count (keyed by parent)
+            try:
+                from handlers.base_handlers import _redis
+                import json as _json
+                coach_cache_key = f"coach_count:dst:{parent or ''}"
+                cached_total = None
+                if _redis is not None:
+                    try:
+                        val = await _redis.get(coach_cache_key)
+                        if val is not None:
+                            cached_total = int(val)
+                    except Exception:
+                        pass
+                if cached_total is not None:
+                    total_coaches = cached_total
+                else:
+                    cnt_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+                    total_coaches = int(cnt_res[0].get('count')) if cnt_res else 0
+                    # Cache for 30 seconds (coach lists are stable)
+                    if _redis is not None:
+                        try:
+                            await _redis.setex(coach_cache_key, 30, str(total_coaches))
+                        except Exception:
+                            pass
+            except Exception:
+                cnt_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
+                total_coaches = int(cnt_res[0].get('count')) if cnt_res else 0
 
             # Fetch one page of distinct coach names (sorted A→Z)
             pipeline = [
@@ -582,7 +622,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
     try:
         db = await get_db()
         if parent:
-            total_children = await db.categories.count_documents({"parent": parent})
+            total_children = await get_total_count(db, 'categories', {"parent": parent}, ttl=15)
             page_size = COURSE_PAGE_SIZE
             start = (page - 1) * page_size
             children = await db.categories.find({"parent": parent}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
@@ -664,7 +704,7 @@ async def addparent_page(update: Update, context: CallbackContext):
 
     try:
         db = await get_db()
-        total = await db.categories.count_documents({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]})
+        total = await get_total_count(db, 'categories', {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}, ttl=15)
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
         parents = await db.categories.find({"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
@@ -738,7 +778,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     try:
         db = await get_db()
         # Use server-side pagination: get total count and fetch only the page slice
-        total = await db.categories.count_documents({})
+        total = await get_total_count(db, 'categories', {}, ttl=15)
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
         cats = await db.categories.find({}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
@@ -1081,22 +1121,3 @@ async def error_handler(update, context):
                 pass
     except Exception:
         logger.exception("Error in error_handler")
-
-# Handle URL parsing errors for course link input
-async def handle_link_parsing_error(update: Update, context: CallbackContext):
-    link = update.message.text.strip()
-    logger.warning(f"Failed to parse link: {link}")
-    
-    # Validate the provided link format before proceeding
-    url_pattern = r'^(http|https|tg|t.me):\/\/([a-zA-Z0-9\-\.]+(?:\:[0-9]+)?(?:\/[^\s]*)?(\?[^\s]*)?(#[^\s]*)?)$'
-    
-    if not re.match(url_pattern, link):
-        await update.message.reply_text(
-            f"The provided input '{link}' is not a valid URL. Please ensure you provide a correct link."
-        )
-    else:
-        await update.message.reply_text(
-            "Due to network issues, parsing of the link was unsuccessful. "
-            "Please check the link's validity and try again. If this link is not essential for answering your question, feel free to proceed normally."
-        )
-    return ConversationHandler.END

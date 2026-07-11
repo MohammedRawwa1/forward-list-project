@@ -71,13 +71,9 @@ Admin commands & tooling (owner only)
 - `/delete_category` - delete a coach/child category and subtree
 - `/delete_parent` - delete a top-level parent and its subtree
 - `/delete_all_data` - destructive: deletes categories and courses (owner-only)
-- `/addthumb` and `/delthumb` - manage custom thumbnails for a course
+- `/design_cat` - reply to a photo to assign it as a banner design for a parent category
+- `/remove_design` - remove a category's banner design
 - Debugging endpoints/commands: see `debug_db`, logging is configured to `bot.log` via Loguru
-
-Maintenance scripts (scripts/)
-- `migrate_data.py` — migration helpers for moving legacy schemas into the `categories` collection
-- `fix_category_parents.py` — repair and normalize parent/path structures
-- `merge_texting_variants.py`, `check_parse_coverage.py`, etc. — utility scripts for data analysis and cleanup
 
 What you can do next / Suggested improvements
 - Harden admin `exec`/`eval` flows (if present) or restrict them further.
@@ -91,11 +87,6 @@ Where to look in the code
 - Core handlers: `handlers/base_handlers.py`, `handlers/course_handlers.py`, `handlers/bot_handlers.py`
 - Deletion flows: `handlers/delete_callbacks.py` (this file contains the confirm/summary flows)
 - DB layer: `database/mongo_handler.py`
-- Thumbnail helpers: `handlers/custom_thumbnail.py`
-- Scripts: `scripts/` directory
-
-If you want, I can:
-- Update the help text or README in `README.md` instead of `readm.md`.
-- Add more detailed run examples for Docker or Heroku.
-- Run a quick static analysis or tests to validate the changes I made (parent-category deletion now uses _id-aware helper).
-
+- Category designs: `handlers/category_design.py` (owner-only banner design assignment)
+- Search handlers: `handlers/search_handlers.py`, `handlers/atlas_search.py`
+- Deletion flows: `handlers/delete_callbacks.py`

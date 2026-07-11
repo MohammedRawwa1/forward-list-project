@@ -20,7 +20,6 @@ from telegram.ext import (
     filters,
     CallbackContext,
 )
-
 from conversation_states import SEARCH_QUERY
 from handlers.db_connection import get_db
 from handlers.base_handlers import (
@@ -28,21 +27,13 @@ from handlers.base_handlers import (
     safe_answer,
     build_courses_page,
     _store_callback_payload,
-    _shorten_showcat_cb,
-    _get_cached_page,
-    _set_cached_page,
-    _db_timing,
-    _has_real_courses,
     PAGE_SIZE,
-    _redis,
 )
-
 from handlers.atlas_search import (
     execute_category_search,
     execute_course_search,
     execute_category_course_search,
 )
-
 logger = logging.getLogger(__name__)
 
 # ---------------  helper: extract only course rows from build_courses_page keyboard  ---------------

@@ -1,2 +1,0 @@
-# constants.py
-CONFIRM_DELETE_ALL_DATA, CANCEL_DELETE_ALL_DATA = range(2)

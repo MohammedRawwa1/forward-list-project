@@ -80,11 +80,11 @@ class MongoDB:
 
     @classmethod
     async def count_categories(cls):
-        """Count the total number of categories in the database."""
+        """Count the total number of categories in the database with Redis-backed caching."""
         try:
+            from handlers.base_handlers import _get_total_count
             db = await cls.get_db()
-            collection = db['categories']
-            count = await collection.count_documents({})
+            count = await _get_total_count(db, 'categories', {}, ttl=60)
             logger.info(f"Total categories count: {count}")
             return count
         except Exception as e:

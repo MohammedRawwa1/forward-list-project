@@ -1,4 +1,4 @@
-from telegram.ext import CommandHandler, CallbackQueryHandler, ConversationHandler, MessageHandler, filters, CallbackContext
+from telegram.ext import ConversationHandler, CallbackContext
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 import logging
 from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT
@@ -22,7 +22,6 @@ import hashlib
 import json
 import time
 import asyncio
-import os
 from typing import Optional
 # How long to persist callback refs (seconds). Default: 7 days.
 CALLBACK_REF_TTL = int(os.getenv("CALLBACK_REF_TTL", str(7 * 24 * 3600)))
@@ -125,17 +124,43 @@ async def _db_timing(name: str):
             pass
 
 async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
+    """Get total count with optional caching. Prefers Redis when configured.
+
+    coll_name is the collection attribute name on the db object (e.g. "categories").
+    """
     key = f"count:{coll_name}:{json.dumps(filter_q or {}, sort_keys=True)}"
     now = time.time()
     entry = _COUNT_CACHE.get(key)
     if entry and entry[1] > now:
         return entry[0]
+
+    # Try Redis first (best-effort)
+    try:
+        if _redis is not None:
+            val = await _redis.get(key)
+            if val is not None:
+                try:
+                    cnt = int(val)
+                    _COUNT_CACHE[key] = (cnt, now + ttl)
+                    return cnt
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Fallback: run count_documents on the collection
     try:
         coll = getattr(db, coll_name) if hasattr(db, coll_name) else db[coll_name]
         cnt = await coll.count_documents(filter_q or {})
     except Exception:
         cnt = 0
+
     _COUNT_CACHE[key] = (cnt, now + ttl)
+    try:
+        if _redis is not None:
+            await _redis.setex(key, ttl, str(cnt))
+    except Exception:
+        pass
     return cnt
 
 
@@ -411,7 +436,7 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
     try:
         if _redis is not None:
             import json as _json
-            await _redis.set(f"callback:ref:{key}", _json.dumps(payload), ex=ttl)
+            await _redis.set(f"callback:ref:{key}", json.dumps(payload), ex=ttl)
 
 
             return
@@ -458,7 +483,7 @@ async def _resolve_callback_payload(key: str):
             val = await _redis.get(f"callback:ref:{key}")
             if val:
                 import json as _json
-                payload = _json.loads(val)
+                payload = json.loads(val)
                 CALLBACK_MAP[key] = payload
                 _set_callback_resolve_cache(key, payload, ttl=60)
                 return payload
@@ -773,97 +798,14 @@ if REDIS_URL:
         _redis = None
         _redis_token_script = None
 
-        # Simple in-memory TTL cache for inexpensive totals; keyed by JSON'd filter.
-        _COUNT_CACHE = {}  # key -> (count:int, expire_ts:float)
 
+# Public wrapper for _get_total_count - accessible from other modules
+async def get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
+    """Cached count_documents with optional Redis backing.
 
-        @asynccontextmanager
-        async def _db_timing(name: str):
-            """Async context manager to time DB operations and log durations."""
-            t0 = time.time()
-            try:
-                yield
-            finally:
-                elapsed = time.time() - t0
-                try:
-                    logger.debug("[DB-TIME] %s %.3fs", name, elapsed)
-                except Exception:
-                    pass
-
-
-        async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
-            """Get total count with optional caching. Prefers Redis when configured.
-
-            `coll_name` is the collection attribute name on the `db` object (e.g. 'categories').
-            """
-            key = f"count:{coll_name}:{json.dumps(filter_q or {}, sort_keys=True)}"
-            now = time.time()
-            entry = _COUNT_CACHE.get(key)
-            if entry and entry[1] > now:
-                return entry[0]
-
-            # Try Redis first (best-effort)
-            try:
-                if _redis is not None:
-                    val = await _redis.get(key)
-                    if val is not None:
-                        try:
-                            cnt = int(val)
-                            _COUNT_CACHE[key] = (cnt, now + ttl)
-                            return cnt
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            # Fallback: run count_documents on the collection
-            try:
-                coll = getattr(db, coll_name) if hasattr(db, coll_name) else db[coll_name]
-                cnt = await coll.count_documents(filter_q or {})
-            except Exception:
-                cnt = 0
-
-            _COUNT_CACHE[key] = (cnt, now + ttl)
-            try:
-                if _redis is not None:
-                    await _redis.setex(key, ttl, str(cnt))
-            except Exception:
-                pass
-            return cnt
-
-# Ensure count cache and helpers exist even when Redis isn't configured
-if '_COUNT_CACHE' not in globals():
-    _COUNT_CACHE = {}
-
-if '_db_timing' not in globals():
-    from contextlib import asynccontextmanager
-
-    @asynccontextmanager
-    async def _db_timing(name: str):
-        t0 = time.time()
-        try:
-            yield
-        finally:
-            elapsed = time.time() - t0
-            try:
-                logger.debug("[DB-TIME] %s %.3fs", name, elapsed)
-            except Exception:
-                pass
-
-if '_get_total_count' not in globals():
-    async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
-        key = f"count:{coll_name}:{json.dumps(filter_q or {}, sort_keys=True)}"
-        now = time.time()
-        entry = _COUNT_CACHE.get(key)
-        if entry and entry[1] > now:
-            return entry[0]
-        try:
-            coll = getattr(db, coll_name) if hasattr(db, coll_name) else db[coll_name]
-            cnt = await coll.count_documents(filter_q or {})
-        except Exception:
-            cnt = 0
-        _COUNT_CACHE[key] = (cnt, now + ttl)
-        return cnt
+    Wraps _get_total_count as a public API for use by other handlers.
+    """
+    return await _get_total_count(db, coll_name, filter_q, ttl)
 
 def _refill_bucket(bucket):
     now = time.time()
@@ -873,21 +815,21 @@ def _refill_bucket(bucket):
     bucket["tokens"] = min(bucket["capacity"], bucket.get("tokens", bucket["capacity"]) + elapsed * bucket["refill_rate"])
     bucket["last_refill"] = now
 
-def _consume_token(user_id: int, cost: float = 1.0):
+async def _consume_token(user_id: int, cost: float = 1.0):
     # If Redis is configured, prefer the Redis-backed atomic token bucket.
     if _redis is not None and _redis_token_script is not None:
         try:
             now = int(time.time())
             # global first
-            res = _redis.eval(_redis_token_script, 1, 'bucket:global', now, _GLOBAL_BUCKET['capacity'], _GLOBAL_BUCKET['refill_rate'], cost)
+            res = await _redis.eval(_redis_token_script, 1, 'bucket:global', now, _GLOBAL_BUCKET['capacity'], _GLOBAL_BUCKET['refill_rate'], cost)
             # res is JSON like [1,0] or [0,wait]
             import json as _json
-            ok, wait = _json.loads(res)
+            ok, wait = json.loads(res)
             if ok == 1:
                 # now consume user bucket
                 user_key = f"bucket:user:{user_id}"
-                res2 = _redis.eval(_redis_token_script, 1, user_key, now, 5.0, 1.0, cost)
-                ok2, wait2 = _json.loads(res2)
+                res2 = await _redis.eval(_redis_token_script, 1, user_key, now, 5.0, 1.0, cost)
+                ok2, wait2 = json.loads(res2)
                 if ok2 == 1:
                     METRICS['token_consumed'] += 1
                     try:
@@ -1016,8 +958,7 @@ async def _redis_schedule_retry(chat_id, message_id, text, reply_markup, execute
         "reply_markup": _serialize_markup(reply_markup)
     }
     try:
-        import json as _json
-        await _redis.zadd("retry:queue", { _json.dumps(payload): execute_at })
+        await _redis.zadd("retry:queue", { json.dumps(payload): execute_at })
         METRICS['retry_scheduled'] += 1
         try:
             await _redis.incr('metrics:retry_scheduled')
@@ -1044,7 +985,7 @@ async def schedule_retry_via_redis_or_local(query, text, reply_markup=None, dela
 async def _process_redis_retry_item(application, raw_member: str):
     import json as _json
     try:
-        payload = _json.loads(raw_member)
+        payload = json.loads(raw_member)
         chat_id = payload.get('chat_id')
         message_id = payload.get('message_id')
         text = payload.get('text')
@@ -1588,26 +1529,20 @@ def validate_category_name(category_name: str):
     
     return None
     
-async def help(update: Update, context: CallbackContext):
-    """Customized Help message."""
+async def help_command(update: Update, context: CallbackContext):
+    """Display the help message with available commands."""
     help_message = (
-        "✨ **Welcome to the Course Manager Bot!** Here's how you can use me:\n\n"
-        "/start - Start the bot and receive a welcome message\n"
-        "/add - Start the process of adding a new course\n"
-        "/courses - View your saved courses\n"
-        "/delete_course - Delete a specific course\n"
-        "/delete_category - Delete a coach/child category and its courses (not parent folders)\n"
-        "/delete_all_data - Deletes both courses and categories (don't use this lightly!)\n\n"
-        "📚 **Category Management**:\n"
-        "/categories - List all available categories\n"
-        "/create_category - Create a new empty category\n\n"
-        "🎨 **Course Thumbnail Management**:\n"
-        "/addthumb - Add a custom thumbnail for a course\n"
-        "/delthumb - Delete a custom thumbnail for a course\n\n"
-        "⚙️ **Other Commands**:\n"
-        "/help - Displays this help message\n"
-        "/cancel - Cancel the current operation\n\n"
-        "⚠️ **Important Note**: Be careful with the commands that delete categories or courses! Once deleted, they can't be recovered."
+        "📚 **Course Navigator Bot** — I'll help you find and manage courses organized by coaches and categories!\n\n"
+        "/start - Set your name and introduce yourself\n"
+        "/add - Add a new course (choose a category, then a coach, then enter details)\n"
+        "/courses - Browse all your saved courses\n"
+        "/categories - Browse categories and find courses by coach\n"
+        "/create_category - Create a new category or parent folder\n\n"
+        "🎨 **Category Designs (Owner Only)**:\n"
+        "/design_cat - Reply to a photo to assign it as a banner design for a parent category\n"
+        "/remove_design - Remove a category's banner design\n\n"
+        "/help - Show this help message\n"
+        "/cancel - Cancel whatever you're currently doing\n"
     )
     await update.message.reply_text(help_message)
 
@@ -1643,6 +1578,16 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
             page = int(parts[1])
         except Exception:
             page = 1
+
+    # Store the page for backtracing after category creation
+
+    try:
+
+        context.user_data['createcat_last_page'] = page
+
+    except Exception:
+
+        pass
 
     logger.debug("createcat_page invoked: page=%s is_query=%s", page, is_query)
     try:
@@ -1818,6 +1763,11 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     pdoc = await db.categories.find_one({"name": parent})
     ppath = pdoc.get('path') if pdoc and pdoc.get('path') else parent
     keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
+    # Add Search button for child categories/coaches
+    try:
+        keyboard.append([InlineKeyboardButton("🔍 Search", callback_data=f"search_categories::{page}")])
+    except Exception:
+        pass
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     title = f"Subcategories of '{parent}' (page {page}/{last_page}):"
@@ -1972,12 +1922,6 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     return
 
 
-async def list_coaches(update: Update, context: CallbackContext):
-    """Redirect /coaches to the categories view so users browse: categories -> coaches -> courses."""
-    # Present categories first (so coaches are shown inside a category)
-    await list_categories(update, context)
-
-
 async def debug_db(update: Update, context: CallbackContext):
     """Owner-only debug command returning basic DB diagnostics."""
     try:
@@ -2003,7 +1947,7 @@ async def debug_db(update: Update, context: CallbackContext):
         return
 
     try:
-        cat_count = await db.categories.count_documents({})
+        cat_count = await _get_total_count(db, 'categories', {}, ttl=60)
     except Exception as e:
         cat_count = f"error: {e}"
 
@@ -2133,6 +2077,10 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
 
         text, reply_markup = build_courses_page(coach_courses, page=page, origin_type='coach', category=coach_name, origin_context=None, total_count=total_courses, is_page=True, store_page_ref=True)
+        if text and reply_markup:
+            await safe_edit_message(query, text, reply_markup=reply_markup, action_key=raw)
+        else:
+            await safe_edit_message(query, f"No courses found for coach '{coach_name}'.", action_key=raw)
     except Exception as e:
         logger.error("Error showing coach courses: %s", e)
         await safe_edit_message(query, "An unexpected error occurred. Please try again later.", action_key=getattr(query, 'data', None))
@@ -2603,6 +2551,27 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # category display name and path
     cat_name = category_doc.get('name')
     cat_path = category_doc.get('path') or cat_name
+    # Send category design photo as a banner if one is assigned
+    try:
+        from handlers.category_design import get_category_design
+        # Only send once per session to avoid duplicate photos on back-navigation
+        design_file_id = await get_category_design(db, cat_name)
+        if design_file_id:
+            # Only send once per session per unique file_id (so re-designing triggers the new one)
+            design_sent_key = f"_design_sent_{cat_name}_{design_file_id[-16:]}"
+            if not context.user_data.get(design_sent_key):
+                try:
+                    await context.bot.send_photo(
+                        chat_id=query.message.chat_id,
+                        photo=design_file_id,
+                        caption=f"🎨 {cat_name}"
+                    )
+                    context.user_data[design_sent_key] = True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     # Remember the last viewed category so `/add` can preselect it
     try:
         context.user_data['last_viewed_category'] = cat_path
@@ -2643,7 +2612,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         except Exception:
             pass
         # Server-side pagination for child categories under this category
-        total_children = await db.categories.count_documents({"parent": cat_name})
+        total_children = await _get_total_count(db, 'categories', {"parent": cat_name}, ttl=60)
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         children = await db.categories.find({"parent": cat_name}).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
@@ -2894,7 +2863,7 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
     try:
         db = await get_db()
         # list only top-level categories (no parent) — server-side first page
-        total = await db.categories.count_documents(TOP_LEVEL_FILTER)
+        total = await _get_total_count(db, 'categories', TOP_LEVEL_FILTER, ttl=60)
         page_size = PAGE_SIZE
         categories = await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).limit(page_size).to_list(length=page_size)
         # Ensure deterministic, case-insensitive A→Z ordering for display
@@ -3000,98 +2969,6 @@ async def list_courses(update: Update, context: CallbackContext):
     except Exception as e:
         logger.error(f"Error listing courses: {e}")
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
-
-async def list_courses_by_category(update: Update, context: CallbackContext, category_name: str, page: int = 1):
-    """List courses in a specific category with pagination."""
-    db = await get_db()
-    if db is None:
-        await update.message.reply_text("Error: Unable to connect to the database.")
-        return
-
-    try:
-        # Server-side paginate the embedded `courses` array; fetch only the
-        # requested page. Use cached total to compute pagination controls.
-        page_size = PAGE_SIZE
-        try:
-            items = await get_courses_by_category(None, category_name, page=page, page_size=page_size)
-        except Exception:
-            items = []
-
-        if not items:
-            await update.message.reply_text(f"No courses found in category '{category_name}' on page {page}.")
-            return
-
-        keyboard = []
-        for c in items:
-            try:
-                keyboard.append([
-                    InlineKeyboardButton(c.get('name'), url=c.get('link')),
-                    InlineKeyboardButton("ℹ️ Details", callback_data=_make_course_ref(category_name, c.get('name'), 'category', page, None, None, c.get('id')))
-                ])
-            except Exception:
-                continue
-
-        # Pagination controls using cached count
-        try:
-            total_items = await _get_courses_count(db, category_name)
-        except Exception:
-            total_items = 0
-        total_pages = math.ceil(total_items / page_size) if total_items > 0 else 1
-
-        pagination_buttons = []
-        if page > 1:
-            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{page-1}"))
-        if page < total_pages:
-            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{page+1}"))
-        if pagination_buttons:
-            keyboard.append(pagination_buttons)
-
-        try:
-            breadcrumb_buttons = []
-            # Show Home only when not already on the first page
-            if page > 1:
-                breadcrumb_buttons.append(InlineKeyboardButton("🏠 Home", callback_data="back_to_cats"))
-            if total_pages > 1 and page < total_pages:
-                breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=f"courses::category::{urllib.parse.quote_plus(category_name)}::{total_pages}"))
-            breadcrumb_buttons.append(InlineKeyboardButton(category_name, callback_data=_shorten_showcat_cb(category_name, page)))
-            keyboard.insert(0, breadcrumb_buttons)
-        except Exception:
-            pass
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        msg = await update.message.reply_text(f"Courses in category '{category_name}' (page {page}):", reply_markup=reply_markup)
-        try:
-            schedule_close_inline_message(msg)
-        except Exception:
-            pass
-
-    except Exception as e:
-        logger.error(f"Error listing courses for category '{category_name}': {e}")
-        await update.message.reply_text("An unexpected error occurred. Please try again later.")
-        
-# legacy underscore-format pagination handler removed; modern `courses::` callbacks are used
-
-async def handle_categories_pagination(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await safe_answer(query)
-
-    # Extract the action and page number from the callback data
-    data = getattr(query, 'data', '')
-    # supported forms: categories_prev_<N> or categories_next_<N>
-    try:
-        parts = data.split("_")
-        if len(parts) >= 3 and parts[0] == 'categories' and parts[1] in ('prev', 'next'):
-            try:
-                page = int(parts[2])
-            except Exception:
-                page = 1
-            # delegate to `categories_page` with the CallbackQuery as the source
-            await categories_page(query, context, page=page)
-            return
-    except Exception:
-        logger.exception("handle_categories_pagination: failed to parse pagination callback")
-        await list_categories(update, context)
-        return
 
 logger.info(f"[STATE] returning {CREATE_CAT_NAME=} id={id(CREATE_CAT_NAME)}")
 async def create_category(update: Update, context: CallbackContext):
@@ -3277,7 +3154,7 @@ async def handle_category_name(update: Update, context: CallbackContext):
                     return CREATE_CAT_NAME
                 # warn if there are existing courses under the parent that use this name as a coach
                 try:
-                    coach_conflict = await coll.count_documents({"name": parent, "courses.coach": category_name})
+                    coach_conflict = await _get_total_count(db, 'categories', {"name": parent, "courses.coach": category_name}, ttl=15)
                     if coach_conflict > 0:
                         await update.message.reply_text(f"Warning: There are existing courses under '{parent}' with a coach name '{category_name}'. Creating a child category with the same name may cause ambiguity. Please pick a different name.")
                         return CREATE_CAT_NAME
@@ -3306,13 +3183,15 @@ async def handle_category_name(update: Update, context: CallbackContext):
         # category appears in the correct place. If top-level, show top-level
         # categories; otherwise show the parent's children list.
         try:
+            # Return to the page the user was browsing when they clicked create
+            last_page = context.user_data.pop('createcat_last_page', 1)
             if not parent:
                 # Show top-level categories using the same paginated view as `/categories`
                 # so newly-created parents behave like the categories listing.
-                await categories_page(update.message, context, page=1)
+                await categories_page(update.message, context, page=last_page)
             else:
                 # Show paginated children of the parent including the newly created category
-                await children_page(update.message, context, parent, page=1)
+                await children_page(update.message, context, parent, page=last_page)
         except Exception:
             # Non-fatal; ignore errors when trying to display the view
             pass
@@ -3676,7 +3555,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                 {"$project": {"name": "$courses.name", "id": "$courses.id"}},
                                 {"$sort": {"name": 1}}
                             ]
-                            course_list = await db.categories.aggregate(pipeline).to_list(length=10000)
+                            course_list = await db.categories.aggregate(pipeline).to_list(length=500)
                             found_index = None
                             for idx, item in enumerate(course_list):
                                 try:
@@ -3712,7 +3591,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                             {"$project": {"name": "$courses.name", "id": "$courses.id"}},
                                             {"$sort": {"name": 1}}
                                         ]
-                                        clist = await db.categories.aggregate(pipeline2).to_list(length=10000)
+                                        clist = await db.categories.aggregate(pipeline2).to_list(length=500)
                                         fidx = None
                                         for idx, item in enumerate(clist):
                                             try:

@@ -1,16 +1,9 @@
-from telegram.ext import (
-    CommandHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
-    CallbackContext,
-)
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from conversation_states import DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE
+from telegram.ext import ConversationHandler, CallbackContext
+from conversation_states import DELETE_ALL
 import logging
-from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 import urllib.parse
-import difflib
 import handlers.base_handlers as base_handlers
 import os
 import uuid
@@ -18,7 +11,7 @@ import uuid
 # Logger setup
 logger = logging.getLogger(__name__)
 # Batch limit to avoid loading very large result sets into memory
-BATCH_LIMIT = 500
+BATCH_LIMIT = 200
 def normalize_name(name: str) -> str:
     """
     Normalize category/course names for consistent comparison and sorting.
@@ -423,7 +416,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
         # Default page size (can be overridden in context.bot_data)
         page_size = int(context.bot_data.get('delete_cat_page_size', 20))
         page = 1
-        total = await db['categories'].count_documents(filter_q)
+        total = await base_handlers.get_total_count(db, 'categories', filter_q, ttl=15)
         start = (page - 1) * page_size
         cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
         page_cats = await cursor.to_list(length=page_size)
@@ -535,7 +528,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         ]
     }
     page_size = int(context.bot_data.get('delete_cat_page_size', 20))
-    total = await db['categories'].count_documents(filter_q)
+    total = await base_handlers.get_total_count(db, 'categories', filter_q, ttl=15)
     start = (page - 1) * page_size
     cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
     page_cats = await cursor.to_list(length=page_size)
@@ -593,7 +586,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     await base_handlers.safe_edit_message(query, "Choose a category to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         
 async def delete_parent_start(update: Update, context: CallbackContext):
-    """Show top-level parent categories for deletion."""
+    """Show top-level parent categories for deletion with pagination."""
 
     # Owner-only: restrict delete UI
     try:
@@ -613,13 +606,14 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         return
 
     try:
-        cats = await db["categories"].find({
-            "$or": [
-                {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]},
-                {"parent": None},
-                {"parent": ""}
-            ]
-        }, {"name": 1, "parent": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
+        page = 1
+        page_size = 20  # smaller page for delete UI
+        start = (page - 1) * page_size
+        total = await base_handlers.get_total_count(db, 'categories', base_handlers.TOP_LEVEL_FILTER, ttl=15)
+        cats = await db["categories"].find(
+            base_handlers.TOP_LEVEL_FILTER,
+            {"name": 1, "parent": 1}
+        ).sort('name', 1).skip(start).limit(page_size).to_list(length=page_size)
 
         if not cats:
             await update.message.reply_text("No parent categories available to delete.")
@@ -659,10 +653,97 @@ async def delete_parent_start(update: Update, context: CallbackContext):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+        # Pagination nav
+        nav = []
+        total_pages = max(1, (total - 1) // page_size + 1) if total else 1
+        last_page = max(1, total_pages)
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_parent_page::{page-1}"))
+        if page < last_page:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_parent_page::{page+1}"))
+        if nav:
+            keyboard.append(nav)
+
     except Exception as e:
         logger.exception("Error listing parent categories for deletion: %s", e)
         await update.message.reply_text("An error occurred. Please try again later.")
                                 
+async def handle_delete_parent_page(update: Update, context: CallbackContext):
+    """Handle pagination for the delete-parent flow (callback: delete_parent_page::<page>)."""
+    query = update.callback_query
+    await base_handlers.safe_answer(query)
+    # Owner-only guard
+    try:
+        owner_env = os.getenv('BOT_OWNER_ID')
+        owner_id = int(owner_env) if owner_env else None
+    except Exception:
+        owner_id = None
+    user_id = getattr(query.from_user, 'id', None)
+    if owner_id is not None and user_id != owner_id:
+        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+        return
+    data = query.data
+    try:
+        page = int(data.split("::")[1])
+    except Exception:
+        page = 1
+
+    db = await get_db()
+    if db is None:
+        await base_handlers.safe_edit_message(query, "Error: Unable to connect to the database.")
+        return
+
+    try:
+        page_size = 20
+        start = (page - 1) * page_size
+        total = await base_handlers.get_total_count(db, 'categories', base_handlers.TOP_LEVEL_FILTER, ttl=15)
+        cats = await db["categories"].find(
+            base_handlers.TOP_LEVEL_FILTER,
+            {"name": 1, "parent": 1}
+        ).sort('name', 1).skip(start).limit(page_size).to_list(length=page_size)
+
+        if not cats:
+            await base_handlers.safe_edit_message(query, "No parent categories found on this page.", action_key=data)
+            return
+
+        keyboard = []
+        for cat in cats:
+            name = (cat.get("name") or "").strip()
+            parent = cat.get("parent")
+            if parent:
+                display_name = f"{parent} → {name}"
+            else:
+                display_name = f"{name} (parent)"
+            try:
+                payload = {"category": name, "parent": parent}
+                key = base_handlers._store_callback_payload(payload)
+                cb = f"delete_summary::category::{key}"
+            except Exception:
+                encoded_name = urllib.parse.quote_plus(name)
+                cb = f"delete_category_{encoded_name}"
+            keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
+
+        nav = []
+        total_pages = max(1, (total - 1) // page_size + 1) if total else 1
+        last_page = max(1, total_pages)
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_parent_page::{page-1}"))
+        if page < last_page:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_parent_page::{page+1}"))
+        if nav:
+            keyboard.append(nav)
+
+        keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
+
+        await base_handlers.safe_edit_message(
+            query,
+            f"Choose a parent category to delete (page {page}):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            action_key=data,
+        )
+    except Exception as e:
+        logger.exception("Error handling delete parent page: %s", e)
+
 async def delete_all_data_start(update: Update, context: CallbackContext):
     """Start the delete-all-data confirmation conversation."""
     # Owner-only: restrict destructive action to bot owner
@@ -735,31 +816,3 @@ async def cancel_delete_all_data(update: Update, context: CallbackContext) -> in
     await base_handlers.safe_answer(update.callback_query)
     await base_handlers.safe_edit_message(update.callback_query, "Deletion of all data has been canceled.", action_key=getattr(update.callback_query, 'data', None))
     return ConversationHandler.END
-
-async def initiate_delete_item(update: Update, context: CallbackContext, item_type: str, item_name: str):
-    """Initiate the deletion of a specific item (course or category) by asking for confirmation."""
-    query = update.callback_query
-    await base_handlers.safe_answer(query)
-    # Owner-only guard for initiating deletes
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(query.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
-        return
-
-    # Construct the confirmation message
-    confirmation_message = f"Are you sure you want to delete the {item_type} '{item_name}'? This action cannot be undone. ⚠️"
-    
-    # Inline keyboard for confirmation
-    keyboard = [
-        [InlineKeyboardButton("Yes", callback_data=f"confirm_delete_{item_type}::{urllib.parse.quote_plus(item_name)}")],
-        [InlineKeyboardButton("No", callback_data=f"cancel_delete_{item_type}::{urllib.parse.quote_plus(item_name)}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Edit the message to prompt for confirmation
-    await base_handlers.safe_edit_message(query, confirmation_message, reply_markup=reply_markup, action_key=getattr(query, 'data', None))

@@ -16,20 +16,10 @@ UptimeRobot (recommended simple setup)
 Notes and tips
 
 - If your host (Render) suspends free services due to inactivity, an external monitor that pings the root URL will keep it awake.
-- Alternatively run the included `scripts/liveness_ping.py` from a small VM or scheduled runner (it uses only stdlib).
-
-Using the included ping script
-
-- Run once and exit:
+- Alternatively use a simple curl-based cron job or scheduled task:
 
 ```bash
-python scripts/liveness_ping.py --url https://forward-list-project.onrender.com/
-```
-
-- Run continuously (every 5 minutes):
-
-```bash
-python scripts/liveness_ping.py --url https://forward-list-project.onrender.com/ --loop --interval 300
+curl -s https://your-app.onrender.com/ > /dev/null
 ```
 
 Security

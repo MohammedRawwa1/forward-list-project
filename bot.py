@@ -1,4 +1,3 @@
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -7,11 +6,9 @@ from telegram.ext import (
     ConversationHandler,
     filters,
 )
-
 from handlers.base_handlers import (
     help_command,
     list_courses,
-    list_coaches,
     list_categories,
     categories_page,
     createcat_page,
@@ -19,7 +16,6 @@ from handlers.base_handlers import (
     create_parent,
     handle_create_category_parent,
     handle_create_category_parent_text,
-    get_courses_by_category,
     courses_callback,
     showtype_handler,
     showcat_handler,
@@ -31,54 +27,28 @@ from handlers.base_handlers import (
     show_coach_in_category,
     debug_db,
 )
-
 from handlers.course_handlers import (
     setup_course_handlers,
-    start,
-    add_course_start,
-    add_course_name,
-    add_course_link,
-    add_course_category,
-    category_selected,
     addcoach_page,
     addcat_page,
-    error_handler as course_error_handler,
-    handle_link_parsing_error,
+    course_error_handler,
     cancel,
 )
-
 from handlers.bot_handlers import (
-    generate_pagination_keyboard,
-    generate_keyboard,
-    delete_item,
-    delete_category,
     delete_category_start,
     handle_delete_category_page,
+    handle_delete_parent_page,
     delete_parent_start,
     handle_course_deletion,
     handle_cancel_delete_callback,
-    delete_item_start,
     delete_all_data_start,
     confirm_delete_all,
     cancel_delete_all_data,
-    initiate_delete_item,
 )
-
-from conversation_states import (
-    ADD_NAME,
-    ADD_LINK,
-    ADD_CATEGORY,
-    CREATE_CAT_NAME,
-    CREATE_CAT_PARENT,
-    DELETE_ALL,
-    CONFIRM_DELETE,
-    CANCEL_DELETE,
-    MAX_CATEGORY_NAME_LENGTH,
-)
-
+from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT, DELETE_ALL
 from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
 from handlers.delete_callbacks import handle_delete_ref, handle_delete_confirm, handle_delete_summary
-from handlers.custom_thumbnail import add_thumb, del_thumb, setup_thumbnail_handlers
+from handlers.category_design import setup_design_handlers
 
 # Search handlers
 from handlers.search_handlers import (
@@ -87,11 +57,9 @@ from handlers.search_handlers import (
     search_categories_pagination_callback,
     search_category_courses_pagination_callback,
 )
-
 from dotenv import load_dotenv
 import logging
 import os
-import re
 
 load_dotenv()
 
@@ -104,19 +72,6 @@ logger = logging.getLogger(__name__)
 
 
 # ---------- helpers ----------
-def is_valid_category_name(category_name: str):
-    """Allow broader set of printable characters in category/parent names.
-
-    Reject only newlines and control characters. Length limits are enforced
-    by `validate_category_name` in `base_handlers.py`.
-    """
-    if not category_name:
-        return False
-    # disallow control characters / newlines
-    if any(c in category_name for c in "\r\n"):
-        return False
-    # permit most printable characters (trim surrounding whitespace)
-    return True
 
 
 # ---------- application factory ----------
@@ -163,8 +118,6 @@ async def setup_handlers(application: Application):
     application.add_handler(CommandHandler("delete_category", delete_category_start))
     application.add_handler(CommandHandler("delete_parent", delete_parent_start))
     # Note: `delete_category_start` not present; command removed until handler is added.
-    application.add_handler(CommandHandler("addthumb", add_thumb))
-    application.add_handler(CommandHandler("delthumb", del_thumb))
     # Global /cancel handler is registered after conversations so ConversationHandler
     # fallbacks get first chance to handle the command.
     # Note: `create_parent` is handled via the ConversationHandler below
@@ -245,6 +198,12 @@ async def setup_handlers(application: Application):
 
     # ---------- conversations ----------
     await setup_course_handlers(application)
+    
+    # ---------- search (before global cancel so active search gets priority) ----------
+    try:
+        application.add_handler(get_search_conversation_handler())
+    except Exception:
+        logger.exception("Failed to register search conversation handler")
 
     # Register a global /cancel after conversations are registered so that
     # ConversationHandler fallbacks handle /cancel first when active.
@@ -298,6 +257,13 @@ async def setup_handlers(application: Application):
             pattern=r"^delete_category_page::\d+$",
         )
     )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            handle_delete_parent_page,
+            pattern=r"^delete_parent_page::\d+$",
+        )
+    )
     application.add_handler(
         CallbackQueryHandler(
             handle_category_deletion,
@@ -349,11 +315,13 @@ async def setup_handlers(application: Application):
         CallbackQueryHandler(showcat_handler, pattern=r"^showcat::")
     )
 
-    # ---------- thumbnails ----------
-    await setup_thumbnail_handlers(application)
+    # ---------- category designs ----------
+    try:
+        setup_design_handlers(application)
+    except Exception:
+        logger.exception("Failed to register design handlers")
 
-    # ---------- search handlers ----------
-    application.add_handler(get_search_conversation_handler())
+    # ---------- search pagination handlers ----------
     application.add_handler(
         CallbackQueryHandler(search_courses_pagination_callback, pattern=r"^search_courses_pg::")
     )

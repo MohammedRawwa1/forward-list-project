@@ -12,8 +12,8 @@ class Config:
     MONGODB_URL = os.getenv("MONGODB_URL")
     MONGODB_NAME = os.getenv("MONGODB_NAME")
 
-    if not all([TELEGRAM_APP_ID, TELEGRAM_API_HASH, BOT_TOKEN, LOGS_CHANNEL, BOT_OWNER_ID, MONGODB_URL, MONGODB_NAME]):
-        raise ValueError("Missing required environment variables. Please check your .env file.")
+    # Note: env vars validated at startup in main.py instead of import-time
+    pass
 
     MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", 10737418240))  # Default to 10GB
     DOWNLOAD_LOCATION = os.path.join(os.path.dirname(__file__), "downloads")
