@@ -2098,6 +2098,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         key = data.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
         if not payload:
+            _clear_design_pending(context)
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
         # payload contains category, coach_slug, page and optionally from_parent/parent_page
@@ -2352,6 +2353,40 @@ async def showtype_handler(update: Update, context: CallbackContext):
             action_key=getattr(query, 'data', None)
         )
         
+def _clear_design_pending(context):
+    """Pop and discard any pending category design from user_data."""
+    try:
+        context.user_data.pop('_pending_design', None)
+        context.user_data.pop('_pending_design_key', None)
+    except Exception:
+        pass
+
+
+async def _send_design_photo(query, context, text, reply_markup):
+    """If a category design is pending in user_data, pop it and send the
+design photo with text as caption and the inline keyboard; otherwise
+fall back to safe_edit_message."""
+    try:
+        pending_design = context.user_data.pop('_pending_design', None)
+        pending_design_key = context.user_data.pop('_pending_design_key', None)
+        if pending_design and pending_design_key and query.message:
+            try:
+                await query.message.delete()
+                await context.bot.send_photo(
+                    chat_id=query.message.chat_id,
+                    photo=pending_design,
+                    caption=text,
+                    reply_markup=reply_markup
+                )
+                context.user_data[pending_design_key] = True
+                return
+            except Exception:
+                pass
+        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    except Exception:
+        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+
+
 async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
     query = update.callback_query
@@ -2374,6 +2409,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         key = raw.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
         if not payload:
+            _clear_design_pending(context)
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
         # payload may contain `path`, optional `from_parent`, `parent_page`, and hidden `parent_index`
@@ -2447,6 +2483,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 if nav:
                     keyboard.append(nav)
 
+                _clear_design_pending(context)
                 title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
                 await safe_edit_message(query, title, reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
                 return
@@ -2551,24 +2588,15 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # category display name and path
     cat_name = category_doc.get('name')
     cat_path = category_doc.get('path') or cat_name
-    # Send category design photo as a banner if one is assigned
+    # Store category design photo info for inline keyboard display
     try:
         from handlers.category_design import get_category_design
-        # Only send once per session to avoid duplicate photos on back-navigation
         design_file_id = await get_category_design(db, cat_name)
         if design_file_id:
-            # Only send once per session per unique file_id (so re-designing triggers the new one)
             design_sent_key = f"_design_sent_{cat_name}_{design_file_id[-16:]}"
             if not context.user_data.get(design_sent_key):
-                try:
-                    await context.bot.send_photo(
-                        chat_id=query.message.chat_id,
-                        photo=design_file_id,
-                        caption=f"🎨 {cat_name}"
-                    )
-                    context.user_data[design_sent_key] = True
-                except Exception:
-                    pass
+                context.user_data['_pending_design'] = design_file_id
+                context.user_data['_pending_design_key'] = design_sent_key
     except Exception:
         pass
 
@@ -2721,6 +2749,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             else:
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
+        _clear_design_pending(context)
         await safe_edit_message(query, f"{cat_path} — Subcategories (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -2745,6 +2774,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton(t_name, callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}")])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
+        _clear_design_pending(context)
         await safe_edit_message(query, f"{cat_name} — Select a type:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -2780,6 +2810,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
+        _clear_design_pending(context)
         await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
         return
 
@@ -2853,7 +2884,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     if not text:
         await safe_edit_message(query, f"No courses found in '{cat_name}' on page {page}.", action_key=getattr(query, 'data', None))
         return
-    await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+    await _send_design_photo(query, context, text, reply_markup)
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
@@ -3295,6 +3326,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
         payload = await _resolve_callback_payload(key)
         logger.debug("handle_course_selection: resolved payload for key=%s -> %s", key, payload)
         if not payload:
+            _clear_design_pending(context)
             await safe_edit_message(query, "Reference expired. Please open the list again.", action_key=getattr(query, 'data', None))
             return
 
