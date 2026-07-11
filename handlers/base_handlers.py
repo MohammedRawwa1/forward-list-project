@@ -1081,7 +1081,13 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
                 pass
             return False
 
-        await query.edit_message_text(text, reply_markup=reply_markup)
+        # Detect photo vs text messages: photos need edit_caption,
+        # text messages need edit_message_text.
+        _msg = getattr(query, "message", None)
+        if _msg and getattr(_msg, "photo", None):
+            await _msg.edit_caption(caption=text, reply_markup=reply_markup)
+        else:
+            await query.edit_message_text(text, reply_markup=reply_markup)
         return True
     except RetryAfter as e:
         wait = int(getattr(e, 'retry_after', 1) or 1)
@@ -1100,7 +1106,15 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
             return True
         logger.error("Error editing message: %s", e)
         try:
-            await query.message.reply_text(text)
+            _fb_msg = getattr(query, "message", None)
+            if _fb_msg and getattr(_fb_msg, "photo", None):
+                # Photo message: try edit_caption before giving up
+                try:
+                    await _fb_msg.edit_caption(caption=text, reply_markup=None)
+                except Exception:
+                    pass
+            else:
+                await query.message.reply_text(text)
         except Exception:
             pass
         return False
