@@ -1097,7 +1097,7 @@ def is_valid_url(url: str):
     return re.match(url_pattern, url) is not None
 
 # Global error handler
-async def error_handler(update, context):
+async def course_error_handler(update, context):
     """Global error handler — safe when update or update.message is None."""
     try:
         err = getattr(context, 'error', context)
