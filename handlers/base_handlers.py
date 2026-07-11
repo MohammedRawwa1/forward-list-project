@@ -2386,12 +2386,43 @@ def _clear_design_pending(context):
 async def _send_design_photo(query, context, text, reply_markup):
     """If a category design is pending in user_data, pop it and send the
 design photo with text as caption and the inline keyboard; otherwise
-fall back to safe_edit_message."""
+fall back to safe_edit_message.
+
+Includes the same debounce and token-bucket rate limiting that
+safe_edit_message uses to avoid Telegram flood-control errors."""
     try:
         pending_design = context.user_data.pop('_pending_design', None)
         pending_design_key = context.user_data.pop('_pending_design_key', None)
         if pending_design and pending_design_key and query.message:
+            # --- Rate limiting (matches safe_edit_message) ---
             try:
+                user_id = getattr(query.from_user, 'id', None) or getattr(query.message, 'chat_id', None)
+                key = getattr(query, 'data', None) or 'send_photo'
+                if user_id and _is_debounced(user_id, key):
+                    # Restore design info so a later retry can pick it up
+                    context.user_data['_pending_design'] = pending_design
+                    context.user_data['_pending_design_key'] = pending_design_key
+                    try:
+                        await safe_answer(query)
+                    except Exception:
+                        pass
+                    return
+
+                uid = user_id or 0
+                ok, wait = await _consume_token(uid)
+                if not ok:
+                    # Restore design info so a later retry can pick it up
+                    context.user_data['_pending_design'] = pending_design
+                    context.user_data['_pending_design_key'] = pending_design_key
+                    await schedule_retry_via_redis_or_local(
+                        query, text, reply_markup=reply_markup, delay=wait
+                    )
+                    try:
+                        await safe_answer(query, text=f"Too many requests. Retrying in {wait}s.")
+                    except Exception:
+                        pass
+                    return
+
                 await query.message.delete()
                 await context.bot.send_photo(
                     chat_id=query.message.chat_id,
@@ -2504,9 +2535,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 if nav:
                     keyboard.append(nav)
 
-                _clear_design_pending(context)
                 title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
-                await safe_edit_message(query, title, reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+                await _send_design_photo(query, context, title, InlineKeyboardMarkup(keyboard))
                 return
         except Exception:
             pass
@@ -2609,7 +2639,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
     # category display name and path
     cat_name = category_doc.get('name')
     cat_path = category_doc.get('path') or cat_name
-    # Store category design photo info for inline keyboard display
+    # Store category design photo info so _send_design_photo can attach
+    # it to the keyboard message (instead of sending a standalone photo).
     try:
         from handlers.category_design import get_category_design
         design_file_id = await get_category_design(db, cat_name)
@@ -2618,17 +2649,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
             if not context.user_data.get(design_sent_key):
                 context.user_data['_pending_design'] = design_file_id
                 context.user_data['_pending_design_key'] = design_sent_key
-                try:
-                    await context.bot.send_photo(
-                        chat_id=query.message.chat_id,
-                        photo=design_file_id,
-                        caption=f"""\U0001f3a8 {cat_name}"""
-                    )
-                    context.user_data[design_sent_key] = True
-                    context.user_data.pop('_pending_design', None)
-                    context.user_data.pop('_pending_design_key', None)
-                except Exception:
-                    pass
     except Exception:
         pass
 
@@ -2786,8 +2806,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         except Exception:
             pass
 
-        _clear_design_pending(context)
-        await safe_edit_message(query, f"{cat_path} — Subcategories (page {page}/{last_page}):", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        await _send_design_photo(query, context, f"{cat_path} — Subcategories (page {page}/{last_page}):", InlineKeyboardMarkup(keyboard))
         return
 
     # If the category doc contains a nested 'types' (category_type) level, show types first
@@ -2811,8 +2830,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton(t_name, callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}")])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
-        _clear_design_pending(context)
-        await safe_edit_message(query, f"{cat_name} — Select a type:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        await _send_design_photo(query, context, f"{cat_name} — Select a type:", InlineKeyboardMarkup(keyboard))
         return
 
     # If we found coaches, show them; otherwise fall back to showing courses in this category
@@ -2847,8 +2865,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
-        _clear_design_pending(context)
-        await safe_edit_message(query, f"Coaches in '{cat_name}':", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+        await _send_design_photo(query, context, f"Coaches in '{cat_name}':", InlineKeyboardMarkup(keyboard))
         return
 
     # Fallback: show courses if no coaches found
