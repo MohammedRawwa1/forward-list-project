@@ -2618,6 +2618,17 @@ async def showcat_handler(update: Update, context: CallbackContext):
             if not context.user_data.get(design_sent_key):
                 context.user_data['_pending_design'] = design_file_id
                 context.user_data['_pending_design_key'] = design_sent_key
+                try:
+                    await context.bot.send_photo(
+                        chat_id=query.message.chat_id,
+                        photo=design_file_id,
+                        caption=f"""\U0001f3a8 {cat_name}"""
+                    )
+                    context.user_data[design_sent_key] = True
+                    context.user_data.pop('_pending_design', None)
+                    context.user_data.pop('_pending_design_key', None)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -2922,7 +2933,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
         reply_markup = InlineKeyboardMarkup(kb)
     except Exception:
         pass
-    await _send_design_photo(query, context, text, reply_markup)
+    await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
 
 
 async def handle_back_to_cats(update: Update, context: CallbackContext):
