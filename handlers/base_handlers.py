@@ -2410,8 +2410,8 @@ Includes the same debounce and token-bucket rate limiting that
 safe_edit_message uses to avoid Telegram flood-control errors."""
     try:
         pending_design = context.user_data.pop('_pending_design', None)
-        pending_design_key = context.user_data.pop('_pending_design_key', None)
-        if pending_design and pending_design_key and query.message:
+        
+        if pending_design and query.message:
             # --- Rate limiting (matches safe_edit_message) ---
             try:
                 user_id = getattr(query.from_user, 'id', None) or getattr(query.message, 'chat_id', None)
@@ -2419,7 +2419,6 @@ safe_edit_message uses to avoid Telegram flood-control errors."""
                 if user_id and _is_debounced(user_id, key):
                     # Restore design info so a later retry can pick it up
                     context.user_data['_pending_design'] = pending_design
-                    context.user_data['_pending_design_key'] = pending_design_key
                     try:
                         await safe_answer(query)
                     except Exception:
@@ -2445,7 +2444,6 @@ safe_edit_message uses to avoid Telegram flood-control errors."""
                 # This avoids message position jumping and flickering.
                 try:
                     await query.message.edit_caption(caption=text, reply_markup=reply_markup)
-                    context.user_data[pending_design_key] = True
                     return
                 except Exception:
                     pass
@@ -2460,7 +2458,6 @@ safe_edit_message uses to avoid Telegram flood-control errors."""
                         caption=text,
                         reply_markup=reply_markup
                     )
-                    context.user_data[pending_design_key] = True
                     return
                 except Exception:
                     pass
@@ -2683,10 +2680,9 @@ async def showcat_handler(update: Update, context: CallbackContext):
         from handlers.category_design import get_category_design
         design_file_id = await get_category_design(db, cat_name)
         if design_file_id:
-            design_sent_key = f"_design_sent_{cat_name}_{design_file_id[-16:]}"
-            if not context.user_data.get(design_sent_key):
-                context.user_data['_pending_design'] = design_file_id
-                context.user_data['_pending_design_key'] = design_sent_key
+            # Always set pending design so _send_design_photo can attach it
+            # (design_sent_key guard removed to fix photo disappearing on revisit)
+            context.user_data['_pending_design'] = design_file_id
     except Exception:
         pass
 
@@ -2951,14 +2947,14 @@ async def showcat_handler(update: Update, context: CallbackContext):
         # this category preselected. Store a short payload reference so the
         # ConversationHandler can be entered via callback without exceeding
         # Telegram callback_data limits.
-        await safe_edit_message(
+        # Use _send_design_photo so even empty categories show their design banner.
+        await _send_design_photo(
             query,
+            context,
             f'Category “{cat_name}” is empty.\nUse /add to populate it.',
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            action_key=getattr(query, 'data', None),
+            InlineKeyboardMarkup(keyboard),
         )
         return
-    courses = sorted(courses, key=lambda c: (c.get('name') or '').lower())
     # Use paginated courses view for this category. Pass parent path as
     # origin_context so Home will return to the parent directory.
     page = page_from_callback or 1
@@ -3334,7 +3330,12 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         items = []
 
     if not items:
-        await safe_edit_message(query, f'Category “{cat_name}” is empty.\nUse /add to populate it.', action_key=getattr(query, 'data', None))
+        await _send_design_photo(
+            query,
+            context,
+            f'Category “{cat_name}” is empty.\nUse /add to populate it.',
+            None,
+        )
         return
 
     keyboard = []
