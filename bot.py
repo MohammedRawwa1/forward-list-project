@@ -9,7 +9,7 @@ from telegram.ext import (
 )
 
 from handlers.base_handlers import (
-    help,
+    help_command,
     list_courses,
     list_coaches,
     list_categories,
@@ -21,7 +21,6 @@ from handlers.base_handlers import (
     handle_create_category_parent_text,
     get_courses_by_category,
     courses_callback,
-    handle_categories_pagination,
     showtype_handler,
     showcat_handler,
     handle_course_selection,
@@ -156,8 +155,8 @@ async def setup_handlers(application: Application):
         return
 
     # ---------- commands ----------
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help))
+    # /start is now handled by a ConversationHandler in setup_course_handlers
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("courses", list_courses))
     application.add_handler(CommandHandler("categories", list_categories))
     application.add_handler(CommandHandler("debug_db", debug_db))
@@ -178,12 +177,8 @@ async def setup_handlers(application: Application):
     application.add_handler(
         CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$")
     )
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_categories_pagination,
-            pattern=r"^categories_(prev|next)_\d+$",
-        )
-    )
+    # Note: handle_categories_pagination handler isn't registered because
+    # pagination now uses categories_page::<page> format instead.
     application.add_handler(
         CallbackQueryHandler(courses_callback, pattern=r"^courses::")
     )

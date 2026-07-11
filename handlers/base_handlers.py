@@ -1130,7 +1130,7 @@ async def safe_edit_message(query, text: str, reply_markup=None, action_key: str
 
         # Check tokens
         uid = user_id or 0
-        ok, wait = _consume_token(uid)
+        ok, wait = await _consume_token(uid)
         if not ok:
             logger.info("Rate limit: scheduling retry in %s seconds for key=%s", wait, key)
             await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
