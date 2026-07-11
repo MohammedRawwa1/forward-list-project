@@ -278,7 +278,11 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
                 new_text = (orig or '')
                 if notice:
                     new_text = new_text + "\n\n" + notice
-                await message.edit_text(new_text)
+                # Detect if message has a photo and use edit_caption instead
+                if getattr(message, 'photo', None):
+                    await message.edit_caption(caption=new_text)
+                else:
+                    await message.edit_text(new_text)
             except Exception:
                 pass
         except Exception:
@@ -2437,24 +2441,44 @@ safe_edit_message uses to avoid Telegram flood-control errors."""
                         pass
                     return
 
-                await query.message.delete()
-                await context.bot.send_photo(
-                    chat_id=query.message.chat_id,
-                    photo=pending_design,
-                    caption=text,
-                    reply_markup=reply_markup
-                )
-                context.user_data[pending_design_key] = True
-                return
+                # Try edit_caption first to preserve the original message.
+                # This avoids message position jumping and flickering.
+                try:
+                    await query.message.edit_caption(caption=text, reply_markup=reply_markup)
+                    context.user_data[pending_design_key] = True
+                    return
+                except Exception:
+                    pass
+
+                # Fall back to delete+send_photo if edit_caption fails
+                # (e.g., file_id expired, or the photo needs to be refreshed)
+                try:
+                    await query.message.delete()
+                    await context.bot.send_photo(
+                        chat_id=query.message.chat_id,
+                        photo=pending_design,
+                        caption=text,
+                        reply_markup=reply_markup
+                    )
+                    context.user_data[pending_design_key] = True
+                    return
+                except Exception:
+                    pass
             except Exception:
                 pass
+        # Fallback: use safe_edit_message which handles both photo and text messages.
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
     except Exception:
-        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+        # Final fallback: try safe_edit_message
+        try:
+            await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, 'data', None))
+        except Exception:
+            pass
 
 
 async def showcat_handler(update: Update, context: CallbackContext):
     """Show courses in the chosen category as URL buttons."""
+    keyboard = []  # always initialize (fixes UnboundLocalError)
     query = update.callback_query
     await safe_answer(query)
     # Expect callback_data forms:

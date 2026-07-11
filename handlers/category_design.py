@@ -100,6 +100,7 @@ def _is_owner(update: Update) -> bool:
 
 async def design_cat_command(update: Update, context: CallbackContext):
     """Start the category design flow — owner-only, reply to a photo."""
+    keyboard = []  # defensive initialization
     if not _is_owner(update):
         await update.message.reply_text("Unauthorized (owner only).")
         return
@@ -215,6 +216,7 @@ async def design_cat_select_callback(update: Update, context: CallbackContext):
 
 
 async def design_cat_page_callback(update: Update, context: CallbackContext):
+    keyboard = []  # defensive initialization
     """Handle pagination for the /design_cat category picker."""
     query = update.callback_query
     await safe_answer(query)

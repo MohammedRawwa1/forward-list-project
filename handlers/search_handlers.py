@@ -172,6 +172,7 @@ async def handle_search_input(update: Update, context: CallbackContext):
 
 async def _perform_category_search(update: Update, context: CallbackContext, query_text: str):
     """Search categories by name, return paginated results."""
+    keyboard = []  # defensive initialization
     try:
         db = await get_db()
         if db is None:
@@ -293,6 +294,7 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
 
 
 async def _perform_category_course_search(update: Update, context: CallbackContext, query_text: str, category: str):
+    keyboard = []  # defensive initialization
     """Search courses by name within a specific category, return paginated results."""
     try:
         db = await get_db()
@@ -467,6 +469,7 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
         await safe_edit_message(query, "An error occurred while loading search results.", action_key=getattr(query, "data", None))
 
 
+keyboard = []  # defensive initialization
 async def search_categories_pagination_callback(update: Update, context: CallbackContext):
     """Handle pagination for category search results."""
     query = update.callback_query
@@ -528,6 +531,7 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
         logger.exception("Error paginating category search: %s", e)
         await safe_edit_message(query, "An error occurred while loading search results.", action_key=getattr(query, "data", None))
 
+    keyboard = []  # defensive initialization
 
 async def search_category_courses_pagination_callback(update: Update, context: CallbackContext):
     """Handle pagination for category-specific course search results."""

@@ -94,6 +94,7 @@ async def add_course_start(update: Update, context: CallbackContext):
 
     If no top-level parents exist, fall back to asking for the course name.
     """
+    keyboard = []  # ensure keyboard is always initialized (fixes UnboundLocalError)
     # Owner-only: restrict /add to configured bot owner
     try:
         owner_env = os.getenv('BOT_OWNER_ID')

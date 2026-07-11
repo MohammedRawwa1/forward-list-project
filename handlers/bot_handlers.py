@@ -280,6 +280,7 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
 
 async def delete_item_start(update: Update, context: CallbackContext):
     """Show every course and empty category in the DB as inline buttons."""
+    keyboard = []  # defensive initialization
     # Owner-only: restrict delete UI
     try:
         owner_env = os.getenv('BOT_OWNER_ID')
@@ -382,6 +383,7 @@ async def delete_item_start(update: Update, context: CallbackContext):
     )
                 
 async def delete_category_start(update: Update, context: CallbackContext):
+    keyboard = []  # defensive initialization
     """Show a paginated list of categories for deletion.
 
     Uses `delete_category_page::<n>` callbacks to navigate pages.
@@ -491,6 +493,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
         await update.message.reply_text("An error occurred. Please try again later.")
 
 
+keyboard = []  # defensive initialization
 async def handle_delete_category_page(update: Update, context: CallbackContext):
     """Render a specific page of categories for deletion (callback).
 
@@ -584,6 +587,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
     await base_handlers.safe_edit_message(query, "Choose a category to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
+    keyboard = []  # defensive initialization
         
 async def delete_parent_start(update: Update, context: CallbackContext):
     """Show top-level parent categories for deletion with pagination."""
@@ -666,6 +670,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
 
     except Exception as e:
         logger.exception("Error listing parent categories for deletion: %s", e)
+        keyboard = []  # defensive initialization
         await update.message.reply_text("An error occurred. Please try again later.")
                                 
 async def handle_delete_parent_page(update: Update, context: CallbackContext):
