@@ -4,6 +4,7 @@ import json
 import uvicorn
 import asyncio
 import signal
+from typing import Optional
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
@@ -11,6 +12,7 @@ from telegram import Update
 from telegram.ext import Application, TypeHandler, CallbackContext
 from dotenv import load_dotenv
 from loguru import logger
+import httpx
 
 from bot import create_application, setup_handlers
 from handlers.base_handlers import start_redis_retry_worker
@@ -32,6 +34,56 @@ LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
 
 if not bot_token:
     raise ValueError("BOT_TOKEN environment variable is not set")
+
+
+# ---------- helpers ----------
+
+def _resolve_webhook_url() -> Optional[str]:
+    """Determine the public webhook URL the bot should register with Telegram.
+
+    Priority:
+    1. ``WEBHOOK_URL`` env var (fully custom)
+    2. ``RENDER_EXTERNAL_URL`` (set by Render platform) + ``/<bot_token>/``
+    3. Fall back to ``None`` (skip auto-registration)
+    """
+    explicit = os.getenv("WEBHOOK_URL")
+    if explicit:
+        return explicit.rstrip("/") + "/"
+
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        return f"{render_url.rstrip('/')}/{bot_token}/"
+
+    logger.warning(
+        "Neither WEBHOOK_URL nor RENDER_EXTERNAL_URL is set; "
+        "webhook auto-registration will be skipped."
+    )
+    return None
+
+
+async def _register_webhook(url: str) -> bool:
+    """Call Telegram ``setWebhook`` with *url* and log the result."""
+    api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
+    payload: dict = {"url": url, "max_connections": 100}
+    # If a secret token is configured, include it so Telegram sends it back
+    # in the X-Telegram-Bot-Api-Secret-Token header with every update.
+    secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
+    if secret_token:
+        payload["secret_token"] = secret_token
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(api_url, json=payload)
+            data = resp.json()
+            if data.get("ok"):
+                logger.info("Webhook successfully registered -> %s", url)
+                return True
+            logger.error(
+                "Telegram setWebhook failed: %s (url=%s)", data, url
+            )
+            return False
+    except Exception as exc:
+        logger.exception("Failed to call Telegram setWebhook: %s", exc)
+        return False
 
 
 # ---------- DB ----------
@@ -58,6 +110,21 @@ async def echo_update(update: Update, context: CallbackContext):
         update.effective_user.id if update.effective_user else None,
         update.effective_chat.id if update.effective_chat else None,
     )
+
+
+# ---------- low-level update processing ----------
+
+async def _process_telegram_update(request: Request) -> dict:
+    """Deserialize a Telegram ``Update`` from *request* and pass it through
+    the application handler chain.  Returns a JSON-serialisable dict."""
+    if application is None:
+        # Startup hasn't finished yet — Render cold start. Return a
+        # transient error so Telegram retries after a short delay.
+        raise HTTPException(status_code=503, detail="Bot still starting up")
+    json_str = await request.body()
+    update = Update.de_json(json.loads(json_str), application.bot)
+    await application.process_update(update)
+    return {"status": "ok"}
 
 
 # ---------- startup ----------
@@ -104,6 +171,21 @@ async def startup_event():
     except Exception:
         logger.exception("Failed to start redis retry worker")
 
+    # Auto-register webhook with Telegram so the correct URL is always set
+    # after a deploy or restart.
+    wh_url = _resolve_webhook_url()
+    if wh_url:
+        try:
+            await _register_webhook(wh_url)
+        except Exception:
+            logger.exception("Failed to auto-register webhook on startup")
+    else:
+        logger.info(
+            "Webhook URL could not be determined; "
+            "skipping auto-registration. "
+            "Set WEBHOOK_URL or RENDER_EXTERNAL_URL env vars."
+        )
+
     # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
     loop = asyncio.get_event_loop()
     def _log_signal(sig):
@@ -139,18 +221,36 @@ async def shutdown_event():
         logger.exception("Error closing MongoDB connection during shutdown")
 
 
-# ---------- webhook ----------
+# ---------- webhook endpoints ----------
+# NOTE: /webhook fallback routes must be defined BEFORE /{token}/ so they
+# take priority.  If defined after, FastAPI would match /webhook/ against
+# /{token}/ first (with token="webhook") and reject it with 400.
+
+@app.post("/webhook")
+@app.post("/webhook/")
+async def webhook_fallback(request: Request):
+    """Secondary webhook endpoint at the plain ``/webhook`` path.
+
+    Some deployments use a reverse-proxy or platform-level routing that
+    forwards Telegram updates to ``/webhook`` instead of ``/<token>/``.
+    This endpoint accepts those requests and processes them identically.
+    Both ``/webhook`` and ``/webhook/`` are handled to avoid redirect issues.
+    """
+    # Optional: verify via X-Telegram-Bot-Api-Secret-Token header if configured.
+    secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
+    if secret_token:
+        hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if hdr != secret_token:
+            raise HTTPException(status_code=401, detail="Invalid secret token")
+    return await _process_telegram_update(request)
+
+
 @app.post("/{token}/")
 async def webhook(token: str, request: Request):
+    """Primary webhook endpoint — path includes the bot token for verification."""
     if token != bot_token:
         raise HTTPException(status_code=400, detail="Invalid token")
-
-    json_str = await request.body()
-    update = Update.de_json(json.loads(json_str), application.bot)
-
-    await application.process_update(update)
-
-    return {"status": "ok"}
+    return await _process_telegram_update(request)
 
 
 @app.get("/")
