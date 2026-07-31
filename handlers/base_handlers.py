@@ -696,6 +696,114 @@ def _shorten_showcat_cb(path: str, page: int, from_parent: str | None = None, pa
         return f"showcat::{urllib.parse.quote_plus(path)}::{page}"
 
 
+def _search_category_courses_cb(category, page: int = 1) -> str:
+    """Return callback_data for the "🔍 Search" button on category views.
+
+    Prefer the inline ``search_category_courses::<category>::<page>`` form when
+    it fits Telegram's 64-byte callback_data limit. Long (especially Arabic)
+    category names would push the payload over the limit and make Telegram
+    reject the entire results-message keyboard; fall back to a short
+    ``search_category_courses_ref::<key>`` stored payload instead.
+    """
+    try:
+        cb = f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}"
+        if len(cb.encode("utf-8")) <= 64:
+            return cb
+        payload = {"type": "search_category_courses", "category": str(category), "page": page}
+        key = _store_callback_payload(payload)
+        return f"search_category_courses_ref::{key}"
+    except Exception:
+        return f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}"
+
+
+def _fit_cb(prefix: str, inline_cb: str, payload: dict) -> str:
+    """Return `inline_cb` when it fits Telegram's 64-byte callback_data limit;
+    otherwise store `payload` and return a compact `<prefix>_ref::<key>` form.
+    """
+    try:
+        if len(inline_cb.encode("utf-8")) <= 64:
+            return inline_cb
+        key = _store_callback_payload(payload)
+        return f"{prefix}_ref::{key}"
+    except Exception:
+        return inline_cb
+
+
+def _search_courses_coach_cb(coach_name, page: int = 1) -> str:
+    """Compact callback for the "🔍 Search" button on coach course lists."""
+    return _fit_cb(
+        "search_courses_coach",
+        f"search_courses::coach::{urllib.parse.quote_plus(str(coach_name))}::{page}",
+        {"type": "search_courses_coach", "coach": str(coach_name), "page": page},
+    )
+
+
+def _showtype_cb(cat_name, t_name) -> str:
+    """Compact callback for the showtype view (long category/type names)."""
+    return _fit_cb(
+        "showtype",
+        f"showtype::{urllib.parse.quote_plus(str(cat_name))}::{urllib.parse.quote_plus(str(t_name))}",
+        {"type": "showtype", "category": str(cat_name), "type_name": str(t_name)},
+    )
+
+
+def _createcat_parent_cb(name) -> str:
+    """Compact callback for the create-category parent picker."""
+    return _fit_cb(
+        "createcat_parent",
+        f"createcat_parent::{urllib.parse.quote_plus(str(name))}",
+        {"type": "createcat_parent", "category": str(name)},
+    )
+
+
+def _courses_home_cb(origin_type: str, category) -> str:
+    """Compact callback for the "🏠 Home" breadcrumb on category/coach pages.
+
+    Falls back to ``courses_ref::<key>`` (a ``courses_page`` payload, resolved
+    by ``courses_callback``) when the inline ``courses::<type>::<category>::1``
+    form would exceed 64 bytes (long Arabic category/coach names).
+    """
+    inline = f"courses::{origin_type}::{urllib.parse.quote_plus(str(category))}::1"
+    payload = {
+        "type": "courses_page",
+        "page": 1,
+        "origin_type": origin_type,
+        "category": str(category),
+        "origin_context": None,
+        "origin_context_page": None,
+        "total_count": None,
+        "page_size": PAGE_SIZE,
+    }
+    return _fit_cb("courses", inline, payload)
+
+
+def _category_page_next_cb(cat_path, page: int, total_count=None) -> str:
+    """Compact callback for the quick "➡️ Next" button on category pages.
+
+    Uses the existing ``courses_ref::<key>`` mechanism (a ``courses_page``
+    payload, which ``courses_callback`` resolves) when the inline
+    ``courses::category::...`` form would exceed 64 bytes.
+    """
+    try:
+        cb = f"courses::category::{urllib.parse.quote_plus(str(cat_path))}::{page}"
+        if len(cb.encode("utf-8")) <= 64:
+            return cb
+        payload = {
+            "type": "courses_page",
+            "page": page,
+            "origin_type": "category",
+            "category": str(cat_path),
+            "origin_context": None,
+            "origin_context_page": None,
+            "total_count": total_count,
+            "page_size": PAGE_SIZE,
+        }
+        key = _store_callback_payload(payload)
+        return f"courses_ref::{key}"
+    except Exception:
+        return f"courses::category::{urllib.parse.quote_plus(str(cat_path))}::{page}"
+
+
 async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
     """Persist callback payload to Redis (preferred) or MongoDB (fallback).
     TTL defaults to 7 days.
@@ -1980,7 +2088,7 @@ def build_courses_page(
                 breadcrumb_buttons = [
                     InlineKeyboardButton(
                         "🏠 Home",
-                        callback_data=f"courses::coach::{urllib.parse.quote_plus(category)}::1",
+                        callback_data=_courses_home_cb("coach", category),
                     ),
                 ]
             else:
@@ -1993,7 +2101,7 @@ def build_courses_page(
                 breadcrumb_buttons = [
                     InlineKeyboardButton(
                         "🏠 Home",
-                        callback_data=f"courses::category::{urllib.parse.quote_plus(category)}::1",
+                        callback_data=_courses_home_cb("category", category),
                     ),
                 ]
             else:
@@ -2265,7 +2373,7 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
             [
                 InlineKeyboardButton(
                     cat.get("name"),
-                    callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}",
+                    callback_data=_createcat_parent_cb(cat.get("name")),
                 ),
             ],
         )
@@ -2789,7 +2897,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         "\U0001f50d Search",
-                        callback_data=f"search_courses::coach::{urllib.parse.quote_plus(str(coach_name))}::{page}",
+                        callback_data=_search_courses_coach_cb(coach_name, page),
                     ),
                 ],
             )
@@ -2987,7 +3095,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         "\U0001f50d Search",
-                        callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}",
+                        callback_data=_search_category_courses_cb(category, page),
                     ),
                 ],
             )
@@ -3023,14 +3131,30 @@ async def showtype_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
 
-    data = query.data.split("::")
-    if len(data) < 3:
+    raw = query.data
+    category_name = ""
+    type_name = ""
+    if raw.startswith("showtype_ref::"):
+        # Compact ref form used when category/type names exceed 64 bytes
+        try:
+            payload = await _resolve_callback_payload(raw.split("::", 1)[1])
+            if payload:
+                category_name = payload.get("category") or ""
+                type_name = payload.get("type_name") or ""
+        except Exception:
+            category_name = ""
+            type_name = ""
+    else:
+        data = raw.split("::")
+        if len(data) < 3:
+            await safe_edit_message(query, "Invalid type callback.", action_key=getattr(query, "data", None))
+            return
+        _, encoded_category, encoded_type = data[:3]
+        category_name = urllib.parse.unquote_plus(encoded_category)
+        type_name = urllib.parse.unquote_plus(encoded_type)
+    if not category_name or not type_name:
         await safe_edit_message(query, "Invalid type callback.", action_key=getattr(query, "data", None))
         return
-
-    _, encoded_category, encoded_type = data[:3]
-    category_name = urllib.parse.unquote_plus(encoded_category)
-    type_name = urllib.parse.unquote_plus(encoded_type)
 
     db = await get_db()
     if db is None:
@@ -3092,7 +3216,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         "\U0001f50d Search",
-                        callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category_name))}::1",
+                        callback_data=_search_category_courses_cb(category_name, 1),
                     ),
                 ],
             )
@@ -3620,7 +3744,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         "\U0001f50d Search",
-                        callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(cat_name))}::{page}",
+                        callback_data=_search_category_courses_cb(cat_name, page),
                     ),
                 ],
             )
@@ -3657,7 +3781,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         t_name,
-                        callback_data=f"showtype::{urllib.parse.quote_plus(cat_name)}::{urllib.parse.quote_plus(t_name)}",
+                        callback_data=_showtype_cb(cat_name, t_name),
                     ),
                 ],
             )
@@ -3756,7 +3880,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             [
                 InlineKeyboardButton(
                     "\U0001f50d Search",
-                    callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(cat_name))}::{page}",
+                    callback_data=_search_category_courses_cb(cat_name, page),
                 ),
             ],
         )
@@ -3813,7 +3937,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             [
                 InlineKeyboardButton(
                     "\U0001f50d Search",
-                    callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(cat_name))}::{page}",
+                    callback_data=_search_category_courses_cb(cat_name, page),
                 ),
             ],
         )
@@ -3988,7 +4112,7 @@ async def create_category(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         cat.get("name"),
-                        callback_data=f"createcat_parent::{urllib.parse.quote_plus(cat.get('name'))}",
+                        callback_data=_createcat_parent_cb(cat.get("name")),
                     ),
                 ],
             )
@@ -4013,8 +4137,19 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
     if owner_id is not None and user_id != owner_id:
         await safe_edit_message(query, "Unauthorized", action_key=getattr(query, "data", None))
         return ConversationHandler.END
-    encoded = query.data.split("::", 1)[1]
-    parent = urllib.parse.unquote_plus(encoded) if encoded else None
+    raw = query.data
+    parent = None
+    if raw.startswith("createcat_parent_ref::"):
+        # Compact ref form used when the parent name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(raw.split("::", 1)[1])
+            if payload:
+                parent = payload.get("category") or payload.get("category_name")
+        except Exception:
+            parent = None
+    else:
+        encoded = raw.split("::", 1)[1] if "::" in raw else ""
+        parent = urllib.parse.unquote_plus(encoded) if encoded else None
     # Store chosen parent in user_data for the following name prompt
     context.user_data["new_cat_parent"] = parent
     try:
@@ -4290,7 +4425,7 @@ async def handle_category_selection(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         "➡️ Next",
-                        callback_data=f"courses::category::{urllib.parse.quote_plus(cat_path)}::2",
+                        callback_data=_category_page_next_cb(cat_path, 2, total_items),
                     ),
                 ],
             )
@@ -5325,7 +5460,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             [
                                 InlineKeyboardButton(
                                     "\U0001f50d Search",
-                                    callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}",
+                                    callback_data=_search_category_courses_cb(category, page),
                                 ),
                             ],
                         )
@@ -5526,7 +5661,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 [
                                     InlineKeyboardButton(
                                         "\U0001f50d Search",
-                                        callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}",
+                                        callback_data=_search_category_courses_cb(category, page),
                                     ),
                                 ],
                             )
@@ -5618,7 +5753,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 [
                                     InlineKeyboardButton(
                                         "\U0001f50d Search",
-                                        callback_data=f"search_courses::coach::{urllib.parse.quote_plus(str(coach_name))}::{page}",
+                                        callback_data=_search_courses_coach_cb(coach_name, page),
                                     ),
                                 ],
                             )
@@ -5768,7 +5903,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             [
                                 InlineKeyboardButton(
                                     "\U0001f50d Search",
-                                    callback_data=f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}",
+                                    callback_data=_search_category_courses_cb(category, page),
                                 ),
                             ],
                         )

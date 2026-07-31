@@ -20,13 +20,36 @@ from config import is_owner
 from handlers.base_handlers import (
     PAGE_SIZE,
     TOP_LEVEL_FILTER,
+    _fit_cb,
     _get_total_count,
+    _resolve_callback_payload,
     safe_answer,
     safe_edit_message,
 )
 from handlers.db_connection import get_db
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------  compact callbacks (keep callback_data <= 64 bytes)  ---------------
+
+
+def _design_cat_select_cb(name) -> str:
+    """Compact callback for the design-category picker (long Arabic names)."""
+    return _fit_cb(
+        "design_cat_select",
+        f"design_cat_select::{urllib.parse.quote_plus(str(name))}",
+        {"type": "design_cat_select", "category": str(name)},
+    )
+
+
+def _remove_design_cb(name) -> str:
+    """Compact callback for the remove-design picker (long Arabic names)."""
+    return _fit_cb(
+        "remove_design",
+        f"remove_design::{urllib.parse.quote_plus(str(name))}",
+        {"type": "remove_design", "category": str(name)},
+    )
 
 DESIGNS_COLLECTION = "category_designs"
 
@@ -140,7 +163,7 @@ async def design_cat_command(update: Update, context: CallbackContext):
     for p in parents:
         name = p.get("name", "")
         keyboard.append(
-            [InlineKeyboardButton(name, callback_data=f"design_cat_select::{urllib.parse.quote_plus(name)}")],
+            [InlineKeyboardButton(name, callback_data=_design_cat_select_cb(name))],
         )
 
     # Pagination nav
@@ -172,12 +195,24 @@ async def design_cat_select_callback(update: Update, context: CallbackContext):
         return
 
     data = query.data
-    parts = data.split("::")
-    if len(parts) < 2:
+    category_name = None
+    if data.startswith("design_cat_select_ref::"):
+        # Compact ref form used when the category name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(data.split("::", 1)[1])
+            if payload:
+                category_name = payload.get("category")
+        except Exception:
+            category_name = None
+    else:
+        parts = data.split("::")
+        if len(parts) < 2:
+            await safe_edit_message(query, "Invalid callback.", action_key=data)
+            return
+        category_name = urllib.parse.unquote_plus(parts[1])
+    if not category_name:
         await safe_edit_message(query, "Invalid callback.", action_key=data)
         return
-
-    category_name = urllib.parse.unquote_plus(parts[1])
     file_id = context.user_data.pop("design_file_id", None)
 
     if not file_id:
@@ -252,7 +287,7 @@ async def design_cat_page_callback(update: Update, context: CallbackContext):
     for p in parents:
         name = p.get("name", "")
         keyboard.append(
-            [InlineKeyboardButton(name, callback_data=f"design_cat_select::{urllib.parse.quote_plus(name)}")],
+            [InlineKeyboardButton(name, callback_data=_design_cat_select_cb(name))],
         )
 
     nav = []
@@ -305,7 +340,7 @@ async def remove_design_command(update: Update, context: CallbackContext):
     keyboard = []
     for name in designed:
         keyboard.append(
-            [InlineKeyboardButton(f"🗑️ {name}", callback_data=f"remove_design::{urllib.parse.quote_plus(name)}")],
+            [InlineKeyboardButton(f"🗑️ {name}", callback_data=_remove_design_cb(name))],
         )
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="design_cat_cancel")])
 
@@ -325,12 +360,24 @@ async def remove_design_callback(update: Update, context: CallbackContext):
         return
 
     data = query.data
-    parts = data.split("::")
-    if len(parts) < 2:
+    category_name = None
+    if data.startswith("remove_design_ref::"):
+        # Compact ref form used when the category name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(data.split("::", 1)[1])
+            if payload:
+                category_name = payload.get("category")
+        except Exception:
+            category_name = None
+    else:
+        parts = data.split("::")
+        if len(parts) < 2:
+            await safe_edit_message(query, "Invalid callback.", action_key=data)
+            return
+        category_name = urllib.parse.unquote_plus(parts[1])
+    if not category_name:
         await safe_edit_message(query, "Invalid callback.", action_key=data)
         return
-
-    category_name = urllib.parse.unquote_plus(parts[1])
 
     db = await get_db()
     if db is None:
@@ -363,6 +410,10 @@ def setup_design_handlers(application):
 
     # Callbacks
     application.add_handler(CallbackQueryHandler(design_cat_select_callback, pattern=r"^design_cat_select::"))
+    # Compact ref form (long Arabic category names)
+    application.add_handler(CallbackQueryHandler(design_cat_select_callback, pattern=r"^design_cat_select_ref::"))
     application.add_handler(CallbackQueryHandler(design_cat_page_callback, pattern=r"^design_cat_page::"))
     application.add_handler(CallbackQueryHandler(design_cat_cancel_callback, pattern=r"^design_cat_cancel$"))
     application.add_handler(CallbackQueryHandler(remove_design_callback, pattern=r"^remove_design::"))
+    # Compact ref form (long Arabic category names)
+    application.add_handler(CallbackQueryHandler(remove_design_callback, pattern=r"^remove_design_ref::"))

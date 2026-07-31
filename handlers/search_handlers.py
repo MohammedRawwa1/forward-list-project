@@ -8,6 +8,7 @@ rendered using the same builders as the normal browsing views.
 
 import logging
 import math
+import re
 import urllib.parse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -28,6 +29,7 @@ from handlers.atlas_search import (
 )
 from handlers.base_handlers import (
     PAGE_SIZE,
+    _resolve_callback_payload,
     _store_callback_payload,
     build_courses_page,
     safe_answer,
@@ -56,6 +58,52 @@ def _extract_course_rows(existing_kb: list) -> list:
         return list(existing_kb)
 
 
+# ---------------  search query refs (keep callback_data <= 64 bytes)  ---------------
+
+# Telegram limits callback_data to 64 bytes. Embedding the raw query text in
+# pagination callbacks (e.g. ``search_courses_pg::<query>::<page>``) breaks
+# once the query is long or non-ASCII (Arabic queries are common here): the
+# payload exceeds the limit and Telegram rejects the whole results message,
+# so the search appears to "not return" anything. Storing the query in the
+# callback payload keeps every button compact and stable across pages.
+
+_SEARCH_REF_PATTERN = re.compile(r"^[0-9a-fA-F]{16}$")
+
+
+def _search_query_ref(query_text: str) -> str:
+    """Store a search query and return a compact 16-char reference."""
+    return _store_callback_payload({"type": "search_query", "q": query_text})
+
+
+def _category_search_ref(query_text: str, category: str) -> str:
+    """Like ``_search_query_ref`` but also carries the category scope so the
+    category-courses pagination callback stays compact for long names."""
+    return _store_callback_payload({"type": "search_query", "q": query_text, "category": category})
+
+
+async def _resolve_search_query(raw: str):
+    """Resolve a query from a callback segment.
+
+    New-style callbacks store a 16-char ref; legacy in-flight callbacks embed
+    the raw query text. Returns the resolved query, or the raw text when it
+    isn't a stored ref.
+    """
+    if raw and len(raw) == 16 and _SEARCH_REF_PATTERN.match(raw):
+        try:
+            payload = await _resolve_callback_payload(raw)
+            if payload and payload.get("type") == "search_query":
+                q = payload.get("q")
+                if q:
+                    return q
+        except Exception:
+            pass
+        # Ref-pattern segment that couldn't be resolved (stale in-flight button
+        # after a restart, pruned map, Redis/Mongo miss) → let callers fall back
+        # to user_data instead of searching for the raw hex key.
+        return ""
+    return raw
+
+
 # ---------------  callback entry points  ---------------
 
 
@@ -63,17 +111,39 @@ async def search_courses_callback(update: Update, context: CallbackContext):
     """🔍 Search button clicked from global courses view.
 
     Callback data: search_courses::<origin_type>::<context>::<page>
+    or the compact ref form for long coach names:
+    search_courses_coach_ref::<key16>
     """
     query = update.callback_query
     await safe_answer(query)
-    parts = query.data.split("::")
-    origin_type = parts[1] if len(parts) > 1 else "global"
-    origin_context = parts[2] if len(parts) > 2 else ""
-    origin_page = parts[3] if len(parts) > 3 else "1"
-    try:
-        origin_page = int(origin_page)
-    except Exception:
-        origin_page = 1
+    data = query.data
+    origin_type = "global"
+    origin_context = ""
+    origin_page = 1
+    if data.startswith("search_courses_coach_ref::"):
+        # Compact ref form used when the coach name exceeds the 64-byte
+        # callback_data limit (long Arabic coach names).
+        try:
+            payload = await _resolve_callback_payload(data.split("::", 1)[1])
+            if payload:
+                origin_type = "coach"
+                origin_context = payload.get("coach") or ""
+                try:
+                    origin_page = int(payload.get("page") or 1)
+                except Exception:
+                    origin_page = 1
+        except Exception:
+            origin_type = "global"
+            origin_context = ""
+            origin_page = 1
+    else:
+        parts = data.split("::")
+        origin_type = parts[1] if len(parts) > 1 else "global"
+        origin_context = parts[2] if len(parts) > 2 else ""
+        try:
+            origin_page = int(parts[3]) if len(parts) > 3 else 1
+        except Exception:
+            origin_page = 1
 
     context.user_data["search_origin_type"] = origin_type
     context.user_data["search_origin_context"] = origin_context
@@ -117,16 +187,40 @@ async def search_category_courses_callback(update: Update, context: CallbackCont
     """🔍 Search button clicked from a specific category's course list.
 
     Callback data: search_category_courses::<category_name>::<page>
+    or the compact ref form (long Arabic category names):
+    search_category_courses_ref::<key16>
     """
     query = update.callback_query
     await safe_answer(query)
-    parts = query.data.split("::")
-    category_name = urllib.parse.unquote_plus(parts[1]) if len(parts) > 1 else ""
-    origin_page = parts[2] if len(parts) > 2 else "1"
-    try:
-        origin_page = int(origin_page)
-    except Exception:
-        origin_page = 1
+    data = query.data
+    category_name = ""
+    origin_page = 1
+    if data.startswith("search_category_courses_ref::"):
+        # Compact ref form: category name was too long to embed inline.
+        try:
+            key = data.split("::", 1)[1]
+            payload = await _resolve_callback_payload(key)
+            if payload:
+                category_name = payload.get("category") or ""
+                try:
+                    origin_page = int(payload.get("page") or 1)
+                except Exception:
+                    origin_page = 1
+        except Exception:
+            category_name = ""
+            origin_page = 1
+    else:
+        parts = data.split("::")
+        category_name = urllib.parse.unquote_plus(parts[1]) if len(parts) > 1 else ""
+        try:
+            origin_page = int(parts[2]) if len(parts) > 2 else 1
+        except Exception:
+            origin_page = 1
+
+    if not category_name:
+        # Stale ref (bot restart / pruned callback map): fall back to the
+        # last known category for this chat so the prompt stays meaningful.
+        category_name = context.user_data.get("search_category", "")
 
     context.user_data["search_category"] = category_name
     context.user_data["search_origin_page"] = origin_page
@@ -208,12 +302,13 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
 
         total_pages = max(1, math.ceil(total / page_size))
         nav = []
+        search_ref = _search_query_ref(query_text)
         if page > 1:
             nav.append(
-                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{query_text}::{page - 1}"),
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{search_ref}::{page - 1}"),
             )
         if page < total_pages:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{query_text}::{page + 1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{search_ref}::{page + 1}"))
         if nav:
             keyboard.append(nav)
 
@@ -271,13 +366,14 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
 
         # Build the search navigation row
         search_nav = []
+        search_ref = _search_query_ref(query_text)
         if page > 1:
             search_nav.append(
-                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{query_text}::{page - 1}"),
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{search_ref}::{page - 1}"),
             )
         if page < total_pages:
             search_nav.append(
-                InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{query_text}::{page + 1}"),
+                InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{search_ref}::{page + 1}"),
             )
         if search_nav:
             existing_kb.append(search_nav)
@@ -402,18 +498,19 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
             total_pages = max(1, math.ceil(total / page_size))
 
             search_nav = []
+            search_ref = _category_search_ref(query_text, category)
             if page > 1:
                 search_nav.append(
                     InlineKeyboardButton(
                         "⬅️ Previous",
-                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page - 1}",
+                        callback_data=f"search_cat_courses_pg::{search_ref}::{page - 1}",
                     ),
                 )
             if page < total_pages:
                 search_nav.append(
                     InlineKeyboardButton(
                         "➡️ Next",
-                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page + 1}",
+                        callback_data=f"search_cat_courses_pg::{search_ref}::{page + 1}",
                     ),
                 )
             if search_nav:
@@ -436,12 +533,21 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
     """Handle pagination for global course search results."""
     query = update.callback_query
     await safe_answer(query)
-    # Format: search_courses_pg::<query>::<page>
+    # Format: search_courses_pg::<ref16>::<page> (or legacy ::<query>::<page>)
     parts = query.data.split("::")
     if len(parts) < 3:
         await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
         return
-    query_text = parts[1]
+    query_text = await _resolve_search_query(parts[1])
+    if not query_text:
+        query_text = context.user_data.get("last_search_query", "")
+    if not query_text:
+        await safe_edit_message(
+            query,
+            "Search query is no longer available. Please search again.",
+            action_key=getattr(query, "data", None),
+        )
+        return
     try:
         page = int(parts[2])
     except Exception:
@@ -461,6 +567,14 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
 
         course_items, total, _ = await execute_course_search(db, query_text, page=page, page_size=page_size)
 
+        if total == 0:
+            await safe_edit_message(
+                query,
+                f"No courses found matching '{query_text}'. 😕",
+                action_key=getattr(query, "data", None),
+            )
+            return
+
         _, reply_markup = build_courses_page(
             course_items,
             page=page,
@@ -474,13 +588,14 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
+        search_ref = _search_query_ref(query_text)
         if page > 1:
             search_nav.append(
-                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{query_text}::{page - 1}"),
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{search_ref}::{page - 1}"),
             )
         if page < total_pages:
             search_nav.append(
-                InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{query_text}::{page + 1}"),
+                InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{search_ref}::{page + 1}"),
             )
         if search_nav:
             existing_kb.append(search_nav)
@@ -508,11 +623,21 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
     """Handle pagination for category search results."""
     query = update.callback_query
     await safe_answer(query)
+    # Format: search_categories_pg::<ref16>::<page> (or legacy ::<query>::<page>)
     parts = query.data.split("::")
     if len(parts) < 3:
         await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
         return
-    query_text = parts[1]
+    query_text = await _resolve_search_query(parts[1])
+    if not query_text:
+        query_text = context.user_data.get("last_search_query", "")
+    if not query_text:
+        await safe_edit_message(
+            query,
+            "Search query is no longer available. Please search again.",
+            action_key=getattr(query, "data", None),
+        )
+        return
     try:
         page = int(parts[2])
     except Exception:
@@ -532,6 +657,14 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
 
         page_cats, total, _ = await execute_category_search(db, query_text, page=page, page_size=page_size)
 
+        if not page_cats:
+            await safe_edit_message(
+                query,
+                f"No categories found matching '{query_text}'. 😕",
+                action_key=getattr(query, "data", None),
+            )
+            return
+
         keyboard = []
         for cat in page_cats:
             cat_path = cat.get("path") or cat.get("name")
@@ -547,12 +680,13 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
 
         total_pages = max(1, math.ceil(total / page_size))
         nav = []
+        search_ref = _search_query_ref(query_text)
         if page > 1:
             nav.append(
-                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{query_text}::{page - 1}"),
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{search_ref}::{page - 1}"),
             )
         if page < total_pages:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{query_text}::{page + 1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{search_ref}::{page + 1}"))
         if nav:
             keyboard.append(nav)
 
@@ -578,15 +712,41 @@ async def search_category_courses_pagination_callback(update: Update, context: C
     """Handle pagination for category-specific course search results."""
     query = update.callback_query
     await safe_answer(query)
-    # Format: search_cat_courses_pg::<category_encoded>::<query>::<page>
+    # New format: search_cat_courses_pg::<ref16>::<page>
+    # Legacy format: search_cat_courses_pg::<category_encoded>::<query>::<page>
     parts = query.data.split("::")
-    if len(parts) < 4:
+    category = ""
+    query_text = ""
+    page_raw = ""
+    if len(parts) == 3 and len(parts[1]) == 16 and _SEARCH_REF_PATTERN.match(parts[1]):
+        try:
+            payload = await _resolve_callback_payload(parts[1])
+            if payload:
+                category = payload.get("category") or ""
+                query_text = payload.get("q") or ""
+        except Exception:
+            pass
+        page_raw = parts[2]
+    elif len(parts) >= 4:
+        category = urllib.parse.unquote_plus(parts[1])
+        query_text = await _resolve_search_query(parts[2])
+        page_raw = parts[3]
+    else:
         await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
         return
-    category = urllib.parse.unquote_plus(parts[1])
-    query_text = parts[2]
+    if not query_text:
+        query_text = context.user_data.get("last_search_query", "")
+    if not category:
+        category = context.user_data.get("search_category", "")
+    if not query_text or not category:
+        await safe_edit_message(
+            query,
+            "Search context is no longer available. Please search again.",
+            action_key=getattr(query, "data", None),
+        )
+        return
     try:
-        page = int(parts[3])
+        page = int(page_raw)
     except Exception:
         page = 1
 
@@ -686,18 +846,19 @@ async def search_category_courses_pagination_callback(update: Update, context: C
             total_pages = max(1, math.ceil(total / page_size))
 
             search_nav = []
+            search_ref = _category_search_ref(query_text, category)
             if page > 1:
                 search_nav.append(
                     InlineKeyboardButton(
                         "⬅️ Previous",
-                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page - 1}",
+                        callback_data=f"search_cat_courses_pg::{search_ref}::{page - 1}",
                     ),
                 )
             if page < total_pages:
                 search_nav.append(
                     InlineKeyboardButton(
                         "➡️ Next",
-                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page + 1}",
+                        callback_data=f"search_cat_courses_pg::{search_ref}::{page + 1}",
                     ),
                 )
             if search_nav:
@@ -763,8 +924,14 @@ def get_search_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CallbackQueryHandler(search_courses_callback, pattern=r"^search_courses::"),
+            # Compact ref form used when the coach name exceeds the
+            # 64-byte callback_data limit (long Arabic coach names).
+            CallbackQueryHandler(search_courses_callback, pattern=r"^search_courses_coach_ref::"),
             CallbackQueryHandler(search_categories_callback, pattern=r"^search_categories::"),
             CallbackQueryHandler(search_category_courses_callback, pattern=r"^search_category_courses::"),
+            # Compact ref form used when the category name exceeds the
+            # 64-byte callback_data limit (long Arabic category names).
+            CallbackQueryHandler(search_category_courses_callback, pattern=r"^search_category_courses_ref::"),
         ],
         states={
             SEARCH_QUERY: [

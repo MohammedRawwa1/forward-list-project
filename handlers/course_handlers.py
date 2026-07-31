@@ -17,6 +17,7 @@ from telegram.ext import (
 from config import is_owner
 from conversation_states import ADD_CATEGORY, ADD_COACH, ADD_LINK, ADD_NAME, ADD_PARENT
 from handlers.base_handlers import (
+    _fit_cb,
     _get_total_count,
     _resolve_callback_payload,
     _shorten_showcat_cb,
@@ -29,6 +30,46 @@ from handlers.db_connection import get_db
 
 # Page size used only by course-related handlers (coaches/categories/courses in add flow)
 COURSE_PAGE_SIZE = 50
+
+
+# ---------------  compact callbacks (keep callback_data <= 64 bytes)  ---------------
+
+
+def _addcoach_cb(name) -> str:
+    """Compact callback for the coach-selection button (long Arabic names)."""
+    return _fit_cb(
+        "addcoach",
+        f"addcoach::{urllib.parse.quote_plus(str(name))}",
+        {"type": "addcoach", "coach": str(name)},
+    )
+
+
+def _addcoach_page_cb(parent, page: int) -> str:
+    """Compact callback for coach-selection pagination (parent may be '')."""
+    p = parent or ""
+    return _fit_cb(
+        "addcoach_page",
+        f"addcoach_page::{urllib.parse.quote_plus(p)}::{page}",
+        {"type": "addcoach_page", "parent": p, "page": page},
+    )
+
+
+def _addparent_cb(name, page: int) -> str:
+    """Compact callback for the parent-selection button."""
+    return _fit_cb(
+        "addparent",
+        f"addparent::{urllib.parse.quote_plus(str(name))}::{page}",
+        {"type": "addparent", "category": str(name), "category_name": str(name), "page": page},
+    )
+
+
+def _addcat_cb(name, page: int) -> str:
+    """Compact callback for the final category-selection button."""
+    return _fit_cb(
+        "addcat",
+        f"addcat::{urllib.parse.quote_plus(str(name))}::{page}",
+        {"type": "addcat", "category": str(name), "page": page},
+    )
 
 
 async def _compute_category_page(db, category_name, page_size=COURSE_PAGE_SIZE):
@@ -81,12 +122,18 @@ async def setup_course_handlers(application):
                 # First: pick a parent/top-level category
                 ADD_PARENT: [
                     CallbackQueryHandler(parent_selected, pattern=r"^addparent::"),
+                    # Compact ref form (long Arabic parent names)
+                    CallbackQueryHandler(parent_selected, pattern=r"^addparent_ref::"),
                     CallbackQueryHandler(addparent_page, pattern=r"^addparent_page::"),
                 ],
                 # Then: pick a coach (buttons) or enter one manually (text)
                 ADD_COACH: [
                     CallbackQueryHandler(coach_selected, pattern=r"^addcoach::"),
+                    # Compact ref form (long Arabic coach names)
+                    CallbackQueryHandler(coach_selected, pattern=r"^addcoach_ref::"),
                     CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page::"),
+                    # Compact ref form (long Arabic parent names)
+                    CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page_ref::"),
                     # Allow navigating back to parent pages while in the coach-selection state
                     CallbackQueryHandler(addparent_page, pattern=r"^addparent_page::"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, coach_manual_entry),
@@ -207,7 +254,7 @@ async def add_course_start(update: Update, context: CallbackContext):
                                 [
                                     InlineKeyboardButton(
                                         child.get("name"),
-                                        callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}",
+                                        callback_data=_addcoach_cb(child.get("name")),
                                     ),
                                 ],
                             )
@@ -272,7 +319,7 @@ async def add_course_start(update: Update, context: CallbackContext):
         # Keep the add flow fast: do not check emptiness here to avoid extra DB calls.
         display = f"{p.get('name')}"
         keyboard.append(
-            [InlineKeyboardButton(display, callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}::1")],
+            [InlineKeyboardButton(display, callback_data=_addparent_cb(p.get("name"), 1))],
         )
 
     # Navigation row
@@ -479,7 +526,7 @@ async def parent_selected(update: Update, context: CallbackContext):
     parent = None
     origin_page = None
     if raw.startswith("addparent_ref::"):
-        # Resolve stored payload reference created by empty-category Add button
+        # Resolve stored payload reference (compact form for long names)
         key = raw.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
         if not payload:
@@ -490,6 +537,11 @@ async def parent_selected(update: Update, context: CallbackContext):
             )
             return ConversationHandler.END
         parent = payload.get("category") or payload.get("category_name")
+        try:
+            if payload.get("page"):
+                origin_page = int(payload.get("page"))
+        except Exception:
+            origin_page = None
     elif raw.startswith("addparent::"):
         parts = raw.split("::")
         # parts -> ['addparent', '<name>' (optional), '<page>' (optional)]
@@ -551,7 +603,7 @@ async def parent_selected(update: Update, context: CallbackContext):
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        display, callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}"
+                        display, callback_data=_addcoach_cb(child.get("name"))
                     )
                 ],
             )
@@ -566,53 +618,49 @@ async def parent_selected(update: Update, context: CallbackContext):
                     nav.append(
                         InlineKeyboardButton(
                             "➡️ Next",
-                            callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page + 1}",
+                            callback_data=_addcoach_page_cb(parent, page + 1),
                         ),
                     )
                     nav.append(
                         InlineKeyboardButton(
                             "⏭️ End",
-                            callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}",
+                            callback_data=_addcoach_page_cb(parent, last_page),
                         ),
                     )
             elif page < last_page:
                 # Middle pages: Prev, Home, End, Next
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page - 1}",
+                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1",
+                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
                         "⏭️ End",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}",
+                        callback_data=_addcoach_page_cb(parent, last_page),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
                         "➡️ Next",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page + 1}",
+                        callback_data=_addcoach_page_cb(parent, page + 1),
                     ),
                 )
             # Last page: Previous and Home only
             elif page > 1:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page - 1}",
+                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1",
+                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
         if nav:
@@ -682,7 +730,7 @@ async def parent_selected(update: Update, context: CallbackContext):
             total_coaches = 0
 
         for coach in page_coaches:
-            keyboard.append([InlineKeyboardButton(coach, callback_data=f"addcoach::{urllib.parse.quote_plus(coach)}")])
+            keyboard.append([InlineKeyboardButton(coach, callback_data=_addcoach_cb(coach))])
 
         nav = []
         total_pages = (total_coaches - 1) // page_size + 1 if total_coaches else 1
@@ -693,51 +741,47 @@ async def parent_selected(update: Update, context: CallbackContext):
                     nav.append(
                         InlineKeyboardButton(
                             "➡️ Next",
-                            callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page + 1}",
+                            callback_data=_addcoach_page_cb(parent, page + 1),
                         ),
                     )
                     nav.append(
                         InlineKeyboardButton(
                             "⏭️ End",
-                            callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}",
+                            callback_data=_addcoach_page_cb(parent, last_page),
                         ),
                     )
             elif page < last_page:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page - 1}",
+                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1",
+                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
                         "⏭️ End",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}",
+                        callback_data=_addcoach_page_cb(parent, last_page),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
                         "➡️ Next",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page + 1}",
+                        callback_data=_addcoach_page_cb(parent, page + 1),
                     ),
                 )
             elif page > 1:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page - 1}",
+                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",
-                        callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1",
+                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
         if nav:
@@ -780,17 +824,33 @@ async def addcoach_page(update: Update, context: CallbackContext):
         )
         return ConversationHandler.END
     data = query.data
-    parts = data.split("::")
-    if len(parts) < 3:
-        await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
-        return None
-    parent_enc = parts[1]
-    try:
-        page = int(parts[2])
-    except Exception:
-        page = 1
+    parent = None
+    page = 1
+    if data.startswith("addcoach_page_ref::"):
+        # Compact ref form used when the parent name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(data.split("::", 1)[1])
+            if payload:
+                parent = payload.get("parent") or None
+                try:
+                    page = int(payload.get("page") or 1)
+                except Exception:
+                    page = 1
+        except Exception:
+            parent = None
+            page = 1
+    else:
+        parts = data.split("::")
+        if len(parts) < 3:
+            await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
+            return None
+        parent_enc = parts[1]
+        try:
+            page = int(parts[2])
+        except Exception:
+            page = 1
+        parent = urllib.parse.unquote_plus(parent_enc) if parent_enc else None
     context.user_data["last_coach_page"] = page
-    parent = urllib.parse.unquote_plus(parent_enc) if parent_enc else None
 
     try:
         db = await get_db()
@@ -826,7 +886,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         child.get("name"),
-                        callback_data=f"addcoach::{urllib.parse.quote_plus(child.get('name'))}",
+                        callback_data=_addcoach_cb(child.get("name")),
                     ),
                 ],
             )
@@ -837,7 +897,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
             nav.append(
                 InlineKeyboardButton(
                     "⬅️ Previous",
-                    callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page - 1}",
+                    callback_data=_addcoach_page_cb(parent, page - 1),
                 ),
             )
         # Home (center) — show only when not on first page
@@ -845,7 +905,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
             nav.append(
                 InlineKeyboardButton(
                     "🏠 Home",
-                    callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::1",
+                    callback_data=_addcoach_page_cb(parent, 1),
                 ),
             )
         # Next
@@ -853,7 +913,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
             nav.append(
                 InlineKeyboardButton(
                     "➡️ Next",
-                    callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{page + 1}",
+                    callback_data=_addcoach_page_cb(parent, page + 1),
                 ),
             )
         # End
@@ -861,7 +921,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
             nav.append(
                 InlineKeyboardButton(
                     "⏭️ End",
-                    callback_data=f"addcoach_page::{urllib.parse.quote_plus(parent or '')}::{last_page}",
+                    callback_data=_addcoach_page_cb(parent, last_page),
                 ),
             )
         if nav:
@@ -941,7 +1001,7 @@ async def addparent_page(update: Update, context: CallbackContext):
             [
                 InlineKeyboardButton(
                     display,
-                    callback_data=f"addparent::{urllib.parse.quote_plus(p.get('name'))}::{page}",
+                    callback_data=_addparent_cb(p.get("name"), page),
                 ),
             ],
         )
@@ -1024,7 +1084,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     for c in page_cats:
         display = c.get("name")
         keyboard.append(
-            [InlineKeyboardButton(display, callback_data=f"addcat::{urllib.parse.quote_plus(c.get('name'))}::{page}")],
+            [InlineKeyboardButton(display, callback_data=_addcat_cb(c.get("name"), page))],
         )
 
     nav = []
@@ -1080,13 +1140,23 @@ async def coach_selected(update: Update, context: CallbackContext):
             action_key=getattr(query, "data", None),
         )
         return ConversationHandler.END
-    encoded = query.data.split("::", 1)[1]
-    if encoded == "__manual__":
-        # Ask for manual entry
-        await query.message.reply_text("Send the coach name (text):")
-        return ADD_COACH
-
-    coach = urllib.parse.unquote_plus(encoded) if encoded else None
+    raw = query.data
+    coach = None
+    if raw.startswith("addcoach_ref::"):
+        # Compact ref form used when the coach name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(raw.split("::", 1)[1])
+            if payload:
+                coach = payload.get("coach") or payload.get("category")
+        except Exception:
+            coach = None
+    else:
+        encoded = raw.split("::", 1)[1] if "::" in raw else ""
+        if encoded == "__manual__":
+            # Ask for manual entry
+            await query.message.reply_text("Send the coach name (text):")
+            return ADD_COACH
+        coach = urllib.parse.unquote_plus(encoded) if encoded else None
     context.user_data["course_coach"] = coach
     # Proceed to ask for course name
     await query.message.reply_text("Enter the name of the course:")
@@ -1117,11 +1187,24 @@ async def category_selected(update: Update, context: CallbackContext):
         )
         return ConversationHandler.END
 
-    # Support both legacy `addcat_<name>` and new `addcat::<name>::<page>` formats
+    # Support compact ref, new `addcat::<name>::<page>`, and legacy `addcat_<name>` formats
     raw = query.data
     category_name = None
     origin_page = None
-    if raw.startswith("addcat::"):
+    if raw.startswith("addcat_ref::"):
+        # Compact ref form used when the category name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(raw.split("::", 1)[1])
+            if payload:
+                category_name = payload.get("category") or payload.get("category_name")
+                try:
+                    origin_page = int(payload.get("page")) if payload.get("page") else None
+                except Exception:
+                    origin_page = None
+        except Exception:
+            category_name = None
+            origin_page = None
+    elif raw.startswith("addcat::"):
         parts = raw.split("::")
         # parts -> ['addcat', '<name>', '<page>' (optional)]
         if len(parts) >= 2:
@@ -1232,11 +1315,24 @@ async def add_course_category(update: Update, context: CallbackContext):
         )
         return ConversationHandler.END
 
-    # Support both legacy `addcat_<name>` and new `addcat::<name>::<page>` formats
+    # Support compact ref, new `addcat::<name>::<page>`, and legacy `addcat_<name>` formats
     raw = query.data
     category_name = None
     origin_page = None
-    if raw.startswith("addcat::"):
+    if raw.startswith("addcat_ref::"):
+        # Compact ref form used when the category name exceeds 64 bytes
+        try:
+            payload = await _resolve_callback_payload(raw.split("::", 1)[1])
+            if payload:
+                category_name = payload.get("category") or payload.get("category_name")
+                try:
+                    origin_page = int(payload.get("page")) if payload.get("page") else None
+                except Exception:
+                    origin_page = None
+        except Exception:
+            category_name = None
+            origin_page = None
+    elif raw.startswith("addcat::"):
         parts = raw.split("::")
         if len(parts) >= 2:
             category_name = urllib.parse.unquote_plus(parts[1])

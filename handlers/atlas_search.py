@@ -243,7 +243,7 @@ def build_category_course_search_pipeline(
                             "text": {
                                 "query": query_text,
                                 "path": "courses.name",
-                                "fuzzy": {"maxEdits": 1} if fuzzy else {},
+                                "fuzzy": {"maxEdits": 1, "prefixLength": _fuzzy_prefix_length(query_text)} if fuzzy else {},
                             },
                         },
                     ],
@@ -262,7 +262,7 @@ def build_category_course_search_pipeline(
                             "text": {
                                 "query": query_text,
                                 "path": "courses.name",
-                                "fuzzy": {"maxEdits": 1} if fuzzy else {},
+                                "fuzzy": {"maxEdits": 1, "prefixLength": _fuzzy_prefix_length(query_text)} if fuzzy else {},
                             },
                         },
                     ],
@@ -459,14 +459,22 @@ async def execute_category_search(
             cnt_res = await db.categories.aggregate(pipes["count_pipeline"]).to_list(length=1)
             total = cnt_res[0]["total"] if cnt_res else 0
 
-            # Data
-            docs = await db.categories.aggregate(pipes["data_pipeline"]).to_list(length=page_size + 1)
-            have_more = len(docs) > page_size
-            page_cats = docs[:page_size]
-            # Remove _search_score field from results
-            for c in page_cats:
-                c.pop("_search_score", None)
-            return page_cats, total, have_more
+            if total > 0:
+                # Data
+                docs = await db.categories.aggregate(pipes["data_pipeline"]).to_list(length=page_size + 1)
+                have_more = len(docs) > page_size
+                page_cats = docs[:page_size]
+                # Remove _search_score field from results
+                for c in page_cats:
+                    c.pop("_search_score", None)
+                return page_cats, total, have_more
+
+            # Atlas text search matches whole analyzed terms only (no substring
+            # matching), so partial/short queries (e.g. Arabic "برم" vs
+            # "البرمجة") can return 0 here even though the regex fallback would
+            # find matches. Fall through to regex so the user never sees a false
+            # "no results" from Atlas.
+            logger.debug("Atlas Search returned 0 categories for query %r; falling back to regex", query_text)
         except Exception as e:
             logger.warning("Atlas Search failed for categories, falling back to regex: %s", e)
             # Fall through to regex
@@ -499,11 +507,19 @@ async def execute_course_search(
             cnt_res = await db.categories.aggregate(pipes["count_pipeline"]).to_list(length=1)
             total = cnt_res[0]["total"] if cnt_res else 0
 
-            # Data
-            items = await db.categories.aggregate(pipes["data_pipeline"]).to_list(length=page_size + 1)
-            have_more = len(items) > page_size
-            course_items = items[:page_size]
-            return course_items, total, have_more
+            if total > 0:
+                # Data
+                items = await db.categories.aggregate(pipes["data_pipeline"]).to_list(length=page_size + 1)
+                have_more = len(items) > page_size
+                course_items = items[:page_size]
+                return course_items, total, have_more
+
+            # Atlas text search matches whole analyzed terms only (no substring
+            # matching), so partial/short queries (e.g. Arabic "برم" vs
+            # "البرمجة") can return 0 here even though the regex fallback would
+            # find matches. Fall through to regex so the user never sees a false
+            # "no results" from Atlas.
+            logger.debug("Atlas Search returned 0 courses for query %r; falling back to regex", query_text)
         except Exception as e:
             logger.warning("Atlas Search failed for courses, falling back to regex: %s", e)
 
@@ -552,11 +568,23 @@ async def execute_category_course_search(
             cnt_res = await db.categories.aggregate(pipes["count_pipeline"]).to_list(length=1)
             total = cnt_res[0]["total"] if cnt_res else 0
 
-            # Data
-            items = await db.categories.aggregate(pipes["data_pipeline"]).to_list(length=page_size + 1)
-            have_more = len(items) > page_size
-            course_items = items[:page_size]
-            return course_items, total, have_more
+            if total > 0:
+                # Data
+                items = await db.categories.aggregate(pipes["data_pipeline"]).to_list(length=page_size + 1)
+                have_more = len(items) > page_size
+                course_items = items[:page_size]
+                return course_items, total, have_more
+
+            # Atlas text search matches whole analyzed terms only (no substring
+            # matching), so partial/short queries (e.g. Arabic "برم" vs
+            # "البرمجة") can return 0 here even though the regex fallback would
+            # find matches. Fall through to regex so the user never sees a false
+            # "no results" from Atlas.
+            logger.debug(
+                "Atlas Search returned 0 category-courses for query %r in %r; falling back to regex",
+                query_text,
+                category,
+            )
         except Exception as e:
             logger.warning("Atlas Search failed for category courses, falling back to regex: %s", e)
 
@@ -582,6 +610,25 @@ async def execute_category_course_search(
 # ---------------  Internal Helpers  ---------------
 
 
+def _fuzzy_prefix_length(query_text: str) -> int:
+    """Compute a safe ``prefixLength`` for fuzzy matching.
+
+    Atlas Search does not apply fuzzy matching to the first ``prefixLength``
+    characters of a term. When the query is shorter than or equal to that
+    prefix, fuzzy matching is effectively disabled and only exact-term
+    matches are returned. A fixed ``prefixLength: 2`` therefore makes short
+    queries (e.g. 1-2 letter Arabic queries) return **zero** results via
+    Atlas even though the regex fallback would find plenty. Adapt the prefix
+    so fuzzy still helps for short queries.
+    """
+    n = len((query_text or "").strip())
+    if n <= 1:
+        return 0
+    if n == 2:
+        return 1
+    return 2
+
+
 def _make_text_search_stage(query_text: str, path: str, index_name: str, fuzzy: bool = True) -> dict:
     """Build a $search stage with text operator."""
     stage = {
@@ -594,5 +641,8 @@ def _make_text_search_stage(query_text: str, path: str, index_name: str, fuzzy: 
         },
     }
     if fuzzy:
-        stage["$search"]["text"]["fuzzy"] = {"maxEdits": 1, "prefixLength": 2}
+        stage["$search"]["text"]["fuzzy"] = {
+            "maxEdits": 1,
+            "prefixLength": _fuzzy_prefix_length(query_text),
+        }
     return stage
