@@ -1,9 +1,7 @@
 import logging
-import re
 import urllib.parse
 import uuid
 
-from pymongo.errors import PyMongoError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     CallbackContext,
@@ -18,7 +16,6 @@ from config import is_owner
 from conversation_states import ADD_CATEGORY, ADD_COACH, ADD_LINK, ADD_NAME, ADD_PARENT
 from handlers.base_handlers import (
     _fit_cb,
-    _get_total_count,
     _resolve_callback_payload,
     _shorten_showcat_cb,
     _store_callback_payload,
@@ -70,41 +67,6 @@ def _addcat_cb(name, page: int) -> str:
         f"addcat::{urllib.parse.quote_plus(str(name))}::{page}",
         {"type": "addcat", "category": str(name), "page": page},
     )
-
-
-async def _compute_category_page(db, category_name, page_size=COURSE_PAGE_SIZE):
-    """Compute the 1-based page number where `category_name` appears among
-    top-level categories sorted A→Z. Returns 1 when not found.
-    """
-    try:
-        # Find the matching top-level category doc first
-        doc = await db.categories.find_one(
-            {
-                "$and": [
-                    {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]},
-                    {"$or": [{"name": category_name}, {"path": category_name}]},
-                ],
-            },
-            projection={"name": 1, "path": 1},
-        )
-        if not doc:
-            return 1
-        key = doc.get("name") or doc.get("path") or ""
-        # Count how many top-level categories sort before this one (lexicographic by name/path)
-        count = await _get_total_count(
-            db,
-            "categories",
-            {
-                "$and": [
-                    {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]},
-                    {"$or": [{"name": {"$lt": key}}, {"name": {"$exists": False}, "path": {"$lt": key}}]},
-                ],
-            },
-            ttl=15,
-        )
-        return (count // page_size) + 1
-    except Exception:
-        return 1
 
 
 logger = logging.getLogger(__name__)
@@ -1301,118 +1263,6 @@ async def category_selected(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
 
-async def add_course_category(update: Update, context: CallbackContext):
-    """Save the selected category and add the course to the database."""
-    query = update.callback_query
-    await safe_answer(query)
-    # Owner guard for final add flow callback (fail-closed)
-    user_id = getattr(query.from_user, "id", None)
-    if not is_owner(user_id):
-        await safe_edit_message(
-            query,
-            "⛔ Only the bot owner can run this command.",
-            action_key=getattr(query, "data", None),
-        )
-        return ConversationHandler.END
-
-    # Support compact ref, new `addcat::<name>::<page>`, and legacy `addcat_<name>` formats
-    raw = query.data
-    category_name = None
-    origin_page = None
-    if raw.startswith("addcat_ref::"):
-        # Compact ref form used when the category name exceeds 64 bytes
-        try:
-            payload = await _resolve_callback_payload(raw.split("::", 1)[1])
-            if payload:
-                category_name = payload.get("category") or payload.get("category_name")
-                try:
-                    origin_page = int(payload.get("page")) if payload.get("page") else None
-                except Exception:
-                    origin_page = None
-        except Exception:
-            category_name = None
-            origin_page = None
-    elif raw.startswith("addcat::"):
-        parts = raw.split("::")
-        if len(parts) >= 2:
-            category_name = urllib.parse.unquote_plus(parts[1])
-        if len(parts) >= 3:
-            try:
-                origin_page = int(parts[2])
-            except Exception:
-                origin_page = None
-    else:
-        legacy_parts = query.data.split("_", 1)
-        if len(legacy_parts) < 2:
-            await safe_edit_message(query, "Invalid category callback.", action_key=getattr(query, "data", None))
-            return ConversationHandler.END
-        category_name = legacy_parts[1]
-    course_name = context.user_data.get("course_name")
-    course_link = context.user_data.get("course_link")
-
-    db = await get_db()  # Await the database connection
-    if db is None:
-        await safe_edit_message(
-            query,
-            "Error: Unable to connect to the database.",
-            action_key=getattr(query, "data", None),
-        )
-        return ConversationHandler.END
-
-    try:
-        # Push the course into the category document (embedded array)
-        categories_coll = db["categories"]
-        coach = context.user_data.get("course_coach")
-        course_doc = {"id": str(uuid.uuid4()), "name": course_name, "link": course_link}
-        if coach:
-            course_doc["coach"] = coach
-        upd = await categories_coll.update_one({"name": category_name}, {"$push": {"courses": course_doc}})
-        logger.info("[ADD-COURSE-alt] update_result=%s", getattr(upd, "raw_result", upd))
-        if upd.modified_count == 0:
-            await safe_edit_message(
-                query,
-                f"Error: Category '{category_name}' not found. Create it first.",
-                action_key=getattr(query, "data", None),
-            )
-            return ConversationHandler.END
-
-        try:
-            view_page = origin_page or 1
-            try:
-                payload = {
-                    "type": "showcat",
-                    "path": category_name,
-                    "from_parent": "categories",
-                    "parent_page": view_page,
-                }
-                key = _store_callback_payload(payload)
-                cb = f"showcat_ref::{key}"
-            except Exception:
-                cb = _shorten_showcat_cb(category_name, view_page, from_parent="categories", parent_page=view_page)
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("View Category", callback_data=cb)]])
-            await safe_edit_message(
-                query,
-                f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉",
-                reply_markup=kb,
-                action_key=getattr(query, "data", None),
-            )
-        except Exception:
-            await safe_edit_message(
-                query,
-                f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉",
-                action_key=getattr(query, "data", None),
-            )
-        return ConversationHandler.END
-    except PyMongoError:
-        logger.exception("Error adding course")
-        await safe_edit_message(
-            query,
-            "An error occurred while adding the course. Please try again later.",
-            action_key=getattr(query, "data", None),
-        )
-        return ConversationHandler.END
-
-
 async def cancel(update: Update, context: CallbackContext) -> int:
     """Cancel the current operation."""
     try:
@@ -1453,9 +1303,22 @@ async def cancel(update: Update, context: CallbackContext) -> int:
 
 # Utility function to check valid URL format
 def is_valid_url(url: str):
-    """Check if the URL is valid."""
-    url_pattern = r"^(https?:\/\/)([A-Za-z0-9\-._~%]+)(:[0-9]+)?(\/[^\s]*)?$"
-    return re.match(url_pattern, url) is not None
+    """Check if the URL is a valid http(s) link.
+
+    Uses urllib.parse so legit URLs with query strings, fragments, ports,
+    underscores, or Unicode hosts are accepted (the old regex rejected
+    query-only URLs like ``https://example.com?x=1``).
+    """
+    if not url or len(url) > 2048:
+        return False
+    # Reject whitespace/control characters outright (they break Telegram buttons)
+    if any(c.isspace() or ord(c) < 32 for c in url):
+        return False
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    except Exception:
+        return False
 
 
 # Global error handler

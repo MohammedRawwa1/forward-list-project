@@ -2850,10 +2850,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                     items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
                 except Exception:
                     items = []
-                try:
-                    _set_cached_page(cache_key, items, ttl=3)
-                except Exception:
-                    pass
                 # cache the raw items briefly to improve UX on rapid nav
                 try:
                     _set_cached_page(cache_key, items, ttl=3)

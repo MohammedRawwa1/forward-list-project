@@ -160,6 +160,73 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
         )
 
 
+# ----------  delete course from details view  ----------
+async def handle_delete_ref(update: Update, context: CallbackContext):
+    """Delete a course from the Details view (callback: delete_ref::<key>).
+
+    Resolves the stored payload (which carries the course ``id`` and its
+    category) and removes the course by embedded ``id`` when available,
+    falling back to name-based deletion for legacy entries.
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
+    """
+    query = update.callback_query
+    await safe_answer(query)
+    # Owner-only guard (fail-closed)
+    user_id = getattr(query.from_user, "id", None)
+    if not is_owner(user_id):
+        await safe_edit_message(
+            query,
+            "⛔ Only the bot owner can run this command.",
+            action_key=getattr(query, "data", None),
+        )
+        return
+    data = query.data
+    if not data.startswith("delete_ref::"):
+        await safe_edit_message(query, "Invalid delete callback.", action_key=getattr(query, "data", None))
+        return
+    key = data.split("::", 1)[1]
+    payload = await _resolve_callback_payload(key)
+    if not payload:
+        await safe_edit_message(
+            query,
+            "Reference expired. Please reopen the list and try again.",
+            action_key=getattr(query, "data", None),
+        )
+        return
+    cat = payload.get("category")
+    item = payload.get("name")
+    course_id = payload.get("id")
+    try:
+        db = await MongoDB.get_db()
+        if db is None:
+            await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=data)
+            return
+        if course_id:
+            res = await db["categories"].update_one(
+                {"courses.id": course_id},
+                {"$pull": {"courses": {"id": course_id}}},
+            )
+        elif cat and item:
+            res = await db["categories"].update_one(
+                {"name": cat},
+                {"$pull": {"courses": {"name": item}}},
+            )
+        else:
+            await safe_edit_message(query, "Cannot determine course to delete.", action_key=data)
+            return
+        if getattr(res, "modified_count", 0):
+            await safe_edit_message(
+                query,
+                f"Course '\u2018{item}\u2019 deleted from category '\u2018{cat}\u2019. \u2705",
+                action_key=data,
+            )
+        else:
+            await safe_edit_message(query, "Course not found. \u274c", action_key=data)
+    except Exception:
+        logger.exception("Error deleting course via delete_ref")
+        await safe_edit_message(query, "An error occurred while deleting the course.", action_key=data)
+
+
 # ----------  delete single item  ----------
 async def handle_item_deletion(update: Update, context: CallbackContext):
     query = update.callback_query

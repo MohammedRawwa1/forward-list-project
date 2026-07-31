@@ -244,6 +244,6 @@ def configure_uvicorn_loggers():
         uvi_logger.propagate = True
 
 
-# Uvicorn loggers are reconfigured from main.py's startup event, which
-# runs after uvicorn.run() has applied its internal logging setup.
-# The module-level call is omitted to avoid dead code.
+# Uvicorn loggers are reconfigured from main.py's lifespan startup
+# phase, which runs after uvicorn.run() has applied its internal logging
+# setup.  The module-level call is omitted to avoid dead code.

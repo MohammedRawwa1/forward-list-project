@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import signal
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import httpx
@@ -19,8 +20,6 @@ from handlers.base_handlers import _bg_task, start_cache_cleanup_worker, start_r
 from logging_config import configure_uvicorn_loggers
 
 logger = logging.getLogger(__name__)
-
-app = FastAPI()
 
 application: Application = None
 bot_token = os.getenv("BOT_TOKEN")
@@ -70,10 +69,13 @@ async def _register_webhook(url: str) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(api_url, json=payload)
             data = resp.json()
+            # The webhook URL contains the bot token in its path — never log it
+            # verbatim to avoid leaking the token into log files/shippers.
+            redacted_url = url.replace(bot_token, "<token>") if bot_token else url
             if data.get("ok"):
-                logger.info("Webhook successfully registered -> %s", url)
+                logger.info("Webhook successfully registered -> %s", redacted_url)
                 return True
-            logger.error("Telegram setWebhook failed: %s (url=%s)", data, url)
+            logger.error("Telegram setWebhook failed: %s (url=%s)", data, redacted_url)
             return False
     except Exception:
         logger.exception("Failed to call Telegram setWebhook")
@@ -119,16 +121,34 @@ async def _process_telegram_update(request: Request) -> dict:
         # transient error so Telegram retries after a short delay.
         raise HTTPException(status_code=503, detail="Bot still starting up")
     json_str = await request.body()
-    update = Update.de_json(json.loads(json_str), application.bot)
+    # Reject oversized bodies early (Telegram updates are tiny; a huge body
+    # is almost certainly an attacker probing the endpoint).
+    if len(json_str) > 1_000_000:
+        raise HTTPException(status_code=413, detail="Payload too large")
+    try:
+        payload = json.loads(json_str)
+    except (ValueError, TypeError) as e:
+        # Malformed JSON — return 4xx so Telegram does not retry forever.
+        raise HTTPException(status_code=400, detail="Invalid JSON") from e
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+    update = Update.de_json(payload, application.bot)
+    if update is None:
+        raise HTTPException(status_code=400, detail="Invalid update payload")
     await application.process_update(update)
     return {"status": "ok"}
 
 
-# ---------- startup ----------
-@app.on_event("startup")
-async def startup_event():
+# ---------- lifespan (startup + shutdown) ----------
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Application lifecycle: initialize the bot on startup, tear it down on shutdown.
+
+    Replaces the deprecated ``@app.on_event("startup"/"shutdown")`` hooks.
+    """
     global application
 
+    # ---------------------------- startup ----------------------------
     await initialize_db()
     # Rehydrate any persisted callback refs so inline buttons keep working
     # across restarts when Redis is not configured.
@@ -154,8 +174,8 @@ async def startup_event():
                 logger.exception("Failed to initialize sync mongo client on startup")
     except Exception:
         logger.exception("Error while attempting sync mongo init check")
-    # Index creation managed manually; automatic ensure_indexes disabled.
-    logger.info("Skipping automatic ensure_indexes (manual index management)")
+    # Index creation is managed manually; the coaches.topics index below is created explicitly.
+    logger.info("Index creation is managed manually")
 
     # Unconditionally create the coaches.topics index since coaches are
     # queried by this field (see base_handlers.py line ~2723) and the
@@ -206,7 +226,7 @@ async def startup_event():
     configure_uvicorn_loggers()
 
     # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def _log_signal(sig):
         logger.warning("Received shutdown signal: %s", sig)
@@ -218,11 +238,9 @@ async def startup_event():
         # add_signal_handler may not be available on all platforms (e.g., Windows)
         logger.info("Signal handlers not supported on this platform; skipping registration.")
 
+    yield
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Gracefully shutdown the Telegram `Application` and close DB connections."""
-    global application
+    # ---------------------------- shutdown ----------------------------
     logger.info("Shutdown event triggered; attempting graceful stop of bot application")
     try:
         if application is not None:
@@ -240,6 +258,9 @@ async def shutdown_event():
         await MongoDB.close()
     except Exception:
         logger.exception("Error closing MongoDB connection during shutdown")
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 # ---------- webhook endpoints ----------
