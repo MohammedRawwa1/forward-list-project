@@ -9,15 +9,15 @@ import time
 import urllib.parse
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from pymongo.errors import DuplicateKeyError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ConversationHandler
 
+from config import env_float, env_int
 from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT
-from database.mongo_handler import MongoDB
 from handlers.db_connection import get_db
 
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -109,12 +109,24 @@ async def collect_subtree_names(
 
 
 # How long to persist callback refs (seconds). Default: 7 days.
-CALLBACK_REF_TTL = int(os.getenv("CALLBACK_REF_TTL", str(7 * 24 * 3600)))
+CALLBACK_REF_TTL = env_int("CALLBACK_REF_TTL", 7 * 24 * 3600)
 
 # In-memory mapping for short callback ids -> payload
 CALLBACK_MAP = {}
 # Maximum size of CALLBACK_MAP to prevent unbounded memory growth
-CALLBACK_MAP_MAX = int(os.getenv("CALLBACK_MAP_MAX", "50000"))
+CALLBACK_MAP_MAX = env_int("CALLBACK_MAP_MAX", 50000)
+
+# Ensure the callback_refs TTL index is created only once per process.
+# Avoids paying a create_index round-trip on every background persist
+# (a single courses page render can schedule dozens of persists).
+_CALLBACK_INDEX_ENSURE_DONE = False
+
+# Cap the number of concurrent background MongoDB callback-ref writes.
+# A single courses page render schedules one persist per course row, and
+# without a cap they'd all hit Atlas simultaneously, causing connection
+# churn. Redis writes are cheap and are not capped. Tune via env.
+CALLBACK_PERSIST_CONCURRENCY = max(1, env_int("CALLBACK_PERSIST_CONCURRENCY", 10))
+_persist_semaphore = asyncio.Semaphore(CALLBACK_PERSIST_CONCURRENCY)
 
 
 # How long to keep an interactive inline keyboard session open (seconds)
@@ -265,11 +277,11 @@ _COUNT_CACHE_LOCKS_MAX = 1000  # max locks before pruning
 _COUNT_CACHE_LOCKS_TTL = 300  # prune locks older than 5 min
 _PAGE_CACHE = {}  # key -> (payload, expire_ts)
 _PAGE_CACHE_MAX = 5000  # max entries before pruning oldest
-PAGE_CACHE_TTL = int(os.getenv("PAGE_CACHE_TTL", "30"))
+PAGE_CACHE_TTL = env_int("PAGE_CACHE_TTL", 30)
 # Short in-memory cache for resolved callback payloads to avoid Redis/Mongo
 # round-trips for hot refs. Values: key -> (payload, expire_ts)
 _CALLBACK_RESOLVE_CACHE = {}
-_CALLBACK_RESOLVE_CACHE_MAX = int(os.getenv("CALLBACK_RESOLVE_CACHE_MAX", "2000"))
+_CALLBACK_RESOLVE_CACHE_MAX = env_int("CALLBACK_RESOLVE_CACHE_MAX", 2000)
 
 
 def _set_callback_resolve_cache(key: str, payload, ttl: int = 60):
@@ -632,57 +644,20 @@ def _store_callback_payload(payload: dict) -> str:
         logger.debug("_store_callback_payload: key=%s payload=%s", key, payload)
     except Exception:
         pass
-    # best-effort background persist to Redis or Mongo so refs survive restarts
+    # Best-effort background persist to Redis or Mongo so refs survive
+    # restarts. Always async/fire-and-forget: the synchronous pymongo write
+    # path previously used here (when Redis was not configured) blocked the
+    # event loop once per rendered button, freezing the bot and making
+    # search/pagination appear broken. The in-memory CALLBACK_MAP already
+    # makes the ref usable immediately; persistence is only for durability
+    # across restarts.
     try:
-        # If Redis is configured, persist asynchronously as before.
-        if _redis is not None:
-            try:
-                _bg_task(_persist_callback_payload(key, payload))
-            except Exception:
-                # fall back to scheduling not-critical background task
-                pass
-        else:
-            # Redis not configured -> strong durability requested: perform
-            # synchronous blocking write to MongoDB so callers return only
-            # after the ref is durably stored.
-            try:
-                _persist_callback_payload_sync(key, payload)
-            except Exception:
-                # If sync persist fails, still return the key (in-memory map)
-                logger.exception("Synchronous persist to MongoDB failed for key=%s", key)
+        _bg_task(_persist_callback_payload(key, payload))
     except Exception:
+        # No running event loop (or scheduling failed) — the in-memory map
+        # still resolves the ref for the current process.
         pass
     return key
-
-
-def _persist_callback_payload_sync(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
-    """Synchronously persist callback payload to MongoDB using pymongo.
-
-    This blocks the current thread until the write completes and is used
-    when Redis is not configured to provide stronger durability guarantees.
-    """
-    try:
-        try:
-            sync_db = MongoDB.get_sync_db()
-        except Exception:
-            logger.exception("_persist_callback_payload_sync: failed to get sync DB")
-            return
-        expire_at = datetime.now(datetime.timezone.utc) + timedelta(seconds=ttl)
-        try:
-            # Ensure TTL index exists (idempotent). Using sync driver.
-            try:
-                sync_db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
-            except Exception:
-                pass
-            sync_db.callback_refs.update_one(
-                {"_id": key},
-                {"$set": {"payload": payload, "expireAt": expire_at}},
-                upsert=True,
-            )
-        except Exception:
-            logger.exception("_persist_callback_payload_sync: write failed for key=%s", key)
-    except Exception:
-        logger.exception("_persist_callback_payload_sync: unexpected error for key=%s", key)
 
 
 def _shorten_showcat_cb(path: str, page: int, from_parent: str | None = None, parent_page: int | None = None):
@@ -725,6 +700,7 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
     """Persist callback payload to Redis (preferred) or MongoDB (fallback).
     TTL defaults to 7 days.
     """
+    global _CALLBACK_INDEX_ENSURE_DONE
     # Try Redis
     try:
         if _redis is not None:
@@ -734,22 +710,26 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
     except Exception:
         logger.exception("Failed to persist callback payload to Redis")
 
-    # Fallback to MongoDB
+    # Fallback to MongoDB (concurrency-capped to avoid connection churn)
     try:
-        db = await get_db()
-        if db is None:
-            return
-        expire_at = datetime.now(datetime.timezone.utc) + timedelta(seconds=ttl)
-        # ensure TTL index exists (idempotent)
-        try:
-            await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
-        except Exception:
-            pass
-        await db.callback_refs.update_one(
-            {"_id": key},
-            {"$set": {"payload": payload, "expireAt": expire_at}},
-            upsert=True,
-        )
+        async with _persist_semaphore:
+            db = await get_db()
+            if db is None:
+                return
+            expire_at = datetime.now(UTC) + timedelta(seconds=ttl)
+            # ensure TTL index exists exactly once per process (idempotent,
+            # and already ensured at startup by _rehydrate_callback_map)
+            try:
+                if not _CALLBACK_INDEX_ENSURE_DONE:
+                    await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
+                    _CALLBACK_INDEX_ENSURE_DONE = True
+            except Exception:
+                pass
+            await db.callback_refs.update_one(
+                {"_id": key},
+                {"$set": {"payload": payload, "expireAt": expire_at}},
+                upsert=True,
+            )
     except Exception:
         logger.exception("Failed to persist callback payload to MongoDB")
 
@@ -807,10 +787,8 @@ async def _rehydrate_callback_map(limit: int = None):
     This helps survive process restarts when Redis isn't configured.
     `limit` controls the maximum number of docs to load (None -> env or 10000).
     """
-    try:
-        cfg_limit = int(os.getenv("CALLBACK_REHYDRATE_LIMIT", "10000"))
-    except Exception:
-        cfg_limit = 10000
+    global _CALLBACK_INDEX_ENSURE_DONE
+    cfg_limit = env_int("CALLBACK_REHYDRATE_LIMIT", 10000)
     if limit is None:
         limit = cfg_limit
 
@@ -819,11 +797,12 @@ async def _rehydrate_callback_map(limit: int = None):
         if db is None:
             return 0
 
-        now = datetime.now(datetime.timezone.utc)
+        now = datetime.now(UTC)
         try:
             # Ensure TTL index exists idempotently
             try:
                 await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
+                _CALLBACK_INDEX_ENSURE_DONE = True
             except Exception:
                 pass
             cursor = db.callback_refs.find({"expireAt": {"$gt": now}}).limit(limit)
@@ -1039,7 +1018,7 @@ async def _prefetch_category_page(category_name: str, page: int = 1, page_size: 
 # avoids hitting Telegram's flood limits when users rapidly navigate pages.
 _LAST_CALLBACK = {}
 _LAST_CALLBACK_MAX = 10000  # prevent unbounded growth
-DEFAULT_DEBOUNCE = float(os.getenv("EDIT_DEBOUNCE", "0.5"))
+DEFAULT_DEBOUNCE = env_float("EDIT_DEBOUNCE", 0.2)
 
 
 def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool:
@@ -1075,6 +1054,11 @@ def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool
 _USER_BUCKETS = {}  # user_id -> {tokens, capacity, last_refill, refill_rate}
 _USER_BUCKETS_MAX = 50000  # prevent unbounded growth
 _GLOBAL_BUCKET = {"tokens": 20.0, "capacity": 20.0, "last_refill": time.time(), "refill_rate": 5.0}
+# Per-user token bucket sizing. Raised from the old 5-token @ 1/s defaults so
+# rapid search pagination (answer + edit = 2 API calls per click) isn't
+# silently throttled. Shared by the Redis-backed and in-memory paths.
+USER_BUCKET_CAPACITY = env_float("USER_BUCKET_CAPACITY", 20.0)
+USER_BUCKET_REFILL_RATE = env_float("USER_BUCKET_REFILL_RATE", 5.0)
 
 # Optional Redis-backed token buckets for multi-process deployments.
 REDIS_URL = os.getenv("REDIS_URL")
@@ -1157,7 +1141,15 @@ async def _consume_token(user_id: int, cost: float = 1.0):
             if ok == 1:
                 # now consume user bucket
                 user_key = f"bucket:user:{user_id}"
-                res2 = await _redis.eval(_redis_token_script, 1, user_key, now, 5.0, 1.0, cost)
+                res2 = await _redis.eval(
+                    _redis_token_script,
+                    1,
+                    user_key,
+                    now,
+                    USER_BUCKET_CAPACITY,
+                    USER_BUCKET_REFILL_RATE,
+                    cost,
+                )
                 ok2, wait2 = json.loads(res2)
                 if ok2 == 1:
                     METRICS["token_consumed"] += 1
@@ -1181,7 +1173,12 @@ async def _consume_token(user_id: int, cost: float = 1.0):
     # Refill / init user bucket
     b = _USER_BUCKETS.get(user_id)
     if b is None:
-        b = {"tokens": 5.0, "capacity": 5.0, "last_refill": time.time(), "refill_rate": 1.0}
+        b = {
+            "tokens": USER_BUCKET_CAPACITY,
+            "capacity": USER_BUCKET_CAPACITY,
+            "last_refill": time.time(),
+            "refill_rate": USER_BUCKET_REFILL_RATE,
+        }
         _USER_BUCKETS[user_id] = b
         _prune_user_buckets()
     _refill_bucket(b)
@@ -1210,11 +1207,28 @@ def _bg_task(coro):
     """Create and track a fire-and-forget background task.
 
     Prevents garbage collection of the task before it completes.
-    The task is automatically removed from tracking when done.
+    The task is automatically removed from tracking when done, and
+    unexpected exceptions are logged instead of silently swallowed.
     """
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
+
+    def _on_done(t):
+        _background_tasks.discard(t)
+        try:
+            if not t.cancelled():
+                exc = t.exception()
+                if exc is not None:
+                    logger.warning(
+                        "Background task raised: %s: %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+        except Exception:
+            logger.exception("Error inspecting background task result")
+
+    task.add_done_callback(_on_done)
     return task
 
 
@@ -1379,7 +1393,7 @@ async def _process_redis_retry_item(application, raw_member: str):
 
 
 # Background cache cleanup interval (seconds). Default: 300 (5 minutes).
-CACHE_CLEANUP_INTERVAL = int(os.getenv("CACHE_CLEANUP_INTERVAL", "300"))
+CACHE_CLEANUP_INTERVAL = env_int("CACHE_CLEANUP_INTERVAL", 300)
 
 
 def _prune_all_caches():

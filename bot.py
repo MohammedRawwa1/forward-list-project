@@ -11,6 +11,7 @@ from telegram.ext import (
 )
 
 import logging_config  # noqa: F401 — configures root logger (console + file) on import
+from config import env_float, env_int
 from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT, DELETE_ALL
 from handlers.base_handlers import (
     categories_page,
@@ -83,15 +84,35 @@ async def create_application():
     try:
         from telegram.ext import AIORateLimiter
 
+        # All AIORateLimiter limits are env-configurable so deployments can
+        # tune them without code changes. Defaults are deliberately relaxed:
+        # the per-chat (group) limit is raised from 18/60s to 120/60s (2 API
+        # calls/s per chat = ~60 clicks/min, far beyond human pagination speed)
+        # because each pagination click = answer + edit = 2 API calls and an
+        # aggressive group limit throttles rapid search pagination. A non-zero
+        # value is kept (rather than disabling it) so one fast user cannot
+        # consume the shared global budget and throttle other users.
+        overall_max_rate = env_float("RATE_LIMIT_OVERALL_MAX_RATE", 30.0)
+        overall_time_period = env_float("RATE_LIMIT_OVERALL_TIME_PERIOD", 1.0)
+        group_max_rate = env_float("RATE_LIMIT_GROUP_MAX_RATE", 120.0)
+        group_time_period = env_float("RATE_LIMIT_GROUP_TIME_PERIOD", 60.0)
+        max_retries = env_int("RATE_LIMIT_MAX_RETRIES", 5)
+
         rate_limiter = AIORateLimiter(
-            overall_max_rate=30,
-            overall_time_period=1.0,
-            group_max_rate=18,
-            group_time_period=60.0,
-            max_retries=3,
+            overall_max_rate=overall_max_rate,
+            overall_time_period=overall_time_period,
+            group_max_rate=group_max_rate,
+            group_time_period=group_time_period,
+            max_retries=max_retries,
         )
         application = Application.builder().token(bot_token).rate_limiter(rate_limiter).build()
-        logger.info("AIORateLimiter enabled (30/s global, 18/60s per-chat)")
+        logger.info(
+            "AIORateLimiter enabled (%.0f/s global, %.0f/%ss per-chat, max_retries=%d)",
+            overall_max_rate,
+            group_max_rate,
+            group_time_period,
+            max_retries,
+        )
     except Exception:
         # aiolimiter may not be installed; fall back to unthrottled
         logger.warning("Failed to create AIORateLimiter; falling back to unthrottled")

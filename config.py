@@ -11,6 +11,22 @@ import os
 # os.environ explicitly.
 
 
+def env_int(name: str, default: int) -> int:
+    """Read an integer env var, falling back to *default* on unset/garbage."""
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """Read a float env var, falling back to *default* on unset/garbage."""
+    try:
+        return float(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
 class Config:
     TELEGRAM_APP_ID = os.getenv("TELEGRAM_APP_ID")
     TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
@@ -20,7 +36,7 @@ class Config:
     MONGODB_URL = os.getenv("MONGODB_URL")
     MONGODB_NAME = os.getenv("MONGODB_NAME")
 
-    MAX_DOWNLOAD_SIZE = int(os.getenv("MAX_DOWNLOAD_SIZE", "10737418240"))  # Default to 10GB
+    MAX_DOWNLOAD_SIZE = env_int("MAX_DOWNLOAD_SIZE", 10737418240)  # Default to 10GB
     DOWNLOAD_LOCATION = os.path.join(os.path.dirname(__file__), "downloads")
     TG_MAX_SIZE = 2040108421  # Set Telegram max size
     CHUNK_SIZE = 1024 * 6  # 6 KB, adjust if needed for efficiency
