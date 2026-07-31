@@ -1,25 +1,27 @@
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ConversationHandler, CallbackContext
-from conversation_states import DELETE_ALL
 import logging
-from handlers.db_connection import get_db
 import urllib.parse
-import handlers.base_handlers as base_handlers
-import os
 import uuid
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackContext, ConversationHandler
+
+from config import is_owner
+from handlers import base_handlers
+from handlers.db_connection import get_db
 
 # Logger setup
 logger = logging.getLogger(__name__)
 # Batch limit to avoid loading very large result sets into memory
 BATCH_LIMIT = 200
+
+
 def normalize_name(name: str) -> str:
-    """
-    Normalize category/course names for consistent comparison and sorting.
-    """
+    """Normalize category/course names for consistent comparison and sorting."""
     if not name:
         return ""
     return name.strip().casefold()
-    
+
+
 # Helper function to generate pagination keyboard
 async def generate_pagination_keyboard(total_count, page, page_size, callback_pattern):
     """Generate pagination buttons for lists of items using a total count.
@@ -29,11 +31,13 @@ async def generate_pagination_keyboard(total_count, page, page_size, callback_pa
     """
     pagination_buttons = []
     if page > 1:
-        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"page_{callback_pattern}_{page-1}"))
+        pagination_buttons.append(
+            InlineKeyboardButton("⬅️ Previous", callback_data=f"page_{callback_pattern}_{page - 1}"),
+        )
         pagination_buttons.append(InlineKeyboardButton("🏠 Home", callback_data="home"))
     # Show Next only when there are items beyond the current page
     if total_count > page * page_size:
-        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"page_{callback_pattern}_{page+1}"))
+        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=f"page_{callback_pattern}_{page + 1}"))
     return pagination_buttons
 
 
@@ -45,10 +49,10 @@ async def generate_keyboard(user_id, items, callback_pattern, page=1, page_size=
         # 1) get the total count of the array using aggregation
         count_pipeline = [
             {"$match": {"user_id": user_id}},
-            {"$project": {"count": {"$size": {"$ifNull": [f"${items}", []]}}}}
+            {"$project": {"count": {"$size": {"$ifNull": [f"${items}", []]}}}},
         ]
         cnt_res = await db.users.aggregate(count_pipeline).to_list(length=1)
-        total_count = int(cnt_res[0].get('count')) if cnt_res else 0
+        total_count = int(cnt_res[0].get("count")) if cnt_res else 0
         if total_count == 0:
             return None
 
@@ -61,8 +65,7 @@ async def generate_keyboard(user_id, items, callback_pattern, page=1, page_size=
         paginated_items = doc[items] or []
 
         keyboard = [
-            [InlineKeyboardButton(item, callback_data=f"{callback_pattern}_{item}")]
-            for item in paginated_items
+            [InlineKeyboardButton(item, callback_data=f"{callback_pattern}_{item}")] for item in paginated_items
         ]
 
         pagination_buttons = await generate_pagination_keyboard(total_count, page, page_size, callback_pattern)
@@ -71,11 +74,8 @@ async def generate_keyboard(user_id, items, callback_pattern, page=1, page_size=
 
         return InlineKeyboardMarkup(keyboard)
 
-    except Exception as e:
-        logger.error(
-            f"Error generating keyboard for user {user_id}: {e}",
-            exc_info=True,
-        )
+    except Exception:
+        logger.exception("Error generating keyboard for user %s", user_id)
         return None
 
 
@@ -88,13 +88,12 @@ async def delete_item(user_id, item_name, items_key, db):
             {"$pull": {items_key: {"name": item_name}}},
         )
         if result.modified_count > 0:
-            logger.info(f"Item '{item_name}' deleted successfully for user {user_id}.")
+            logger.info("Item %r deleted successfully for user %s.", item_name, user_id)
             return True
-        else:
-            logger.warning(f"Item '{item_name}' not found for user {user_id}.")
-            return False
-    except Exception as e:
-        logger.error(f"Error deleting item '{item_name}' for user {user_id}: {e}")
+        logger.warning("Item %r not found for user %s.", item_name, user_id)
+        return False
+    except Exception:
+        logger.exception("Error deleting item %r for user %s", item_name, user_id)
         return False
 
 
@@ -102,64 +101,63 @@ async def delete_category(user_id, category_name, db):
     """Delete a category and all its associated courses."""
     try:
         # Prefer the shared `categories` collection when present (new schema).
-        if hasattr(db, 'categories') or 'categories' in getattr(db, '__dict__', {}):
+        if hasattr(db, "categories") or "categories" in getattr(db, "__dict__", {}):
             # Find all documents that match the given name
-            docs = await db['categories'].find({"name": category_name}).to_list(length=BATCH_LIMIT)
+            docs = await db["categories"].find({"name": category_name}).to_list(length=BATCH_LIMIT)
             if not docs:
-                logger.warning(f"Category '{category_name}' not found in categories collection for user {user_id}.")
+                logger.warning("Category %r not found in categories collection for user %s.", category_name, user_id)
                 return False
 
             # If there are multiple docs with same name, remove empty duplicates only (safe),
             # otherwise proceed with subtree deletion for the selected doc.
             if len(docs) > 1:
                 # Identify empty docs (no real courses)
-                empty_docs = [d for d in docs if not base_handlers._has_real_courses(d.get('courses'))]
+                empty_docs = [d for d in docs if not base_handlers._has_real_courses(d.get("courses"))]
                 if empty_docs:
-                    ids = [d.get('_id') for d in empty_docs]
-                    res = await db['categories'].delete_many({"_id": {"$in": ids}})
-                    if getattr(res, 'deleted_count', 0) > 0:
-                        logger.info(f"Deleted {res.deleted_count} empty duplicate category docs for '{category_name}'.")
+                    ids = [d.get("_id") for d in empty_docs]
+                    res = await db["categories"].delete_many({"_id": {"$in": ids}})
+                    if getattr(res, "deleted_count", 0) > 0:
+                        logger.info(
+                            "Deleted %d empty duplicate category docs for %r.",
+                            res.deleted_count,
+                            category_name,
+                        )
                         return True
-                    else:
-                        logger.warning(f"Found empty duplicates for '{category_name}' but failed to delete them.")
-                        return False
+                    logger.warning("Found empty duplicates for %r but failed to delete them.", category_name)
+                    return False
                 # Ambiguous: multiple non-empty categories with same name — do not delete automatically
-                logger.warning(f"Multiple non-empty categories named '{category_name}' found; refusing to delete to avoid data loss.")
+                logger.warning(
+                    "Multiple non-empty categories named %r found; refusing to delete to avoid data loss.",
+                    category_name,
+                )
                 return False
 
             # Exactly one matching document — delete it and its descendants (by name-based traversal)
             start_doc = docs[0]
-            to_delete = set()
-            stack = [start_doc.get('name')]
-            while stack:
-                curr = stack.pop()
-                if curr in to_delete:
-                    continue
-                to_delete.add(curr)
-                children = await db['categories'].find({"parent": curr}).project({"name": 1}).to_list(length=BATCH_LIMIT)
-                for ch in children:
-                    name = ch.get('name')
-                    if name and name not in to_delete:
-                        stack.append(name)
+            to_delete = await base_handlers.collect_subtree_names(
+                db,
+                start_doc.get("name"),
+                filter_fn=lambda curr: {"parent": curr},
+                batch_limit=BATCH_LIMIT,
+            )
 
             # Delete only the documents that are part of the subtree we discovered (match by _id)
             to_remove_ids = []
             for name in to_delete:
-                docs_with_name = await db['categories'].find({"name": name}).to_list(length=BATCH_LIMIT)
+                docs_with_name = await db["categories"].find({"name": name}).to_list(length=BATCH_LIMIT)
                 for d in docs_with_name:
-                    parent = d.get('parent')
+                    parent = d.get("parent")
                     # Consider this doc part of the subtree if it's the start doc or its parent is in the subtree
-                    if d.get('_id') == start_doc.get('_id') or (parent in to_delete):
-                        to_remove_ids.append(d.get('_id'))
+                    if d.get("_id") == start_doc.get("_id") or (parent in to_delete):
+                        to_remove_ids.append(d.get("_id"))
 
             if to_remove_ids:
-                res = await db['categories'].delete_many({"_id": {"$in": to_remove_ids}})
-                if getattr(res, 'deleted_count', 0) > 0:
-                    logger.info(f"Category '{category_name}' and its descendants deleted for user {user_id}.")
+                res = await db["categories"].delete_many({"_id": {"$in": to_remove_ids}})
+                if getattr(res, "deleted_count", 0) > 0:
+                    logger.info("Category %r and its descendants deleted for user %s.", category_name, user_id)
                     return True
-                else:
-                    logger.warning(f"Failed to delete collected subtree documents for '{category_name}'.")
-                    return False
+                logger.warning("Failed to delete collected subtree documents for %r.", category_name)
+                return False
         else:
             # Fallback: legacy per-user schema stored in `users` collection
             result = await db.users.update_one(
@@ -167,82 +165,15 @@ async def delete_category(user_id, category_name, db):
                 {"$pull": {"categories": category_name, "courses": {"category": category_name}}},
             )
             if result.modified_count > 0:
-                logger.info(f"Category '{category_name}' deleted successfully for user {user_id}.")
+                logger.info("Category %r deleted successfully for user %s.", category_name, user_id)
                 return True
-            else:
-                logger.warning(f"Category '{category_name}' not found for user {user_id}.")
-                return False
-    except Exception as e:
-        logger.error(f"Error deleting category '{category_name}' for user {user_id}: {e}")
+            logger.warning("Category %r not found for user %s.", category_name, user_id)
+            return False
+    except Exception:
+        logger.exception("Error deleting category %r for user %s", category_name, user_id)
         return False
 
 
-async def handle_course_deletion(update: Update, context: CallbackContext):
-    """Handle deletion of courses or empty categories."""
-    query = update.callback_query
-    await base_handlers.safe_answer(query)
-    # Owner-only guard for course deletion
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(query.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
-        return
-    data = query.data
-    logger.info("[DEL-COURSE] callback data=%s", data)
-
-    db = await get_db()
-    if db is None:
-        await base_handlers.safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
-        return
-
-    try:
-        if data.startswith("delete_item::"):
-            # Delete a single course from a category
-            parts = data.split("::", 2)
-            if len(parts) == 3:
-                cat_name = urllib.parse.unquote_plus(parts[1])
-                item_name = urllib.parse.unquote_plus(parts[2])
-            else:
-                await base_handlers.safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
-                return
-
-        elif data.startswith("delete_category_"):
-            # Deleting category with courses (underscore-separated)
-            parts = data.split("_", 1)
-            if len(parts) == 2:
-                cat_name = urllib.parse.unquote_plus(parts[1])
-            else:
-                await base_handlers.safe_edit_message(query, "Invalid callback data.", action_key=getattr(query, "data", None))
-                return
-
-        else:
-            await base_handlers.safe_edit_message(query, "Unknown deletion action.", action_key=getattr(query, "data", None))
-            return
-
-        # Delete the course from the category
-        result = await db["categories"].update_one(
-            {"name": cat_name},
-            {"$pull": {"courses": {"name": item_name}}}
-        )
-
-        if result.modified_count > 0:
-            await base_handlers.safe_edit_message(query, f"Course '{item_name}' deleted successfully from '{cat_name}'! 🎉", action_key=getattr(query, "data", None))
-        else:
-            # Category exists but course not found or category was empty
-            cat_doc = await db["categories"].find_one({"name": cat_name})
-            if cat_doc is None:
-                await base_handlers.safe_edit_message(query, f"Category '{cat_name}' not found.", action_key=getattr(query, "data", None))
-            else:
-                await base_handlers.safe_edit_message(query, f"No course named '{item_name}' found in category '{cat_name}'.", action_key=getattr(query, "data", None))
-
-    except Exception as e:
-        logger.error(f"Error deleting course or category '{cat_name}': {e}", exc_info=True)
-        await base_handlers.safe_edit_message(query, "An error occurred while deleting. Please try again later.", action_key=getattr(query, "data", None))
-        
 async def handle_cancel_delete_callback(update: Update, context: CallbackContext):
     """Handle cancel_delete_{type}::{encoded_name} and simple cancel_delete callbacks."""
     query = update.callback_query
@@ -257,7 +188,7 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
     payload = data
     for prefix in ("cancel_delete_", "cancel_delete::"):
         if payload.startswith(prefix):
-            payload = payload[len(prefix):]
+            payload = payload[len(prefix) :]
             break
 
     parts = payload.split("::", 1)
@@ -279,31 +210,33 @@ async def handle_cancel_delete_callback(update: Update, context: CallbackContext
 
 
 async def delete_item_start(update: Update, context: CallbackContext):
-    """Show every course and empty category in the DB as inline buttons."""
+    """Show every course and empty category in the DB as inline buttons.
+
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
+    """
     keyboard = []  # defensive initialization
     # Owner-only: restrict delete UI
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(update.message.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await update.message.reply_text("Unauthorized")
+    user_id = getattr(update.message.from_user, "id", None)
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
     db = await get_db()
     # Fetch minimal fields and bound result size to avoid loading huge docs
-    cats = await db.categories.find({}, projection={"name": 1, "courses": 1, "id": 1}).sort('name', 1).to_list(length=BATCH_LIMIT)
+    cats = (
+        await db.categories.find({}, projection={"name": 1, "courses": 1, "id": 1})
+        .sort("name", 1)
+        .to_list(length=BATCH_LIMIT)
+    )
 
     # Ensure categories have stable UUIDs so delete actions can target by id
     for c in cats:
-        if not c.get('id'):
+        if not c.get("id"):
             try:
                 new_id = str(uuid.uuid4())
-                await db['categories'].update_one({'_id': c.get('_id')}, {'$set': {'id': new_id}})
-                c['id'] = new_id
+                await db["categories"].update_one({"_id": c.get("_id")}, {"$set": {"id": new_id}})
+                c["id"] = new_id
             except Exception:
-                pass
+                logger.warning("Failed to assign stable UUID to category %r", c.get("name"))
 
     # Sort categories safely
     cats = sorted(cats, key=lambda c: normalize_name(c.get("name")))
@@ -312,26 +245,19 @@ async def delete_item_start(update: Update, context: CallbackContext):
 
     for cat in cats:
         category_name = (cat.get("name") or "").strip()
-        category_id = cat.get('id')
+        category_id = cat.get("id")
         courses = cat.get("courses")
 
         if courses:
             # Add all courses
             for crs in courses:
                 course_name = (crs.get("name") or "").strip()
-                all_items.append({
-                    "type": "course",
-                    "name": course_name,
-                    "category": category_name,
-                    "category_id": category_id
-                })
+                all_items.append(
+                    {"type": "course", "name": course_name, "category": category_name, "category_id": category_id},
+                )
         else:
             # No courses → offer deleting the category itself
-            all_items.append({
-                "type": "category",
-                "category": category_name,
-                "category_id": category_id
-            })
+            all_items.append({"type": "category", "category": category_name, "category_id": category_id})
 
     if not all_items:
         await update.message.reply_text("No courses or categories to delete.")
@@ -339,27 +265,22 @@ async def delete_item_start(update: Update, context: CallbackContext):
 
     keyboard = []
     for c in all_items:
-        if c.get('type') == 'category':
+        if c.get("type") == "category":
             # Empty category — show category name and delete_category callback
             display_text = f"{c['category']}"
             try:
-                payload = {"category": c['category'], "id": c.get('category_id')}
+                payload = {"category": c["category"], "id": c.get("category_id")}
                 key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_category_{key}"
             except Exception:
                 cat = urllib.parse.quote_plus(c["category"])
                 cb = f"delete_category_{cat}"
-            keyboard.append([
-                InlineKeyboardButton(
-                    display_text,
-                    callback_data=cb
-                )
-            ])
+            keyboard.append([InlineKeyboardButton(display_text, callback_data=cb)])
         else:
             display_text = f"{c['category']} → {c['name']}"
             # Persist a small payload so deletion resolves by category id
             try:
-                payload = {"category": c['category'], "category_id": c.get('category_id'), "name": c['name']}
+                payload = {"category": c["category"], "category_id": c.get("category_id"), "name": c["name"]}
                 key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_item_ref::{key}"
             except Exception:
@@ -367,12 +288,7 @@ async def delete_item_start(update: Update, context: CallbackContext):
                 name = urllib.parse.quote_plus(c["name"])
                 cb = f"delete_item::{cat}::{name}"
 
-            keyboard.append([
-                InlineKeyboardButton(
-                    display_text,
-                    callback_data=cb
-                )
-            ])
+            keyboard.append([InlineKeyboardButton(display_text, callback_data=cb)])
 
     # Always append Cancel button
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
@@ -381,22 +297,19 @@ async def delete_item_start(update: Update, context: CallbackContext):
         "Choose the course or empty category you want to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
-                
+
+
 async def delete_category_start(update: Update, context: CallbackContext):
     keyboard = []  # defensive initialization
     """Show a paginated list of categories for deletion.
 
     Uses `delete_category_page::<n>` callbacks to navigate pages.
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
     """
     # Owner-only: restrict delete UI
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(update.message.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await update.message.reply_text("Unauthorized")
+    user_id = getattr(update.message.from_user, "id", None)
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
 
     db = await get_db()
@@ -409,18 +322,13 @@ async def delete_category_start(update: Update, context: CallbackContext):
         # Only list child categories (those with a parent). Parent/top-level
         # categories are managed via `/delete_parent` and should not appear
         # in the `/delete_category` flow. Use DB-side pagination.
-        filter_q = {
-            "$and": [
-                {"parent": {"$exists": True}},
-                {"parent": {"$nin": [None, ""]}}
-            ]
-        }
+        filter_q = {"$and": [{"parent": {"$exists": True}}, {"parent": {"$nin": [None, ""]}}]}
         # Default page size (can be overridden in context.bot_data)
-        page_size = int(context.bot_data.get('delete_cat_page_size', 20))
+        page_size = int(context.bot_data.get("delete_cat_page_size", 20))
         page = 1
-        total = await base_handlers.get_total_count(db, 'categories', filter_q, ttl=15)
+        total = await base_handlers.get_total_count(db, "categories", filter_q, ttl=15)
         start = (page - 1) * page_size
-        cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
+        cursor = db["categories"].find(filter_q).sort("name", 1).skip(start).limit(page_size)
         page_cats = await cursor.to_list(length=page_size)
         if not page_cats:
             await update.message.reply_text("No categories available to delete.")
@@ -428,19 +336,18 @@ async def delete_category_start(update: Update, context: CallbackContext):
 
         # Ensure categories on this page have stable UUIDs
         for c in page_cats:
-            if not c.get('id'):
+            if not c.get("id"):
                 try:
                     new_id = str(uuid.uuid4())
-                    await db['categories'].update_one({'_id': c.get('_id')}, {'$set': {'id': new_id}})
-                    c['id'] = new_id
+                    await db["categories"].update_one({"_id": c.get("_id")}, {"$set": {"id": new_id}})
+                    c["id"] = new_id
                 except Exception:
                     pass
 
         keyboard = []
         for cat in page_cats:
             name = (cat.get("name") or "").strip()
-            parent = (cat.get("parent") or "").strip() if cat.get('parent') else None
-            courses = cat.get("courses")
+            parent = (cat.get("parent") or "").strip() if cat.get("parent") else None
             # Show parent context to avoid ambiguous choices: "Parent → Child"
             if parent:
                 display_name = f"{parent} → {name}"
@@ -450,7 +357,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
             # Persist a small payload containing the category id so deletion
             # resolves by id rather than name. Fall back to name-based cb.
             try:
-                payload = {"category": name, "id": cat.get('id'), "parent": parent, "path": cat.get('path')}
+                payload = {"category": name, "id": cat.get("id"), "parent": parent, "path": cat.get("path")}
                 key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_category_{key}"
             except Exception:
@@ -465,21 +372,20 @@ async def delete_category_start(update: Update, context: CallbackContext):
         last_page = max(1, total_pages)
         # Desired order: Next (left), Home (center when applicable), End, Previous (right-most)
         if page < last_page:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page + 1}"))
 
         # Home (center) — show only when not on page 1 (appears starting page 2)
         if page > 1:
-            nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"delete_category_page::1"))
+            nav.append(InlineKeyboardButton("🏠 Home", callback_data="delete_category_page::1"))
 
         # End button sends user to the last page (keep near right)
         if total_pages > 1 and page < last_page:
             nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
 
         if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page - 1}"))
         if nav:
             keyboard.append(nav)
-
         # Cancel button
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
@@ -488,28 +394,27 @@ async def delete_category_start(update: Update, context: CallbackContext):
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-    except Exception as e:
-        logger.exception("Error listing categories for deletion: %s", e)
+    except Exception:
+        logger.exception("Error listing categories for deletion")
         await update.message.reply_text("An error occurred. Please try again later.")
 
 
-keyboard = []  # defensive initialization
 async def handle_delete_category_page(update: Update, context: CallbackContext):
     """Render a specific page of categories for deletion (callback).
 
     Callback format: `delete_category_page::<page>`
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
     """
     query = update.callback_query
     await base_handlers.safe_answer(query)
     # Owner-only guard for delete pagination callbacks
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(query.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+    user_id = getattr(query.from_user, "id", None)
+    if not is_owner(user_id):
+        await base_handlers.safe_edit_message(
+            query,
+            "⛔ Only the bot owner can run this command.",
+            action_key=getattr(query, "data", None),
+        )
         return
     data = query.data
     try:
@@ -524,39 +429,33 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
         return
 
     # Only page through child categories (exclude parents/top-level folders)
-    filter_q = {
-        "$and": [
-            {"parent": {"$exists": True}},
-            {"parent": {"$nin": [None, ""]}}
-        ]
-    }
-    page_size = int(context.bot_data.get('delete_cat_page_size', 20))
-    total = await base_handlers.get_total_count(db, 'categories', filter_q, ttl=15)
+    filter_q = {"$and": [{"parent": {"$exists": True}}, {"parent": {"$nin": [None, ""]}}]}
+    page_size = int(context.bot_data.get("delete_cat_page_size", 20))
+    total = await base_handlers.get_total_count(db, "categories", filter_q, ttl=15)
     start = (page - 1) * page_size
-    cursor = db['categories'].find(filter_q).sort('name', 1).skip(start).limit(page_size)
+    cursor = db["categories"].find(filter_q).sort("name", 1).skip(start).limit(page_size)
     page_cats = await cursor.to_list(length=page_size)
 
     # Ensure categories on this page have stable UUIDs
     for c in page_cats:
-        if not c.get('id'):
+        if not c.get("id"):
             try:
                 new_id = str(uuid.uuid4())
-                await db['categories'].update_one({'_id': c.get('_id')}, {'$set': {'id': new_id}})
-                c['id'] = new_id
+                await db["categories"].update_one({"_id": c.get("_id")}, {"$set": {"id": new_id}})
+                c["id"] = new_id
             except Exception:
                 pass
 
     keyboard = []
     for cat in page_cats:
         name = (cat.get("name") or "").strip()
-        parent = (cat.get("parent") or "").strip() if cat.get('parent') else None
-        courses = cat.get("courses")
+        parent = (cat.get("parent") or "").strip() if cat.get("parent") else None
         if parent:
             display_name = f"{parent} → {name}"
         else:
             display_name = f"{name} (no parent)"
         try:
-            payload = {"category": name, "id": cat.get('id'), "parent": parent, "path": cat.get('path')}
+            payload = {"category": name, "id": cat.get("id"), "parent": parent, "path": cat.get("path")}
             key = base_handlers._store_callback_payload(payload)
             cb = f"delete_category_{key}"
         except Exception:
@@ -569,38 +468,40 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     last_page = max(1, total_pages)
     # Desired order: Next (left), Home (center when applicable), End, Previous (right-most)
     if page < last_page:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page+1}"))
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_category_page::{page + 1}"))
 
     # Home (center) — show only when not on page 1 (appears starting page 2)
     if page > 1:
-        nav.append(InlineKeyboardButton("🏠 Home", callback_data=f"delete_category_page::1"))
+        nav.append(InlineKeyboardButton("🏠 Home", callback_data="delete_category_page::1"))
 
     if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("🏁 End", callback_data=f"delete_category_page::{last_page}"))
 
     if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_category_page::{page - 1}"))
 
     if nav:
         keyboard.append(nav)
 
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
-    await base_handlers.safe_edit_message(query, "Choose a category to delete:", reply_markup=InlineKeyboardMarkup(keyboard), action_key=getattr(query, 'data', None))
-    keyboard = []  # defensive initialization
-        
-async def delete_parent_start(update: Update, context: CallbackContext):
-    """Show top-level parent categories for deletion with pagination."""
+    await base_handlers.safe_edit_message(
+        query,
+        "Choose a category to delete:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        action_key=getattr(query, "data", None),
+    )
 
+
+async def delete_parent_start(update: Update, context: CallbackContext):
+    """Show top-level parent categories for deletion with pagination.
+
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
+    """
     # Owner-only: restrict delete UI
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(update.message.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await update.message.reply_text("Unauthorized")
+    user_id = getattr(update.message.from_user, "id", None)
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
 
     db = await get_db()
@@ -613,11 +514,15 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         page = 1
         page_size = 20  # smaller page for delete UI
         start = (page - 1) * page_size
-        total = await base_handlers.get_total_count(db, 'categories', base_handlers.TOP_LEVEL_FILTER, ttl=15)
-        cats = await db["categories"].find(
-            base_handlers.TOP_LEVEL_FILTER,
-            {"name": 1, "parent": 1}
-        ).sort('name', 1).skip(start).limit(page_size).to_list(length=page_size)
+        total = await base_handlers.get_total_count(db, "categories", base_handlers.TOP_LEVEL_FILTER, ttl=15)
+        cats = (
+            await db["categories"]
+            .find(base_handlers.TOP_LEVEL_FILTER, {"name": 1, "parent": 1})
+            .sort("name", 1)
+            .skip(start)
+            .limit(page_size)
+            .to_list(length=page_size)
+        )
 
         if not cats:
             await update.message.reply_text("No parent categories available to delete.")
@@ -635,10 +540,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                 display_name = f"{name} (parent)"
 
             try:
-                payload = {
-                    "category": name,
-                    "parent": parent
-                }
+                payload = {"category": name, "parent": parent}
                 key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_summary::category::{key}"
             except Exception:
@@ -649,43 +551,45 @@ async def delete_parent_start(update: Update, context: CallbackContext):
 
             keyboard.append([InlineKeyboardButton(display_name, callback_data=cb)])
 
+        # Build pagination nav BEFORE sending the message
+        nav = []
+        total_pages = max(1, (total - 1) // page_size + 1) if total else 1
+        last_page = max(1, total_pages)
+        if page > 1:
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_parent_page::{page - 1}"))
+        if page < last_page:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_parent_page::{page + 1}"))
+        if nav:
+            keyboard.append(nav)
+
         # Add a single Cancel button at the end
         keyboard.append([InlineKeyboardButton("Cancel", callback_data="cancel_delete")])
 
         await update.message.reply_text(
             "Choose a parent category to delete:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-        # Pagination nav
-        nav = []
-        total_pages = max(1, (total - 1) // page_size + 1) if total else 1
-        last_page = max(1, total_pages)
-        if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_parent_page::{page-1}"))
-        if page < last_page:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_parent_page::{page+1}"))
-        if nav:
-            keyboard.append(nav)
-
-    except Exception as e:
-        logger.exception("Error listing parent categories for deletion: %s", e)
-        keyboard = []  # defensive initialization
+    except Exception:
+        logger.exception("Error listing parent categories for deletion")
         await update.message.reply_text("An error occurred. Please try again later.")
-                                
+
+
 async def handle_delete_parent_page(update: Update, context: CallbackContext):
-    """Handle pagination for the delete-parent flow (callback: delete_parent_page::<page>)."""
+    """Handle pagination for the delete-parent flow (callback: delete_parent_page::<page>).
+
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
+    """
     query = update.callback_query
     await base_handlers.safe_answer(query)
     # Owner-only guard
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(query.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+    user_id = getattr(query.from_user, "id", None)
+    if not is_owner(user_id):
+        await base_handlers.safe_edit_message(
+            query,
+            "⛔ Only the bot owner can run this command.",
+            action_key=getattr(query, "data", None),
+        )
         return
     data = query.data
     try:
@@ -701,11 +605,15 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
     try:
         page_size = 20
         start = (page - 1) * page_size
-        total = await base_handlers.get_total_count(db, 'categories', base_handlers.TOP_LEVEL_FILTER, ttl=15)
-        cats = await db["categories"].find(
-            base_handlers.TOP_LEVEL_FILTER,
-            {"name": 1, "parent": 1}
-        ).sort('name', 1).skip(start).limit(page_size).to_list(length=page_size)
+        total = await base_handlers.get_total_count(db, "categories", base_handlers.TOP_LEVEL_FILTER, ttl=15)
+        cats = (
+            await db["categories"]
+            .find(base_handlers.TOP_LEVEL_FILTER, {"name": 1, "parent": 1})
+            .sort("name", 1)
+            .skip(start)
+            .limit(page_size)
+            .to_list(length=page_size)
+        )
 
         if not cats:
             await base_handlers.safe_edit_message(query, "No parent categories found on this page.", action_key=data)
@@ -732,9 +640,9 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
         total_pages = max(1, (total - 1) // page_size + 1) if total else 1
         last_page = max(1, total_pages)
         if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_parent_page::{page-1}"))
+            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"delete_parent_page::{page - 1}"))
         if page < last_page:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_parent_page::{page+1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"delete_parent_page::{page + 1}"))
         if nav:
             keyboard.append(nav)
 
@@ -746,21 +654,20 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
             reply_markup=InlineKeyboardMarkup(keyboard),
             action_key=data,
         )
-    except Exception as e:
-        logger.exception("Error handling delete parent page: %s", e)
+    except Exception:
+        logger.exception("Error handling delete parent page")
+
 
 async def delete_all_data_start(update: Update, context: CallbackContext):
-    """Start the delete-all-data confirmation conversation."""
+    """Start the delete-all-data confirmation conversation.
+
+    SECURITY: Owner-only — uses fail-closed is_owner() helper.
+    """
     # Owner-only: restrict destructive action to bot owner
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(update.message.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await update.message.reply_text("Unauthorized")
-        return
+    user_id = getattr(update.message.from_user, "id", None)
+    if not is_owner(user_id):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
+        return None
 
     # Prompt user with confirmation buttons; ConversationHandler expects DELETE_ALL state
     keyboard = [
@@ -773,9 +680,12 @@ async def delete_all_data_start(update: Update, context: CallbackContext):
     )
     try:
         from conversation_states import DELETE_ALL
+
         return DELETE_ALL
     except Exception:
         return None
+
+
 # Handle confirmation of deleting all data
 async def confirm_delete_all(update: Update, context: CallbackContext):
     """Confirm and delete all categories and courses."""
@@ -783,41 +693,61 @@ async def confirm_delete_all(update: Update, context: CallbackContext):
     await base_handlers.safe_answer(query)  # Acknowledge the callback query
 
     # Owner-only guard
-    try:
-        owner_env = os.getenv('BOT_OWNER_ID')
-        owner_id = int(owner_env) if owner_env else None
-    except Exception:
-        owner_id = None
-    user_id = getattr(query.from_user, 'id', None)
-    if owner_id is not None and user_id != owner_id:
-        await base_handlers.safe_edit_message(query, "Unauthorized", action_key=getattr(query, 'data', None))
+    user_id = getattr(query.from_user, "id", None)
+    if not is_owner(user_id):
+        await base_handlers.safe_edit_message(
+            query,
+            "⛔ Only the bot owner can run this command.",
+            action_key=getattr(query, "data", None),
+        )
         return ConversationHandler.END
 
     try:
         db = await get_db()  # Await the database connection
         if db is None:
-            logger.error(f"Database connection failed for user {user_id}.")
-            await base_handlers.safe_edit_message(query, "Error: Unable to connect to the database. Please try again later.", action_key=getattr(query, 'data', None))
+            logger.error("Database connection failed for user %s.", user_id)
+            await base_handlers.safe_edit_message(
+                query,
+                "Error: Unable to connect to the database. Please try again later.",
+                action_key=getattr(query, "data", None),
+            )
             return ConversationHandler.END
 
         # Perform the deletion of categories (courses embedded inside will be removed)
-        result = await db['categories'].delete_many({})
+        result = await db["categories"].delete_many({})
 
         if result.deleted_count > 0:
-            logger.info(f"All categories deleted successfully for user {user_id}.")
-            await base_handlers.safe_edit_message(query, "All categories and their embedded courses have been deleted. 😞", action_key=getattr(query, 'data', None))
+            logger.info("All categories deleted successfully for user %s.", user_id)
+            await base_handlers.safe_edit_message(
+                query,
+                "All categories and their embedded courses have been deleted. 😞",
+                action_key=getattr(query, "data", None),
+            )
         else:
-            logger.warning(f"No categories found to delete for user {user_id}.")
-            await base_handlers.safe_edit_message(query, "No categories found to delete. 😞", action_key=getattr(query, 'data', None))
-    except Exception as e:
-        logger.error(f"Error confirming delete all data for user {user_id}: {e}", exc_info=True)
-        await base_handlers.safe_edit_message(query, "An error occurred while deleting all data. Please try again later.", action_key=getattr(query, 'data', None))
-    
+            logger.warning("No categories found to delete for user %s.", user_id)
+            await base_handlers.safe_edit_message(
+                query,
+                "No categories found to delete. 😞",
+                action_key=getattr(query, "data", None),
+            )
+    except Exception:
+        logger.exception("Error confirming delete all data for user %s", user_id)
+        await base_handlers.safe_edit_message(
+            query,
+            "An error occurred while deleting all data. Please try again later.",
+            action_key=getattr(query, "data", None),
+        )
+
     return ConversationHandler.END
-    
+
+
 # Cancel deletion of all user data
 async def cancel_delete_all_data(update: Update, context: CallbackContext) -> int:
     """Cancel the deletion of all user data."""
     await base_handlers.safe_answer(update.callback_query)
-    await base_handlers.safe_edit_message(update.callback_query, "Deletion of all data has been canceled.", action_key=getattr(update.callback_query, 'data', None))
+    await base_handlers.safe_edit_message(
+        update.callback_query,
+        "Deletion of all data has been canceled.",
+        action_key=getattr(update.callback_query, "data", None),
+    )
     return ConversationHandler.END

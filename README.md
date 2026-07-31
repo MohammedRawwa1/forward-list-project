@@ -40,7 +40,9 @@ Optional:
 - `PAGE_CACHE_TTL` — short TTL for page cache (default 30s)
 - `GUI_SESSION_TTL` — inline session TTL for auto-close (default 300s)
 - `LIVENESS_TOKEN` — (optional) token required to access `/health`
-- `LOG_LEVEL` — INFO/DEBUG
+- `LOG_FORMAT` — `text` (coloured human-readable console + plain-text file) or `json` (machine-parsable JSON lines for log shippers like Logstash, Datadog, CloudWatch). Default: `text`.
+- `LOG_LEVEL` — `DEBUG`, `INFO`, `WARNING`, `ERROR`. Default: `INFO`.
+- `LOG_QUEUE_MAXSIZE` — maximum queued log records before the async handler falls back to stderr. Default: `10000`. Set to `0` for unbounded (risk: OOM under extreme load).
 
 3. Run locally with a public webhook (ngrok example):
 

@@ -1,5 +1,4 @@
-"""
-Category Design Feature — Owner Only.
+"""Category Design Feature — Owner Only.
 
 Allows the bot owner to assign a thumbnail photo as a visual "design"
 for a parent category. When the category is viewed, the design photo
@@ -11,21 +10,21 @@ Commands:
 """
 
 import logging
-import urllib.parse
-import os
 import math
+import urllib.parse
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import CallbackContext, CommandHandler, CallbackQueryHandler
-from handlers.db_connection import get_db
-from typing import Optional
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import CallbackContext, CallbackQueryHandler, CommandHandler
+
+from config import is_owner
 from handlers.base_handlers import (
-    safe_edit_message,
-    safe_answer,
-    _get_total_count,
-    TOP_LEVEL_FILTER,
     PAGE_SIZE,
+    TOP_LEVEL_FILTER,
+    _get_total_count,
+    safe_answer,
+    safe_edit_message,
 )
+from handlers.db_connection import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,8 @@ DESIGNS_COLLECTION = "category_designs"
 
 # ---------------  helpers  ---------------
 
-async def _get_design(db, category_name: str) -> Optional[str]:
+
+async def _get_design(db, category_name: str) -> str | None:
     """Return the file_id of the design for `category_name`, or None."""
     try:
         doc = await db[DESIGNS_COLLECTION].find_one({"name": category_name}, projection={"file_id": 1})
@@ -52,8 +52,8 @@ async def _set_design(db, category_name: str, file_id: str):
             upsert=True,
         )
         return True
-    except Exception as e:
-        logger.exception("Error saving design for '%s': %s", category_name, e)
+    except Exception:
+        logger.exception("Error saving design for '%s'", category_name)
         return False
 
 
@@ -62,8 +62,8 @@ async def _delete_design(db, category_name: str):
     try:
         res = await db[DESIGNS_COLLECTION].delete_one({"name": category_name})
         return res.deleted_count > 0
-    except Exception as e:
-        logger.exception("Error deleting design for '%s': %s", category_name, e)
+    except Exception:
+        logger.exception("Error deleting design for '%s'", category_name)
         return False
 
 
@@ -76,41 +76,26 @@ async def _list_designed_categories(db) -> list:
         return []
 
 
-async def get_category_design(db, category_name: str) -> Optional[str]:
+async def get_category_design(db, category_name: str) -> str | None:
     """Public helper — return the file_id for a category's design, or None."""
     return await _get_design(db, category_name)
 
 
-# ---------------  owner guard  ---------------
-
-def _is_owner(update: Update) -> bool:
-    """Check if the requesting user is the configured bot owner."""
-    try:
-        owner_env = os.getenv("BOT_OWNER_ID")
-        if not owner_env:
-            return False
-        owner_id = int(owner_env)
-        user_id = update.effective_user.id if update.effective_user else None
-        return user_id == owner_id
-    except Exception:
-        return False
-
-
 # ---------------  /design_cat  ---------------
+
 
 async def design_cat_command(update: Update, context: CallbackContext):
     """Start the category design flow — owner-only, reply to a photo."""
     keyboard = []  # defensive initialization
-    if not _is_owner(update):
-        await update.message.reply_text("Unauthorized (owner only).")
+    if not is_owner(update.effective_user.id if update.effective_user else None):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
 
     # Must be replying to a photo
     reply = update.message.reply_to_message
     if not reply or not reply.photo:
         await update.message.reply_text(
-            "Please reply to a photo with this command.\n"
-            "Example: send a photo, then reply to it with /design_cat"
+            "Please reply to a photo with this command.\nExample: send a photo, then reply to it with /design_cat",
         )
         return
 
@@ -135,7 +120,13 @@ async def design_cat_command(update: Update, context: CallbackContext):
         page = 1
         start = (page - 1) * page_size
         total = await _get_total_count(db, "categories", TOP_LEVEL_FILTER, ttl=30)
-        parents = await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        parents = (
+            await db.categories.find(TOP_LEVEL_FILTER)
+            .sort("name", 1)
+            .skip(start)
+            .limit(page_size)
+            .to_list(length=page_size)
+        )
     except Exception:
         parents = []
         total = 0
@@ -148,16 +139,18 @@ async def design_cat_command(update: Update, context: CallbackContext):
     keyboard = []
     for p in parents:
         name = p.get("name", "")
-        keyboard.append([InlineKeyboardButton(name, callback_data=f"design_cat_select::{urllib.parse.quote_plus(name)}")])
+        keyboard.append(
+            [InlineKeyboardButton(name, callback_data=f"design_cat_select::{urllib.parse.quote_plus(name)}")],
+        )
 
     # Pagination nav
     nav = []
     total_pages = max(1, math.ceil(total / page_size)) if total else 1
     last_page = max(1, total_pages)
     if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"design_cat_page::{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"design_cat_page::{page - 1}"))
     if page < last_page:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"design_cat_page::{page+1}"))
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"design_cat_page::{page + 1}"))
     if nav:
         keyboard.append(nav)
 
@@ -174,8 +167,8 @@ async def design_cat_select_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
 
-    if not _is_owner(update):
-        await safe_edit_message(query, "Unauthorized (owner only).", action_key=query.data)
+    if not is_owner(update.effective_user.id if update.effective_user else None):
+        await safe_edit_message(query, "⛔ Only the bot owner can run this command.", action_key=query.data)
         return
 
     data = query.data
@@ -221,8 +214,8 @@ async def design_cat_page_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
 
-    if not _is_owner(update):
-        await safe_edit_message(query, "Unauthorized (owner only).", action_key=query.data)
+    if not is_owner(update.effective_user.id if update.effective_user else None):
+        await safe_edit_message(query, "⛔ Only the bot owner can run this command.", action_key=query.data)
         return
 
     data = query.data
@@ -240,7 +233,13 @@ async def design_cat_page_callback(update: Update, context: CallbackContext):
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         total = await _get_total_count(db, "categories", TOP_LEVEL_FILTER, ttl=30)
-        parents = await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).skip(start).limit(page_size).to_list(length=page_size)
+        parents = (
+            await db.categories.find(TOP_LEVEL_FILTER)
+            .sort("name", 1)
+            .skip(start)
+            .limit(page_size)
+            .to_list(length=page_size)
+        )
     except Exception:
         parents = []
         total = 0
@@ -252,15 +251,17 @@ async def design_cat_page_callback(update: Update, context: CallbackContext):
     keyboard = []
     for p in parents:
         name = p.get("name", "")
-        keyboard.append([InlineKeyboardButton(name, callback_data=f"design_cat_select::{urllib.parse.quote_plus(name)}")])
+        keyboard.append(
+            [InlineKeyboardButton(name, callback_data=f"design_cat_select::{urllib.parse.quote_plus(name)}")],
+        )
 
     nav = []
     total_pages = max(1, math.ceil(total / page_size)) if total else 1
     last_page = max(1, total_pages)
     if page > 1:
-        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"design_cat_page::{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"design_cat_page::{page - 1}"))
     if page < last_page:
-        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"design_cat_page::{page+1}"))
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"design_cat_page::{page + 1}"))
     if nav:
         keyboard.append(nav)
 
@@ -284,10 +285,11 @@ async def design_cat_cancel_callback(update: Update, context: CallbackContext):
 
 # ---------------  /remove_design  ---------------
 
+
 async def remove_design_command(update: Update, context: CallbackContext):
     """Show categories with designs so the owner can remove one."""
-    if not _is_owner(update):
-        await update.message.reply_text("Unauthorized (owner only).")
+    if not is_owner(update.effective_user.id if update.effective_user else None):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
 
     db = await get_db()
@@ -302,9 +304,9 @@ async def remove_design_command(update: Update, context: CallbackContext):
 
     keyboard = []
     for name in designed:
-        keyboard.append([
-            InlineKeyboardButton(f"🗑️ {name}", callback_data=f"remove_design::{urllib.parse.quote_plus(name)}")
-        ])
+        keyboard.append(
+            [InlineKeyboardButton(f"🗑️ {name}", callback_data=f"remove_design::{urllib.parse.quote_plus(name)}")],
+        )
     keyboard.append([InlineKeyboardButton("Cancel", callback_data="design_cat_cancel")])
 
     await update.message.reply_text(
@@ -318,8 +320,8 @@ async def remove_design_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
 
-    if not _is_owner(update):
-        await safe_edit_message(query, "Unauthorized (owner only).", action_key=query.data)
+    if not is_owner(update.effective_user.id if update.effective_user else None):
+        await safe_edit_message(query, "⛔ Only the bot owner can run this command.", action_key=query.data)
         return
 
     data = query.data
@@ -351,6 +353,7 @@ async def remove_design_callback(update: Update, context: CallbackContext):
 
 
 # ---------------  registration  ---------------
+
 
 def setup_design_handlers(application):
     """Register all category design handlers."""

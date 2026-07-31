@@ -1,5 +1,4 @@
-"""
-Search handlers for the Telegram bot paginated interface.
+"""Search handlers for the Telegram bot paginated interface.
 
 Provides a ConversationHandler-based search flow that works across
 the /courses, /categories, and per-category course views. The user
@@ -11,32 +10,35 @@ import logging
 import math
 import urllib.parse
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ConversationHandler,
-    CommandHandler,
+    CallbackContext,
     CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
     MessageHandler,
     filters,
-    CallbackContext,
 )
+
 from conversation_states import SEARCH_QUERY
-from handlers.db_connection import get_db
-from handlers.base_handlers import (
-    safe_edit_message,
-    safe_answer,
-    build_courses_page,
-    _store_callback_payload,
-    PAGE_SIZE,
-)
 from handlers.atlas_search import (
+    execute_category_course_search,
     execute_category_search,
     execute_course_search,
-    execute_category_course_search,
 )
+from handlers.base_handlers import (
+    PAGE_SIZE,
+    _store_callback_payload,
+    build_courses_page,
+    safe_answer,
+    safe_edit_message,
+)
+from handlers.db_connection import get_db
+
 logger = logging.getLogger(__name__)
 
 # ---------------  helper: extract only course rows from build_courses_page keyboard  ---------------
+
 
 def _extract_course_rows(existing_kb: list) -> list:
     """Filter out breadcrumb, pagination, and back-button rows from
@@ -49,15 +51,13 @@ def _extract_course_rows(existing_kb: list) -> list:
     if not existing_kb:
         return []
     try:
-        return [
-            row for row in existing_kb
-            if len(row) == 2 and row[0].url
-        ]
+        return [row for row in existing_kb if len(row) == 2 and row[0].url]
     except Exception:
         return list(existing_kb)
 
 
 # ---------------  callback entry points  ---------------
+
 
 async def search_courses_callback(update: Update, context: CallbackContext):
     """🔍 Search button clicked from global courses view.
@@ -67,7 +67,6 @@ async def search_courses_callback(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
     parts = query.data.split("::")
-    # parts[0] == 'search_courses', parts[1] == origin_type, parts[2] == context, parts[3] == page
     origin_type = parts[1] if len(parts) > 1 else "global"
     origin_context = parts[2] if len(parts) > 2 else ""
     origin_page = parts[3] if len(parts) > 3 else "1"
@@ -143,6 +142,7 @@ async def search_category_courses_callback(update: Update, context: CallbackCont
 
 # ---------------  text input handler  ---------------
 
+
 async def handle_search_input(update: Update, context: CallbackContext):
     """Process the user's search query text."""
     query_text = update.message.text.strip()
@@ -170,6 +170,7 @@ async def handle_search_input(update: Update, context: CallbackContext):
 
 # ---------------  search implementations  ---------------
 
+
 async def _perform_category_search(update: Update, context: CallbackContext, query_text: str):
     """Search categories by name, return paginated results."""
     keyboard = []  # defensive initialization
@@ -182,14 +183,12 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
         page_size = PAGE_SIZE
         page = 1
 
-        page_cats, total, have_more = await execute_category_search(
-            db, query_text, page=page, page_size=page_size
-        )
+        page_cats, total, _ = await execute_category_search(db, query_text, page=page, page_size=page_size)
 
         if not page_cats:
             await update.message.reply_text(
                 f"No categories found matching '{query_text}'. 😕\n\n"
-                "Try a different search term or use /categories to browse."
+                "Try a different search term or use /categories to browse.",
             )
             return
 
@@ -210,9 +209,11 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
         total_pages = max(1, math.ceil(total / page_size))
         nav = []
         if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{query_text}::{page-1}"))
+            nav.append(
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{query_text}::{page - 1}"),
+            )
         if page < total_pages:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{query_text}::{page+1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{query_text}::{page + 1}"))
         if nav:
             keyboard.append(nav)
 
@@ -223,8 +224,8 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
         title = f"🔍 Results for '{query_text}' in all categories (page {page}/{total_pages}):"
         await update.message.reply_text(title, reply_markup=reply_markup)
 
-    except Exception as e:
-        logger.exception("Error searching categories: %s", e)
+    except Exception:
+        logger.exception("Error searching categories")
         await update.message.reply_text("An error occurred while searching. Please try again.")
 
 
@@ -239,14 +240,12 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
         page_size = PAGE_SIZE
         page = 1
 
-        course_items, total, have_more = await execute_course_search(
-            db, query_text, page=page, page_size=page_size
-        )
+        course_items, total, _ = await execute_course_search(db, query_text, page=page, page_size=page_size)
 
         if total == 0:
             await update.message.reply_text(
                 f"No courses found matching '{query_text}'. 😕\n\n"
-                "Try a different search term or use /courses to browse all courses."
+                "Try a different search term or use /courses to browse all courses.",
             )
             return
 
@@ -267,17 +266,19 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
 
         # Strip non-course rows from the builder's output, keeping only
         # actual course entries. Then add search-specific navigation.
-        existing_kb = _extract_course_rows(
-            list(reply_markup.inline_keyboard) if reply_markup else []
-        )
+        existing_kb = _extract_course_rows(list(reply_markup.inline_keyboard) if reply_markup else [])
         total_pages = max(1, math.ceil(total / page_size))
 
         # Build the search navigation row
         search_nav = []
         if page > 1:
-            search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{query_text}::{page-1}"))
+            search_nav.append(
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{query_text}::{page - 1}"),
+            )
         if page < total_pages:
-            search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{query_text}::{page+1}"))
+            search_nav.append(
+                InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{query_text}::{page + 1}"),
+            )
         if search_nav:
             existing_kb.append(search_nav)
 
@@ -288,8 +289,8 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
         search_title = f"🔍 Results for '{query_text}' in courses (page {page}/{total_pages}):"
         await update.message.reply_text(search_title, reply_markup=InlineKeyboardMarkup(existing_kb))
 
-    except Exception as e:
-        logger.exception("Error searching courses: %s", e)
+    except Exception:
+        logger.exception("Error searching courses")
         await update.message.reply_text("An error occurred while searching. Please try again.")
 
 
@@ -305,22 +306,28 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
         page_size = PAGE_SIZE
         page = 1
 
-        course_items, total, have_more = await execute_category_course_search(
-            db, query_text, category, page=page, page_size=page_size, include_children=True
+        course_items, total, _ = await execute_category_course_search(
+            db,
+            query_text,
+            category,
+            page=page,
+            page_size=page_size,
+            include_children=True,
         )
 
         # Also search for child categories matching the query within this parent
         child_cats_matched = []
         try:
             child_cat_results, _, _ = await execute_category_search(
-                db, query_text, page=1, page_size=5, parent=category
+                db,
+                query_text,
+                page=1,
+                page_size=5,
+                parent=category,
             )
             if child_cat_results:
                 # Only include actual children (parent matches the category)
-                child_cats_matched = [
-                    c for c in child_cat_results
-                    if c.get("parent") == category
-                ]
+                child_cats_matched = [c for c in child_cat_results if c.get("parent") == category]
         except Exception:
             child_cats_matched = []
 
@@ -328,22 +335,25 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
         coach_courses_matched = []
         try:
             # Use global course search but filter by coach name match within this category's scope
-            coach_items, coach_total, _ = await execute_course_search(
-                db, query_text, page=1, page_size=10
-            )
+            coach_items, _, _ = await execute_course_search(db, query_text, page=1, page_size=10)
             # Keep only courses whose coach matches AND are in this category or its children
             if coach_items:
                 coach_courses_matched = [
-                    c for c in coach_items
-                    if c.get("coach") and query_text.lower() in c.get("coach", "").lower()
-                    and (c.get("category") == category or c.get("category") in [cc.get("name") for cc in child_cats_matched])
+                    c
+                    for c in coach_items
+                    if c.get("coach")
+                    and query_text.lower() in c.get("coach", "").lower()
+                    and (
+                        c.get("category") == category
+                        or c.get("category") in [cc.get("name") for cc in child_cats_matched]
+                    )
                 ]
         except Exception:
             coach_courses_matched = []
 
         if total == 0 and not child_cats_matched and not coach_courses_matched:
             await update.message.reply_text(
-                f"No results found matching '{query_text}' in category '{category}' or its subcategories. 😕"
+                f"No results found matching '{query_text}' in category '{category}' or its subcategories. 😕",
             )
             return
 
@@ -356,22 +366,25 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
                 child_path = child_cat.get("path") or child_cat.get("name")
                 payload = {"type": "showcat", "path": child_path, "from_parent": category, "parent_page": 1}
                 key = _store_callback_payload(payload)
-                keyboard.append([InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")])
+                keyboard.append(
+                    [InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")],
+                )
 
         # Add matching courses by coach
         if page == 1 and coach_courses_matched:
             for c in coach_courses_matched[:5]:
-                course_cat = c.get("category")
                 link = c.get("link")
                 name = c.get("name")
                 if name and link:
-                    keyboard.append([
-                        InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link),
-                    ])
+                    keyboard.append(
+                        [
+                            InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link),
+                        ],
+                    )
 
         # Add matching courses
         if total > 0:
-            text, reply_markup = build_courses_page(
+            _, reply_markup = build_courses_page(
                 course_items,
                 page=page,
                 origin_type="category",
@@ -383,18 +396,26 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
                 store_page_ref=False,
             )
 
-            existing_kb = _extract_course_rows(
-                list(reply_markup.inline_keyboard) if reply_markup else []
-            )
+            existing_kb = _extract_course_rows(list(reply_markup.inline_keyboard) if reply_markup else [])
             keyboard.extend(existing_kb)
 
             total_pages = max(1, math.ceil(total / page_size))
 
             search_nav = []
             if page > 1:
-                search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page-1}"))
+                search_nav.append(
+                    InlineKeyboardButton(
+                        "⬅️ Previous",
+                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page - 1}",
+                    ),
+                )
             if page < total_pages:
-                search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page+1}"))
+                search_nav.append(
+                    InlineKeyboardButton(
+                        "➡️ Next",
+                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page + 1}",
+                    ),
+                )
             if search_nav:
                 keyboard.append(search_nav)
         else:
@@ -403,12 +424,13 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
         search_title = f"🔍 Results for '{query_text}' in '{category}' incl. subcategories (page {page}/{total_pages}):"
         await update.message.reply_text(search_title, reply_markup=InlineKeyboardMarkup(keyboard))
 
-    except Exception as e:
-        logger.exception("Error searching category courses: %s", e)
+    except Exception:
+        logger.exception("Error searching category courses")
         await update.message.reply_text("An error occurred while searching. Please try again.")
 
 
 # ---------------  pagination for search results  ---------------
+
 
 async def search_courses_pagination_callback(update: Update, context: CallbackContext):
     """Handle pagination for global course search results."""
@@ -428,16 +450,18 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
     try:
         db = await get_db()
         if db is None:
-            await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+            await safe_edit_message(
+                query,
+                "Error: Unable to connect to the database.",
+                action_key=getattr(query, "data", None),
+            )
             return
 
         page_size = PAGE_SIZE
 
-        course_items, total, have_more = await execute_course_search(
-            db, query_text, page=page, page_size=page_size
-        )
+        course_items, total, _ = await execute_course_search(db, query_text, page=page, page_size=page_size)
 
-        text, reply_markup = build_courses_page(
+        _, reply_markup = build_courses_page(
             course_items,
             page=page,
             origin_type="global",
@@ -446,30 +470,40 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
             store_page_ref=False,
         )
 
-        existing_kb = _extract_course_rows(
-            list(reply_markup.inline_keyboard) if reply_markup else []
-        )
+        existing_kb = _extract_course_rows(list(reply_markup.inline_keyboard) if reply_markup else [])
         total_pages = max(1, math.ceil(total / page_size))
 
         search_nav = []
         if page > 1:
-            search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{query_text}::{page-1}"))
+            search_nav.append(
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_courses_pg::{query_text}::{page - 1}"),
+            )
         if page < total_pages:
-            search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{query_text}::{page+1}"))
+            search_nav.append(
+                InlineKeyboardButton("➡️ Next", callback_data=f"search_courses_pg::{query_text}::{page + 1}"),
+            )
         if search_nav:
             existing_kb.append(search_nav)
 
         existing_kb.append([InlineKeyboardButton("🔙 Back to Courses", callback_data="courses::global::1")])
 
         search_title = f"🔍 Results for '{query_text}' in courses (page {page}/{total_pages}):"
-        await safe_edit_message(query, search_title, reply_markup=InlineKeyboardMarkup(existing_kb), action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query,
+            search_title,
+            reply_markup=InlineKeyboardMarkup(existing_kb),
+            action_key=getattr(query, "data", None),
+        )
 
-    except Exception as e:
-        logger.exception("Error paginating course search: %s", e)
-        await safe_edit_message(query, "An error occurred while loading search results.", action_key=getattr(query, "data", None))
+    except Exception:
+        logger.exception("Error paginating course search")
+        await safe_edit_message(
+            query,
+            "An error occurred while loading search results.",
+            action_key=getattr(query, "data", None),
+        )
 
 
-keyboard = []  # defensive initialization
 async def search_categories_pagination_callback(update: Update, context: CallbackContext):
     """Handle pagination for category search results."""
     query = update.callback_query
@@ -487,14 +521,16 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
     try:
         db = await get_db()
         if db is None:
-            await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+            await safe_edit_message(
+                query,
+                "Error: Unable to connect to the database.",
+                action_key=getattr(query, "data", None),
+            )
             return
 
         page_size = PAGE_SIZE
 
-        page_cats, total, have_more = await execute_category_search(
-            db, query_text, page=page, page_size=page_size
-        )
+        page_cats, total, _ = await execute_category_search(db, query_text, page=page, page_size=page_size)
 
         keyboard = []
         for cat in page_cats:
@@ -512,9 +548,11 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
         total_pages = max(1, math.ceil(total / page_size))
         nav = []
         if page > 1:
-            nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{query_text}::{page-1}"))
+            nav.append(
+                InlineKeyboardButton("⬅️ Previous", callback_data=f"search_categories_pg::{query_text}::{page - 1}"),
+            )
         if page < total_pages:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{query_text}::{page+1}"))
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_categories_pg::{query_text}::{page + 1}"))
         if nav:
             keyboard.append(nav)
 
@@ -527,11 +565,14 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
             action_key=getattr(query, "data", None),
         )
 
-    except Exception as e:
-        logger.exception("Error paginating category search: %s", e)
-        await safe_edit_message(query, "An error occurred while loading search results.", action_key=getattr(query, "data", None))
+    except Exception:
+        logger.exception("Error paginating category search")
+        await safe_edit_message(
+            query,
+            "An error occurred while loading search results.",
+            action_key=getattr(query, "data", None),
+        )
 
-    keyboard = []  # defensive initialization
 
 async def search_category_courses_pagination_callback(update: Update, context: CallbackContext):
     """Handle pagination for category-specific course search results."""
@@ -552,40 +593,50 @@ async def search_category_courses_pagination_callback(update: Update, context: C
     try:
         db = await get_db()
         if db is None:
-            await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+            await safe_edit_message(
+                query,
+                "Error: Unable to connect to the database.",
+                action_key=getattr(query, "data", None),
+            )
             return
 
         page_size = PAGE_SIZE
 
-        course_items, total, have_more = await execute_category_course_search(
-            db, query_text, category, page=page, page_size=page_size, include_children=True
+        course_items, total, _ = await execute_category_course_search(
+            db,
+            query_text,
+            category,
+            page=page,
+            page_size=page_size,
+            include_children=True,
         )
 
         # Also search for child categories matching the query within this parent
         child_cats_matched = []
         try:
             child_cat_results, _, _ = await execute_category_search(
-                db, query_text, page=1, page_size=5, parent=category
+                db,
+                query_text,
+                page=1,
+                page_size=5,
+                parent=category,
             )
             if child_cat_results:
-                child_cats_matched = [
-                    c for c in child_cat_results
-                    if c.get("parent") == category
-                ]
+                child_cats_matched = [c for c in child_cat_results if c.get("parent") == category]
         except Exception:
             child_cats_matched = []
 
         # Also search for coaches matching the query within this category/children
         coach_courses_matched = []
         try:
-            coach_items, coach_total, _ = await execute_course_search(
-                db, query_text, page=1, page_size=10
-            )
+            coach_items, _, _ = await execute_course_search(db, query_text, page=1, page_size=10)
             if coach_items:
                 child_cat_names = {c.get("name") for c in child_cats_matched}
                 coach_courses_matched = [
-                    c for c in coach_items
-                    if c.get("coach") and query_text.lower() in c.get("coach", "").lower()
+                    c
+                    for c in coach_items
+                    if c.get("coach")
+                    and query_text.lower() in c.get("coach", "").lower()
                     and (c.get("category") == category or c.get("category") in child_cat_names)
                 ]
         except Exception:
@@ -600,7 +651,9 @@ async def search_category_courses_pagination_callback(update: Update, context: C
                 child_path = child_cat.get("path") or child_cat.get("name")
                 payload = {"type": "showcat", "path": child_path, "from_parent": category, "parent_page": 1}
                 key = _store_callback_payload(payload)
-                keyboard.append([InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")])
+                keyboard.append(
+                    [InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")],
+                )
 
         # Add matching courses by coach (page 1 only)
         if page == 1 and coach_courses_matched:
@@ -608,12 +661,14 @@ async def search_category_courses_pagination_callback(update: Update, context: C
                 name = c.get("name")
                 link = c.get("link")
                 if name and link:
-                    keyboard.append([
-                        InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link),
-                    ])
+                    keyboard.append(
+                        [
+                            InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link),
+                        ],
+                    )
 
         if total > 0:
-            text, reply_markup = build_courses_page(
+            _, reply_markup = build_courses_page(
                 course_items,
                 page=page,
                 origin_type="category",
@@ -625,18 +680,26 @@ async def search_category_courses_pagination_callback(update: Update, context: C
                 store_page_ref=False,
             )
 
-            existing_kb = _extract_course_rows(
-                list(reply_markup.inline_keyboard) if reply_markup else []
-            )
+            existing_kb = _extract_course_rows(list(reply_markup.inline_keyboard) if reply_markup else [])
             keyboard.extend(existing_kb)
 
             total_pages = max(1, math.ceil(total / page_size))
 
             search_nav = []
             if page > 1:
-                search_nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page-1}"))
+                search_nav.append(
+                    InlineKeyboardButton(
+                        "⬅️ Previous",
+                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page - 1}",
+                    ),
+                )
             if page < total_pages:
-                search_nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page+1}"))
+                search_nav.append(
+                    InlineKeyboardButton(
+                        "➡️ Next",
+                        callback_data=f"search_cat_courses_pg::{urllib.parse.quote_plus(category)}::{query_text}::{page + 1}",
+                    ),
+                )
             if search_nav:
                 keyboard.append(search_nav)
         else:
@@ -657,12 +720,17 @@ async def search_category_courses_pagination_callback(update: Update, context: C
             action_key=getattr(query, "data", None),
         )
 
-    except Exception as e:
-        logger.exception("Error paginating category course search: %s", e)
-        await safe_edit_message(query, "An error occurred while loading search results.", action_key=getattr(query, "data", None))
+    except Exception:
+        logger.exception("Error paginating category course search")
+        await safe_edit_message(
+            query,
+            "An error occurred while loading search results.",
+            action_key=getattr(query, "data", None),
+        )
 
 
 # ---------------  cancel handler  ---------------
+
 
 async def search_cancel(update: Update, context: CallbackContext):
     """Cancel the search operation."""
@@ -674,7 +742,11 @@ async def search_cancel(update: Update, context: CallbackContext):
 
     try:
         if update.callback_query:
-            await safe_edit_message(update.callback_query, "Search canceled.", action_key=getattr(update.callback_query, "data", None))
+            await safe_edit_message(
+                update.callback_query,
+                "Search canceled.",
+                action_key=getattr(update.callback_query, "data", None),
+            )
         elif update.message:
             await update.message.reply_text("Search canceled.")
     except Exception:
@@ -684,6 +756,7 @@ async def search_cancel(update: Update, context: CallbackContext):
 
 
 # ---------------  conversation handler  ---------------
+
 
 def get_search_conversation_handler() -> ConversationHandler:
     """Return the ConversationHandler for the search flow."""

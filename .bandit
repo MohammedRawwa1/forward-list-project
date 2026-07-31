@@ -1,0 +1,13 @@
+[bandit]
+# Test IDs to skip with justification:
+#   B101: assert statements — used for internal invariants, not security checks
+#   B104: hardcoded bind 0.0.0.0 — uvicorn intentionally listens on all interfaces
+#   B105: variable names containing "token"/"secret" — false positives on dict keys
+#   B110: try/except/pass — intentional pattern for best-effort cleanup
+#   B112: try/except/continue — same pattern, used in retry loops
+#   B311: standard random — used for non-security UUIDs/temp names, not crypto
+#   B324: weak hashlib — md5/sha1 used for non-security dedup hashing, not auth
+#   B403: pickle usage — we don't use pickle anywhere in the codebase
+skips: B101,B104,B105,B110,B112,B311,B324,B403
+exclude: .venv,env,__pycache__,node_modules,.git,venv
+targets: .

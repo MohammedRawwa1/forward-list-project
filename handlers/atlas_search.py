@@ -1,5 +1,4 @@
-"""
-MongoDB Atlas Search integration with graceful fallback to regex-based search.
+"""MongoDB Atlas Search integration with graceful fallback to regex-based search.
 
 This module provides:
 - A runtime check to detect whether Atlas Search is available (env var + Atlas URI detection)
@@ -53,6 +52,7 @@ logger = logging.getLogger(__name__)
 
 # ---------------  Configuration  ---------------
 
+
 def is_atlas_search_enabled() -> bool:
     """Check if Atlas Search should be used.
 
@@ -71,7 +71,7 @@ def is_atlas_search_enabled() -> bool:
     if "mongodb+srv://" not in uri:
         logger.warning(
             "USE_ATLAS_SEARCH=true but MONGODB_URL does not look like an Atlas URI "
-            "(expected mongodb+srv://). Atlas Search will be disabled."
+            "(expected mongodb+srv://). Atlas Search will be disabled.",
         )
         return False
     return True
@@ -82,12 +82,12 @@ def get_search_index_name() -> str:
     return os.getenv("ATLAS_SEARCH_INDEX_NAME", "default")
 
 
-
 # ---------------  Pipeline Builders  ---------------
 
+
 def build_category_search_pipeline(
-    query_text: str, 
-    page: int = 1, 
+    query_text: str,
+    page: int = 1,
     page_size: int = 50,
     index_name: str = "default",
     fuzzy: bool = True,
@@ -185,13 +185,15 @@ def build_course_search_pipeline(
         {"$unwind": "$courses"},
         {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
         {"$sort": {"_search_score": -1, "courses.name": 1}},
-        {"$project": {
-            "name": "$courses.name",
-            "link": "$courses.link",
-            "category": "$name",
-            "coach": "$courses.coach",
-            "id": "$courses.id",
-        }},
+        {
+            "$project": {
+                "name": "$courses.name",
+                "link": "$courses.link",
+                "category": "$name",
+                "coach": "$courses.coach",
+                "id": "$courses.id",
+            },
+        },
         {"$skip": start},
         {"$limit": page_size + 1},
     ]
@@ -236,18 +238,18 @@ def build_category_course_search_pipeline(
             "$search": {
                 "index": index_name,
                 "compound": {
-                    "must": [{
-                        "text": {
-                            "query": query_text,
-                            "path": "courses.name",
-                            "fuzzy": {"maxEdits": 1} if fuzzy else {},
-                        }
-                    }],
-                    "filter": [{
-                        "compound": filter_clause
-                    }],
+                    "must": [
+                        {
+                            "text": {
+                                "query": query_text,
+                                "path": "courses.name",
+                                "fuzzy": {"maxEdits": 1} if fuzzy else {},
+                            },
+                        },
+                    ],
+                    "filter": [{"compound": filter_clause}],
                 },
-            }
+            },
         }
     else:
         # Original behavior: match category by exact name only
@@ -255,21 +257,25 @@ def build_category_course_search_pipeline(
             "$search": {
                 "index": index_name,
                 "compound": {
-                    "must": [{
-                        "text": {
-                            "query": query_text,
-                            "path": "courses.name",
-                            "fuzzy": {"maxEdits": 1} if fuzzy else {},
-                        }
-                    }],
-                    "filter": [{
-                        "phrase": {
-                            "query": category,
-                            "path": "name",
-                        }
-                    }],
+                    "must": [
+                        {
+                            "text": {
+                                "query": query_text,
+                                "path": "courses.name",
+                                "fuzzy": {"maxEdits": 1} if fuzzy else {},
+                            },
+                        },
+                    ],
+                    "filter": [
+                        {
+                            "phrase": {
+                                "query": category,
+                                "path": "name",
+                            },
+                        },
+                    ],
                 },
-            }
+            },
         }
 
     if not fuzzy:
@@ -290,13 +296,15 @@ def build_category_course_search_pipeline(
         {"$unwind": "$courses"},
         {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
         {"$sort": {"_search_score": -1, "courses.name": 1}},
-        {"$project": {
-            "name": "$courses.name",
-            "link": "$courses.link",
-            "category": "$name",
-            "coach": "$courses.coach",
-            "id": "$courses.id",
-        }},
+        {
+            "$project": {
+                "name": "$courses.name",
+                "link": "$courses.link",
+                "category": "$name",
+                "coach": "$courses.coach",
+                "id": "$courses.id",
+            },
+        },
         {"$skip": start},
         {"$limit": page_size + 1},
     ]
@@ -305,10 +313,11 @@ def build_category_course_search_pipeline(
         "count_pipeline": count_pipeline,
         "data_pipeline": data_pipeline,
         "use_atlas": True,
-}
+    }
 
 
 # ---------------  Regex Fallback Pipeline Builders  ---------------
+
 
 def build_regex_category_search_pipeline(
     query_text: str,
@@ -322,19 +331,21 @@ def build_regex_category_search_pipeline(
     If `parent` is provided, searches only categories under that parent.
     """
     pattern = re_module.escape(query_text)
-    
+
     if parent:
         scope_filter = {"parent": parent}
         filter_q = {"$and": [scope_filter, {"name": {"$regex": pattern, "$options": "i"}}]}
     else:
         # Search ALL categories (any depth)
         filter_q = {"name": {"$regex": pattern, "$options": "i"}}
-    
+
     start = (page - 1) * page_size
 
     return {
         "filter_q": filter_q,
-        "data_fn": lambda db: db.categories.find(filter_q).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1),
+        "data_fn": lambda db: (
+            db.categories.find(filter_q).sort("name", 1).skip(start).limit(page_size + 1).to_list(length=page_size + 1)
+        ),
         "use_atlas": False,
     }
 
@@ -350,13 +361,15 @@ def build_regex_course_search_pipeline(
     pipeline = [
         {"$unwind": "$courses"},
         {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
-        {"$project": {
-            "name": "$courses.name",
-            "link": "$courses.link",
-            "category": "$name",
-            "coach": "$courses.coach",
-            "id": "$courses.id",
-        }},
+        {
+            "$project": {
+                "name": "$courses.name",
+                "link": "$courses.link",
+                "category": "$name",
+                "coach": "$courses.coach",
+                "id": "$courses.id",
+            },
+        },
         {"$sort": {"name": 1}},
     ]
 
@@ -386,13 +399,15 @@ def build_regex_category_course_search_pipeline(
             {"$match": {"$or": [{"name": category}, {"parent": category}]}},
             {"$unwind": "$courses"},
             {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
-            {"$project": {
-                "name": "$courses.name",
-                "link": "$courses.link",
-                "category": "$name",
-                "coach": "$courses.coach",
-                "id": "$courses.id",
-            }},
+            {
+                "$project": {
+                    "name": "$courses.name",
+                    "link": "$courses.link",
+                    "category": "$name",
+                    "coach": "$courses.coach",
+                    "id": "$courses.id",
+                },
+            },
             {"$sort": {"name": 1}},
         ]
     else:
@@ -401,13 +416,15 @@ def build_regex_category_course_search_pipeline(
             {"$match": {"$or": [{"name": category}, {"path": category}]}},
             {"$unwind": "$courses"},
             {"$match": {"courses.name": {"$regex": pattern, "$options": "i"}}},
-            {"$project": {
-                "name": "$courses.name",
-                "link": "$courses.link",
-                "category": "$name",
-                "coach": "$courses.coach",
-                "id": "$courses.id",
-            }},
+            {
+                "$project": {
+                    "name": "$courses.name",
+                    "link": "$courses.link",
+                    "category": "$name",
+                    "coach": "$courses.coach",
+                    "id": "$courses.id",
+                },
+            },
             {"$sort": {"name": 1}},
         ]
 
@@ -418,6 +435,7 @@ def build_regex_category_course_search_pipeline(
 
 
 # ---------------  Execution Helpers  ---------------
+
 
 async def execute_category_search(
     db,
@@ -521,7 +539,14 @@ async def execute_category_course_search(
     if is_atlas_search_enabled():
         index_name = get_search_index_name()
         try:
-            pipes = build_category_course_search_pipeline(query_text, category, page, page_size, index_name, include_children=include_children)
+            pipes = build_category_course_search_pipeline(
+                query_text,
+                category,
+                page,
+                page_size,
+                index_name,
+                include_children=include_children,
+            )
 
             # Count
             cnt_res = await db.categories.aggregate(pipes["count_pipeline"]).to_list(length=1)
@@ -536,7 +561,13 @@ async def execute_category_course_search(
             logger.warning("Atlas Search failed for category courses, falling back to regex: %s", e)
 
     # Regex fallback
-    pipes = build_regex_category_course_search_pipeline(query_text, category, page, page_size, include_children=include_children)
+    pipes = build_regex_category_course_search_pipeline(
+        query_text,
+        category,
+        page,
+        page_size,
+        include_children=include_children,
+    )
     pipeline = pipes["pipeline_base"]
     cnt_res = await db.categories.aggregate(pipeline + [{"$count": "total"}]).to_list(length=1)
     total = cnt_res[0]["total"] if cnt_res else 0
@@ -550,6 +581,7 @@ async def execute_category_course_search(
 
 # ---------------  Internal Helpers  ---------------
 
+
 def _make_text_search_stage(query_text: str, path: str, index_name: str, fuzzy: bool = True) -> dict:
     """Build a $search stage with text operator."""
     stage = {
@@ -559,11 +591,8 @@ def _make_text_search_stage(query_text: str, path: str, index_name: str, fuzzy: 
                 "query": query_text,
                 "path": path,
             },
-        }
+        },
     }
     if fuzzy:
         stage["$search"]["text"]["fuzzy"] = {"maxEdits": 1, "prefixLength": 2}
     return stage
-
-
-

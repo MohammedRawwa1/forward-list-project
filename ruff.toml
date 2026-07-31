@@ -1,0 +1,48 @@
+# Ruff linter configuration
+# See SECURITY_AUDIT_SKILL.md for details
+
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+    "E4", "E7", "E9",  # pycodestyle errors
+    "F",               # Pyflakes
+    "I",               # import sorting
+    "N",               # naming
+    "S",               # Bandit security
+    "UP",              # pyupgrade
+    "B",               # bugbear
+    "SIM",             # simplify
+]
+
+[lint.per-file-ignores]
+# Lazy imports in top-level scripts are intentional (avoid circular imports)
+"handlers/__init__.py" = ["E402"]
+"main.py" = ["E402", "S603", "S607", "S104", "UP045"]
+"bot.py" = ["E402"]
+
+# B018: useless expressions - intentional for docstring-like patterns
+# S324: hashlib.sha1 used for callback key generation (non-security dedup)
+# S105: Redis Lua string flagged as hardcoded password (false positive)
+# B905: zip() without strict= - intentional for variable-length iterables
+# N806: MAX_BUTTONS uppercase - intentional constant
+# SIM102: collapsible-if - intentional for readability
+"handlers/base_handlers.py" = ["B018", "E402", "S324", "S105", "B905", "N806", "SIM102"]
+
+# SIM101/SIM105/SIM108/SIM112: Intentional best-effort try/except/pass and
+# style preferences across the codebase. These are not security bugs.
+# S112: try-except-continue - intentional in loop cleanup patterns
+"handlers/*.py" = ["SIM105", "SIM108", "S110", "S112", "F541", "UP045"]
+"database/*.py" = ["SIM105", "S110", "B904", "UP045", "F541"]
+
+# B904 raise-without-from: Database exceptions are wrapped into custom
+# MongoConnectionError — intentional pattern for API consistency
+"database/mongo_handler.py" = ["B904"]
+"handlers/db_connection.py" = ["B904", "SIM112"]
+
+# Per-file SIM112: lowercase env var names are intentional convention
+"config.py" = ["SIM112", "UP045"]
+
+# UP015: unnecessary mode argument in open() - minor style
+"test_security.py" = ["UP015"]

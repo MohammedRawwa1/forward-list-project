@@ -13,4 +13,3 @@ CREATE_CAT_PARENT = 11
 DELETE_ALL, CONFIRM_DELETE, CANCEL_DELETE = range(20, 23)
 # ---------------  search  ---------------
 SEARCH_QUERY = 30
-MAX_CATEGORY_NAME_LENGTH = 30

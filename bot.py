@@ -1,73 +1,71 @@
+import logging
+import os
+
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
-    MessageHandler,
+    CommandHandler,
     ConversationHandler,
+    MessageHandler,
     filters,
 )
+
+import logging_config  # noqa: F401 — configures root logger (console + file) on import
+from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT, DELETE_ALL
 from handlers.base_handlers import (
-    help_command,
-    list_courses,
-    list_categories,
     categories_page,
-    createcat_page,
+    courses_callback,
     create_category,
     create_parent,
-    handle_create_category_parent,
-    handle_create_category_parent_text,
-    courses_callback,
-    showtype_handler,
-    showcat_handler,
-    handle_course_selection,
+    createcat_page,
+    debug_db,
+    handle_back_to_cats,
     handle_category_name,
     handle_category_selection,
-    handle_back_to_cats,
+    handle_course_selection,
+    handle_create_category_parent,
+    handle_create_category_parent_text,
+    help_command,
+    list_categories,
+    list_courses,
     show_coach_handler,
     show_coach_in_category,
-    debug_db,
-)
-from handlers.course_handlers import (
-    setup_course_handlers,
-    addcoach_page,
-    addcat_page,
-    course_error_handler,
-    cancel,
+    showcat_handler,
+    showtype_handler,
 )
 from handlers.bot_handlers import (
+    cancel_delete_all_data,
+    confirm_delete_all,
+    delete_all_data_start,
     delete_category_start,
+    delete_parent_start,
+    handle_cancel_delete_callback,
     handle_delete_category_page,
     handle_delete_parent_page,
-    delete_parent_start,
-    handle_course_deletion,
-    handle_cancel_delete_callback,
-    delete_all_data_start,
-    confirm_delete_all,
-    cancel_delete_all_data,
 )
-from conversation_states import CREATE_CAT_NAME, CREATE_CAT_PARENT, DELETE_ALL
-from handlers.delete_callbacks import handle_category_deletion, handle_item_deletion
-from handlers.delete_callbacks import handle_delete_ref, handle_delete_confirm, handle_delete_summary
 from handlers.category_design import setup_design_handlers
+from handlers.course_handlers import (
+    addcat_page,
+    addcoach_page,
+    cancel,
+    course_error_handler,
+    setup_course_handlers,
+)
+from handlers.delete_callbacks import (
+    handle_category_deletion,
+    handle_delete_confirm,
+    handle_delete_summary,
+    handle_item_deletion,
+)
 
 # Search handlers
 from handlers.search_handlers import (
     get_search_conversation_handler,
-    search_courses_pagination_callback,
     search_categories_pagination_callback,
     search_category_courses_pagination_callback,
+    search_courses_pagination_callback,
 )
-from dotenv import load_dotenv
-import logging
-import os
 
-load_dotenv()
-
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=log_level,
-)
 logger = logging.getLogger(__name__)
 
 
@@ -76,11 +74,28 @@ logger = logging.getLogger(__name__)
 
 # ---------- application factory ----------
 
+
 async def create_application():
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:
-        raise ValueError("BOT_TOKEN environment variable is not set")
-    application = Application.builder().token(bot_token).build()
+        msg = "BOT_TOKEN environment variable is not set"
+        raise ValueError(msg)
+    try:
+        from telegram.ext import AIORateLimiter
+
+        rate_limiter = AIORateLimiter(
+            overall_max_rate=30,
+            overall_time_period=1.0,
+            group_max_rate=18,
+            group_time_period=60.0,
+            max_retries=3,
+        )
+        application = Application.builder().token(bot_token).rate_limiter(rate_limiter).build()
+        logger.info("AIORateLimiter enabled (30/s global, 18/60s per-chat)")
+    except Exception:
+        # aiolimiter may not be installed; fall back to unthrottled
+        logger.warning("Failed to create AIORateLimiter; falling back to unthrottled")
+        application = Application.builder().token(bot_token).build()
     return application
 
 
@@ -97,6 +112,7 @@ def init_sync_mongo():
         return
     try:
         from database.mongo_handler import MongoDB
+
         MongoDB.initialize_sync(mongo_uri, db_name)
         logger.info("Synchronous MongoDB client initialized (strong durability enabled)")
     except Exception:
@@ -124,81 +140,37 @@ async def setup_handlers(application: Application):
 
     # ---------- callbacks ----------
     # `del_menu_` callback handler not present; skip registration.
-    application.add_handler(
-        CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$")
-    )
+    application.add_handler(CallbackQueryHandler(confirm_delete_all, pattern="^confirm_delete_all$"))
+    application.add_handler(CallbackQueryHandler(cancel_delete_all_data, pattern="^cancel_delete_all$"))
     # Note: handle_categories_pagination handler isn't registered because
     # pagination now uses categories_page::<page> format instead.
-    application.add_handler(
-        CallbackQueryHandler(courses_callback, pattern=r"^courses::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(addcat_page, pattern=r"^addcat_page::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(categories_page, pattern=r"^categories_page::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(createcat_page, pattern=r"^createcat_page::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(handle_category_selection, pattern=r"^category_")
-    )
-    application.add_handler(
-        CallbackQueryHandler(handle_category_selection, pattern=r"^category::")
-    )
+    application.add_handler(CallbackQueryHandler(courses_callback, pattern=r"^courses::"))
+    application.add_handler(CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page::"))
+    application.add_handler(CallbackQueryHandler(addcat_page, pattern=r"^addcat_page::"))
+    application.add_handler(CallbackQueryHandler(categories_page, pattern=r"^categories_page::"))
+    application.add_handler(CallbackQueryHandler(createcat_page, pattern=r"^createcat_page::"))
+    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category_"))
+    application.add_handler(CallbackQueryHandler(handle_category_selection, pattern=r"^category::"))
     # Register the more specific coach-in-category handler before the generic coach handler
-    application.add_handler(
-        CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_coach_handler, pattern=r"^coach_")
-    )
-    application.add_handler(
-        CallbackQueryHandler(showtype_handler, pattern=r"^showtype::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(handle_course_selection, pattern=r"^course_")
-    )
-    application.add_handler(
-        CallbackQueryHandler(handle_course_selection, pattern=r"^course::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(handle_course_selection, pattern=r"^course_ref::")
-    )
+    application.add_handler(CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat::"))
+    application.add_handler(CallbackQueryHandler(show_coach_handler, pattern=r"^coach_"))
+    application.add_handler(CallbackQueryHandler(showtype_handler, pattern=r"^showtype::"))
+    application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_"))
+    application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course::"))
+    application.add_handler(CallbackQueryHandler(handle_course_selection, pattern=r"^course_ref::"))
     # confirm/cancel per-item handlers
     # Per-item confirm handler not implemented; keep cancel handler which exists
     application.add_handler(
         CallbackQueryHandler(
             handle_cancel_delete_callback,
             pattern=r"^cancel_delete",
-        )
+        ),
     )
-    application.add_handler(
-        CallbackQueryHandler(handle_back_to_cats, pattern=r"^back_to_cats$")
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_course_deletion,
-            pattern=r"^delete_course_",
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_course_deletion,
-            pattern=r"^delete_course::",
-        )
-    )
+    application.add_handler(CallbackQueryHandler(handle_back_to_cats, pattern=r"^back_to_cats$"))
 
     # ---------- conversations ----------
     await setup_course_handlers(application)
-    
+
     # ---------- search (before global cancel so active search gets priority) ----------
     try:
         application.add_handler(get_search_conversation_handler())
@@ -211,7 +183,10 @@ async def setup_handlers(application: Application):
 
     application.add_handler(
         ConversationHandler(
-            entry_points=[CommandHandler("create_category", create_category), CommandHandler("create_parent", create_parent)],
+            entry_points=[
+                CommandHandler("create_category", create_category),
+                CommandHandler("create_parent", create_parent),
+            ],
             allow_reentry=True,
             states={
                 CREATE_CAT_PARENT: [
@@ -222,11 +197,12 @@ async def setup_handlers(application: Application):
                     MessageHandler(
                         filters.TEXT & ~filters.COMMAND,
                         handle_category_name,
-                    )
+                    ),
                 ],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
-        )
+            conversation_timeout=600,  # auto-end after 10 minutes of inactivity
+        ),
     )
 
     application.add_handler(
@@ -242,10 +218,11 @@ async def setup_handlers(application: Application):
                         cancel_delete_all_data,
                         pattern="^cancel_delete_all$",
                     ),
-                ]
+                ],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
-        )
+            conversation_timeout=300,  # auto-end after 5 minutes of inactivity
+        ),
     )
 
     # ---------- deletion (last so not shadowed) ----------
@@ -255,65 +232,51 @@ async def setup_handlers(application: Application):
         CallbackQueryHandler(
             handle_delete_category_page,
             pattern=r"^delete_category_page::\d+$",
-        )
+        ),
     )
 
     application.add_handler(
         CallbackQueryHandler(
             handle_delete_parent_page,
             pattern=r"^delete_parent_page::\d+$",
-        )
+        ),
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_category_deletion,
             pattern=r"^delete_category_",
-        )
+        ),
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_item_deletion,
             pattern=r"^delete_item_",
-        )
+        ),
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_item_deletion,
             pattern=r"^delete_item::",
-        )
-    )
-    application.add_handler(
-        CallbackQueryHandler(
-            handle_delete_ref,
-            pattern=r"^delete_ref::",
-        )
+        ),
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_delete_confirm,
             pattern=r"^delete_confirm::",
-        )
+        ),
     )
     application.add_handler(
         CallbackQueryHandler(
             handle_delete_summary,
             pattern=r"^delete_summary::",
-        )
+        ),
     )
-    application.add_handler(
-        CallbackQueryHandler(showcat_handler, pattern=r"^showcat::[^:]+::\d+$")
-    )
+    application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat::[^:]+::\d+$"))
     # Support short stored refs for showcat links (avoids long callback_data)
-    application.add_handler(
-        CallbackQueryHandler(showcat_handler, pattern=r"^showcat_ref::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat_ref::")
-    )
+    application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat_ref::"))
+    application.add_handler(CallbackQueryHandler(show_coach_in_category, pattern=r"^coach_in_cat_ref::"))
     # Generic showcat handler (catch-all) registered after the paged pattern
-    application.add_handler(
-        CallbackQueryHandler(showcat_handler, pattern=r"^showcat::")
-    )
+    application.add_handler(CallbackQueryHandler(showcat_handler, pattern=r"^showcat::"))
 
     # ---------- category designs ----------
     try:
@@ -322,14 +285,12 @@ async def setup_handlers(application: Application):
         logger.exception("Failed to register design handlers")
 
     # ---------- search pagination handlers ----------
+    application.add_handler(CallbackQueryHandler(search_courses_pagination_callback, pattern=r"^search_courses_pg::"))
     application.add_handler(
-        CallbackQueryHandler(search_courses_pagination_callback, pattern=r"^search_courses_pg::")
+        CallbackQueryHandler(search_categories_pagination_callback, pattern=r"^search_categories_pg::"),
     )
     application.add_handler(
-        CallbackQueryHandler(search_categories_pagination_callback, pattern=r"^search_categories_pg::")
-    )
-    application.add_handler(
-        CallbackQueryHandler(search_category_courses_pagination_callback, pattern=r"^search_cat_courses_pg::")
+        CallbackQueryHandler(search_category_courses_pagination_callback, pattern=r"^search_cat_courses_pg::"),
     )
 
     # ---------- error handler ----------

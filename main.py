@@ -1,27 +1,24 @@
+import asyncio
+import json
 import logging
 import os
-import json
-import uvicorn
-import asyncio
 import signal
 from typing import Optional
 
-from fastapi import FastAPI, Request, HTTPException
+import httpx
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from telegram import Update
-from telegram.ext import Application, TypeHandler, CallbackContext
-from dotenv import load_dotenv
-from loguru import logger
-import httpx
+from telegram.ext import Application, CallbackContext, TypeHandler
 
+import logging_config  # noqa: F401 — configures root logger (console + file) on import
 from bot import create_application, setup_handlers
-from handlers.base_handlers import start_redis_retry_worker
 from database.mongo_handler import MongoDB
+from handlers.base_handlers import _bg_task, start_cache_cleanup_worker, start_redis_retry_worker
+from logging_config import configure_uvicorn_loggers
 
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
-logger.add("bot.log", rotation="10 MB", level="INFO")
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -33,10 +30,12 @@ bot_token = os.getenv("BOT_TOKEN")
 LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
 
 if not bot_token:
-    raise ValueError("BOT_TOKEN environment variable is not set")
+    msg = "BOT_TOKEN environment variable is not set"
+    raise ValueError(msg)
 
 
 # ---------- helpers ----------
+
 
 def _resolve_webhook_url() -> Optional[str]:
     """Determine the public webhook URL the bot should register with Telegram.
@@ -54,10 +53,7 @@ def _resolve_webhook_url() -> Optional[str]:
     if render_url:
         return f"{render_url.rstrip('/')}/{bot_token}/"
 
-    logger.warning(
-        "Neither WEBHOOK_URL nor RENDER_EXTERNAL_URL is set; "
-        "webhook auto-registration will be skipped."
-    )
+    logger.warning("Neither WEBHOOK_URL nor RENDER_EXTERNAL_URL is set; webhook auto-registration will be skipped.")
     return None
 
 
@@ -77,12 +73,10 @@ async def _register_webhook(url: str) -> bool:
             if data.get("ok"):
                 logger.info("Webhook successfully registered -> %s", url)
                 return True
-            logger.error(
-                "Telegram setWebhook failed: %s (url=%s)", data, url
-            )
+            logger.error("Telegram setWebhook failed: %s (url=%s)", data, url)
             return False
-    except Exception as exc:
-        logger.exception("Failed to call Telegram setWebhook: %s", exc)
+    except Exception:
+        logger.exception("Failed to call Telegram setWebhook")
         return False
 
 
@@ -92,7 +86,8 @@ async def initialize_db():
     db_name = os.getenv("MONGODB_NAME")
 
     if not mongo_uri or not db_name:
-        raise ValueError("MONGODB_URL and MONGODB_NAME must be set")
+        msg = "MONGODB_URL and MONGODB_NAME must be set"
+        raise ValueError(msg)
 
     await MongoDB.initialize(mongo_uri, db_name)
 
@@ -114,9 +109,11 @@ async def echo_update(update: Update, context: CallbackContext):
 
 # ---------- low-level update processing ----------
 
+
 async def _process_telegram_update(request: Request) -> dict:
     """Deserialize a Telegram ``Update`` from *request* and pass it through
-    the application handler chain.  Returns a JSON-serialisable dict."""
+    the application handler chain.  Returns a JSON-serialisable dict.
+    """
     if application is None:
         # Startup hasn't finished yet — Render cold start. Return a
         # transient error so Telegram retries after a short delay.
@@ -137,6 +134,7 @@ async def startup_event():
     # across restarts when Redis is not configured.
     try:
         from handlers.base_handlers import _rehydrate_callback_map
+
         try:
             await _rehydrate_callback_map()
         except Exception:
@@ -147,8 +145,9 @@ async def startup_event():
     # If Redis is not configured, initialize a synchronous pymongo client
     # so synchronous code paths can perform blocking durable writes.
     try:
-        if not os.getenv('REDIS_URL'):
+        if not os.getenv("REDIS_URL"):
             from bot import init_sync_mongo
+
             try:
                 init_sync_mongo()
             except Exception:
@@ -158,6 +157,17 @@ async def startup_event():
     # Index creation managed manually; automatic ensure_indexes disabled.
     logger.info("Skipping automatic ensure_indexes (manual index management)")
 
+    # Unconditionally create the coaches.topics index since coaches are
+    # queried by this field (see base_handlers.py line ~2723) and the
+    # index is critical for performance. Best-effort: ignore if the
+    # collection doesn't exist yet or MongoDB is unavailable.
+    try:
+        db = await MongoDB.get_db()
+        await db.coaches.create_index("topics")
+        logger.info("Index on coaches.topics created unconditionally")
+    except Exception:
+        logger.debug("Could not create coaches.topics index (best-effort)")
+
     application = await create_application()
     await application.initialize()
     await setup_handlers(application)
@@ -165,9 +175,15 @@ async def startup_event():
     application.add_error_handler(global_error_handler)
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
 
+    # Start background cache cleanup worker (always runs)
+    try:
+        _bg_task(start_cache_cleanup_worker())
+    except Exception:
+        logger.exception("Failed to start cache cleanup worker")
+
     # Start Redis-backed retry worker (if Redis configured)
     try:
-        asyncio.create_task(start_redis_retry_worker(application))
+        _bg_task(start_redis_retry_worker(application))
     except Exception:
         logger.exception("Failed to start redis retry worker")
 
@@ -183,16 +199,21 @@ async def startup_event():
         logger.info(
             "Webhook URL could not be determined; "
             "skipping auto-registration. "
-            "Set WEBHOOK_URL or RENDER_EXTERNAL_URL env vars."
+            "Set WEBHOOK_URL or RENDER_EXTERNAL_URL env vars.",
         )
+
+    # Reconfigure uvicorn loggers after uvicorn has set up its default config on run().
+    configure_uvicorn_loggers()
 
     # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
     loop = asyncio.get_event_loop()
+
     def _log_signal(sig):
-        logger.warning("Received shutdown signal: {}", sig)
+        logger.warning("Received shutdown signal: %s", sig)
+
     try:
-        loop.add_signal_handler(signal.SIGTERM, lambda: _log_signal('SIGTERM'))
-        loop.add_signal_handler(signal.SIGINT, lambda: _log_signal('SIGINT'))
+        loop.add_signal_handler(signal.SIGTERM, lambda: _log_signal("SIGTERM"))
+        loop.add_signal_handler(signal.SIGINT, lambda: _log_signal("SIGINT"))
     except NotImplementedError:
         # add_signal_handler may not be available on all platforms (e.g., Windows)
         logger.info("Signal handlers not supported on this platform; skipping registration.")
@@ -225,6 +246,7 @@ async def shutdown_event():
 # NOTE: /webhook fallback routes must be defined BEFORE /{token}/ so they
 # take priority.  If defined after, FastAPI would match /webhook/ against
 # /{token}/ first (with token="webhook") and reject it with 400.
+
 
 @app.post("/webhook")
 @app.post("/webhook/")
@@ -262,14 +284,29 @@ async def root():
 async def health(request: Request):
     """Liveness endpoint. If `LIVENESS_TOKEN` is set, caller must provide
     header `X-LIVENESS-TOKEN` with the same value.
+    Also checks MongoDB connectivity for operational awareness.
     """
     if LIVENESS_TOKEN:
         hdr = request.headers.get("X-LIVENESS-TOKEN")
         if hdr != LIVENESS_TOKEN:
             raise HTTPException(status_code=401, detail="Unauthorized")
-    return JSONResponse({"status": "ok"})
+
+    mongo_ok = False
+    try:
+        db = await MongoDB.get_db()
+        await db.command("ping")
+        mongo_ok = True
+    except Exception:
+        mongo_ok = False
+
+    if not mongo_ok:
+        return JSONResponse(
+            {"status": "degraded", "mongo": "disconnected"},
+            status_code=503,
+        )
+    return JSONResponse({"status": "ok", "mongo": "connected"})
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=1)
+    port = int(os.getenv("PORT", "10000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, workers=1, log_config=None)
