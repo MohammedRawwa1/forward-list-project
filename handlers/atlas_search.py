@@ -434,6 +434,66 @@ def build_regex_category_course_search_pipeline(
     }
 
 
+def build_regex_coach_course_search_pipeline(
+    query_text: str,
+    category: str = None,
+    page: int = 1,
+    page_size: int = 50,
+    include_children: bool = True,
+) -> dict:
+    """Build a regex-based pipeline for coach-name course search (fallback).
+
+    Finds courses whose *coach* contains the query text. When `category` is
+    given, results are scoped to that category (and, when ``include_children``
+    is True, its child categories); when `category` is None the search covers
+    ALL categories. This powers the paginated "matching courses by coach"
+    cross-entity block in the course and category searches.
+    """
+    pattern = re_module.escape(query_text)
+
+    if category:
+        if include_children:
+            scope = {"$match": {"$or": [{"name": category}, {"parent": category}]}}
+        else:
+            scope = {"$match": {"$or": [{"name": category}, {"path": category}]}}
+        pipeline = [
+            scope,
+            {"$unwind": "$courses"},
+            {"$match": {"courses.coach": {"$regex": pattern, "$options": "i"}}},
+            {
+                "$project": {
+                    "name": "$courses.name",
+                    "link": "$courses.link",
+                    "category": "$name",
+                    "coach": "$courses.coach",
+                    "id": "$courses.id",
+                },
+            },
+            {"$sort": {"name": 1}},
+        ]
+    else:
+        # Global scope: search every category's courses by coach name
+        pipeline = [
+            {"$unwind": "$courses"},
+            {"$match": {"courses.coach": {"$regex": pattern, "$options": "i"}}},
+            {
+                "$project": {
+                    "name": "$courses.name",
+                    "link": "$courses.link",
+                    "category": "$name",
+                    "coach": "$courses.coach",
+                    "id": "$courses.id",
+                },
+            },
+            {"$sort": {"name": 1}},
+        ]
+
+    return {
+        "pipeline_base": pipeline,
+        "use_atlas": False,
+    }
+
+
 # ---------------  Execution Helpers  ---------------
 
 
@@ -590,6 +650,42 @@ async def execute_category_course_search(
 
     # Regex fallback
     pipes = build_regex_category_course_search_pipeline(
+        query_text,
+        category,
+        page,
+        page_size,
+        include_children=include_children,
+    )
+    pipeline = pipes["pipeline_base"]
+    cnt_res = await db.categories.aggregate(pipeline + [{"$count": "total"}]).to_list(length=1)
+    total = cnt_res[0]["total"] if cnt_res else 0
+    start = (page - 1) * page_size
+    paged_pipeline = pipeline + [{"$skip": start}, {"$limit": page_size + 1}]
+    items = await db.categories.aggregate(paged_pipeline).to_list(length=page_size + 1)
+    have_more = len(items) > page_size
+    course_items = items[:page_size]
+    return course_items, total, have_more
+
+
+async def execute_coach_course_search(
+    db,
+    query_text: str,
+    category: str = None,
+    page: int = 1,
+    page_size: int = 50,
+    include_children: bool = True,
+):
+    """Execute a coach-name course search.
+
+    Finds courses whose coach contains the query text. When `category` is
+    given, results are scoped to that category (and, when
+    ``include_children`` is True, its children); when `category` is None the
+    search covers ALL categories. Regex-based only — powers the paginated
+    "matching courses by coach" cross-entity blocks.
+
+    Returns (course_items, total_count, have_more).
+    """
+    pipes = build_regex_coach_course_search_pipeline(
         query_text,
         category,
         page,

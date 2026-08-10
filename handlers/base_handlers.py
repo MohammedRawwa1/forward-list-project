@@ -565,6 +565,7 @@ def _make_course_ref(
     origin_context: str = None,
     origin_context_page: int = None,
     course_id: str = None,
+    search_ref: str = None,
 ) -> str:
     # Compute a concrete back callback so details can always return to the
     # exact originating UI (category/coach/global) without guessing.
@@ -588,6 +589,8 @@ def _make_course_ref(
         "origin_context_page": origin_context_page,
         "back_cb": back_cb,
     }
+    if search_ref:
+        payload["search_ref"] = search_ref
     # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
     key = _store_callback_payload(payload)
     try:
@@ -738,8 +741,16 @@ def _search_courses_coach_cb(coach_name, page: int = 1) -> str:
     )
 
 
-def _showtype_cb(cat_name, t_name) -> str:
-    """Compact callback for the showtype view (long category/type names)."""
+def _showtype_cb(cat_name, t_name, search_ref: str = None) -> str:
+    """Compact callback for the showtype view (long category/type names).
+
+    When ``search_ref`` is provided (view opened from search results), a
+    stored payload is always used so the search context survives navigation.
+    """
+    if search_ref:
+        payload = {"type": "showtype", "category": str(cat_name), "type_name": str(t_name), "search_ref": search_ref}
+        key = _store_callback_payload(payload)
+        return f"showtype_ref::{key}"
     return _fit_cb(
         "showtype",
         f"showtype::{urllib.parse.quote_plus(str(cat_name))}::{urllib.parse.quote_plus(str(t_name))}",
@@ -1761,6 +1772,7 @@ def build_courses_page(
     total_count: int = None,
     is_page: bool = False,
     store_page_ref: bool = False,
+    search_ref: str = None,
 ):
     """Builds the text and InlineKeyboardMarkup for a courses page.
 
@@ -1843,6 +1855,7 @@ def build_courses_page(
                     make_origin_ctx,
                     origin_context_page,
                     c.get("id") if isinstance(c, dict) else None,
+                    search_ref,
                 )
                 keyboard.append(
                     [InlineKeyboardButton(name, url=link), InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)],
@@ -2041,6 +2054,7 @@ def build_courses_page(
                     origin_context,
                     origin_context_page,
                     c.get("id") if isinstance(c, dict) else None,
+                    search_ref,
                 )
                 keyboard.append(
                     [InlineKeyboardButton(name, url=link), InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)],
@@ -2252,21 +2266,6 @@ def build_courses_page(
 
 
 # Input Validation for Category Name
-def validate_category_name(category_name: str):
-    """Validates the category name."""
-    if not category_name or category_name.isspace():
-        return "The category name cannot be empty. Please try again! 😬"
-
-    if len(category_name) < 3 or len(category_name) > MAX_CATEGORY_NAME_LENGTH:
-        return f"Category name must be between 3 and {MAX_CATEGORY_NAME_LENGTH} characters."
-
-    # Allow most printable characters; only reject control characters / newlines
-    if any(c in category_name for c in "\r\n"):
-        return "Category name cannot contain newlines or control characters."
-
-    return None
-
-
 async def help_command(update: Update, context: CallbackContext):
     """Display the help message with available commands."""
     help_message = (
@@ -2696,6 +2695,14 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         # Add Search button for categories
     keyboard.append([InlineKeyboardButton("🔍 Search", callback_data=f"search_categories::{page}")])
 
+    # Back to search results when the user reached /categories from a search
+    try:
+        results_row = _back_to_results_row(context)
+        if results_row:
+            keyboard.append(results_row)
+    except Exception:
+        pass
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     title = f"Tap a category to see its courses (page {page}/{last_page}):"
     if is_query:
@@ -2897,6 +2904,10 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                     ),
                 ],
             )
+            # Back to search results when the user came from a search
+            results_row = _back_to_results_row(context)
+            if results_row:
+                kb.append(results_row)
             reply_markup = InlineKeyboardMarkup(kb)
         except Exception:
             pass
@@ -2921,6 +2932,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
     # Support short stored refs for coach_in_cat (coach_in_cat_ref::<key>)
     parent_origin = None
     parent_origin_page = None
+    search_ref = None
     if data.startswith("coach_in_cat_ref::"):
         key = data.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
@@ -2932,12 +2944,13 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                 action_key=getattr(query, "data", None),
             )
             return
-        # payload contains category, coach_slug, page and optionally from_parent/parent_page
+        # payload contains category, coach_slug, page and optionally from_parent/parent_page/search_ref
         category = payload.get("category")
         coach_slug = payload.get("coach_slug")
         page = int(payload.get("page", 1) or 1)
         type_slug = payload.get("type_slug")
         parent_origin = payload.get("from_parent")
+        search_ref = payload.get("search_ref") or None
         try:
             parent_origin_page = int(payload.get("parent_page")) if payload.get("parent_page") is not None else None
         except Exception:
@@ -3083,6 +3096,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             total_count=total_courses,
             is_page=True,
             store_page_ref=True,
+            search_ref=search_ref,
         )
         # Add Search button for courses in this category
         try:
@@ -3095,6 +3109,10 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                     ),
                 ],
             )
+            # Back to search results when this view came from search
+            results_row = _back_to_results_row(context, search_ref)
+            if results_row:
+                kb.append(results_row)
             reply_markup = InlineKeyboardMarkup(kb)
         except Exception:
             pass
@@ -3130,6 +3148,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
     raw = query.data
     category_name = ""
     type_name = ""
+    search_ref = None
     if raw.startswith("showtype_ref::"):
         # Compact ref form used when category/type names exceed 64 bytes
         try:
@@ -3137,6 +3156,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
             if payload:
                 category_name = payload.get("category") or ""
                 type_name = payload.get("type_name") or ""
+                search_ref = payload.get("search_ref") or None
         except Exception:
             category_name = ""
             type_name = ""
@@ -3204,6 +3224,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
             origin_type="category",
             category=category_name,
             origin_context=origin_ctx,
+            search_ref=search_ref,
         )
         # Add Search button for courses in this category
         try:
@@ -3216,6 +3237,10 @@ async def showtype_handler(update: Update, context: CallbackContext):
                     ),
                 ],
             )
+            # Back to search results when this view came from search
+            results_row = _back_to_results_row(context, search_ref)
+            if results_row:
+                kb.append(results_row)
             reply_markup = InlineKeyboardMarkup(kb)
         except Exception:
             pass
@@ -3252,6 +3277,61 @@ def _clear_design_pending(context):
         context.user_data.pop("_pending_design_key", None)
     except Exception:
         pass
+
+
+# How long a stored search-results ref stays usable for the
+# "Back to Results" button on deep views (seconds).
+SEARCH_NAV_TTL = 3600  # 1 hour
+
+# user_data key shared with search handlers for the "Back to Results" nav ref
+SEARCH_NAV_USER_KEY = "search_results_nav"
+
+
+def _store_search_nav_ref(context, ref: str):
+    """Remember the most recent search results ref for this chat.
+
+    Used by the /categories view (and other deep views without a payload
+    ref) to offer a "Back to Results" button while the results are fresh.
+    """
+    try:
+        context.user_data[SEARCH_NAV_USER_KEY] = {"ref": ref, "ts": time.time()}
+    except Exception:
+        pass
+
+
+def _get_search_nav_ref(context) -> str | None:
+    """Return the chat's active search-results ref if it is still fresh.
+
+    Search handlers store ``context.user_data[SEARCH_NAV_USER_KEY]`` =
+    ``{"ref": <key>, "ts": <epoch>}`` whenever results are rendered. Deep
+    views (e.g. /categories) use this to offer a "🔙 Back to Results"
+    button while the results are recent.
+    """
+    try:
+        nav = context.user_data.get(SEARCH_NAV_USER_KEY) or {}
+        ref = nav.get("ref")
+        ts = nav.get("ts") or 0
+        if ref and (time.time() - ts) <= SEARCH_NAV_TTL:
+            return ref
+    except Exception:
+        pass
+    return None
+
+
+def _back_to_results_row(context, search_ref: str = None):
+    """Return a keyboard row with a '🔙 Back to Results' button, or None.
+
+    Prefers an explicit ``search_ref`` (carried by the callback payload when
+    the view was opened from search results); otherwise falls back to the
+    chat's most recent search results ref (``search_results_nav``).
+    """
+    ref = search_ref or _get_search_nav_ref(context)
+    if not ref:
+        return None
+    try:
+        return [InlineKeyboardButton("🔙 Back to Results", callback_data=f"back_to_results::{ref}")]
+    except Exception:
+        return None
 
 
 async def _send_design_photo(query, context, text, reply_markup):
@@ -3347,6 +3427,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     parent_origin = None
     parent_origin_page = None
     encoded = ""
+    search_ref = None
     # Support short stored refs: `showcat_ref::<key>` -> resolve payload
     if raw.startswith("showcat_ref::"):
         key = raw.split("::", 1)[1]
@@ -3359,8 +3440,9 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 action_key=getattr(query, "data", None),
             )
             return
-        # payload may contain `path`, optional `from_parent`, `parent_page`, and hidden `parent_index`
+        # payload may contain `path`, optional `from_parent`, `parent_page`, hidden `parent_index`, and `search_ref` (when opened from search results)
         cat_path = payload.get("path")
+        search_ref = payload.get("search_ref") or None
         parent_origin = payload.get("from_parent")
         # parent_page may be stored as int or string; normalize to int when present
         parent_origin_page = None
@@ -3417,6 +3499,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
                         "parent_page": page,
                         "parent_index": parent_index,
                     }
+                    if search_ref:
+                        child_payload["search_ref"] = search_ref
                     key2 = _store_callback_payload(child_payload)
                     keyboard.append([InlineKeyboardButton(item_name, callback_data=f"showcat_ref::{key2}")])
 
@@ -3437,6 +3521,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
                     nav.append(InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(parent_name, last_page)))
                 if nav:
                     keyboard.append(nav)
+
+                # Back to search results when this view came from search
+                results_row = _back_to_results_row(context, search_ref)
+                if results_row:
+                    keyboard.append(results_row)
 
                 title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
                 await _send_design_photo(query, context, title, InlineKeyboardMarkup(keyboard))
@@ -3653,6 +3742,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
         for child in page_children:
             child_path = child.get("path") or child.get("name")
             payload = {"type": "showcat", "path": child_path, "from_parent": cat_path, "parent_page": page}
+            if search_ref:
+                payload["search_ref"] = search_ref
             key = _store_callback_payload(payload)
             # Mark child as empty when it has neither sub-children nor courses
             try:
@@ -3747,6 +3838,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
         except Exception:
             pass
 
+        # Back to search results when this view came from search
+        results_row = _back_to_results_row(context, search_ref)
+        if results_row:
+            keyboard.append(results_row)
+
         await _send_design_photo(
             query,
             context,
@@ -3777,12 +3873,16 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         t_name,
-                        callback_data=_showtype_cb(cat_name, t_name),
+                        callback_data=_showtype_cb(cat_name, t_name, search_ref),
                     ),
                 ],
             )
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
+        # Back to search results when this view came from search
+        results_row = _back_to_results_row(context, search_ref)
+        if results_row:
+            keyboard.append(results_row)
         await _send_design_photo(query, context, f"{cat_name} — Select a type:", InlineKeyboardMarkup(keyboard))
         return
 
@@ -3807,6 +3907,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
                     "from_parent": parent_origin,
                     "parent_page": parent_origin_page,
                 }
+                if search_ref:
+                    payload["search_ref"] = search_ref
                 key = _store_callback_payload(payload)
                 try:
                     logger.debug(
@@ -3826,6 +3928,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 try:
                     if len(cb.encode("utf-8")) > 64:
                         payload = {"type": "coach_in_cat", "category": cat_name, "coach_slug": coach_slug, "page": page}
+                        if search_ref:
+                            payload["search_ref"] = search_ref
                         key = _store_callback_payload(payload)
                         cb = f"coach_in_cat_ref::{key}"
                 except Exception:
@@ -3833,6 +3937,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
         # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
+        # Back to search results when this view came from search
+        results_row = _back_to_results_row(context, search_ref)
+        if results_row:
+            keyboard.append(results_row)
         await _send_design_photo(query, context, f"Coaches in '{cat_name}':", InlineKeyboardMarkup(keyboard))
         return
 
@@ -3870,6 +3978,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, page))])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
+    # Back to search results when this view came from search
+    try:
+        results_row = _back_to_results_row(context, search_ref)
+        if results_row:
+            keyboard.append(results_row)
+    except Exception:
+        pass
     # Add Search button for courses in this category
     try:
         keyboard.append(
@@ -3918,11 +4033,22 @@ async def showcat_handler(update: Update, context: CallbackContext):
         origin_context=origin_ctx,
         origin_context_page=parent_origin_page,
         store_page_ref=True,
+        search_ref=search_ref,
     )
     if not text:
+        # Even with no courses, keep the Back to Results button available
+        # when this view came from search results.
+        results_markup = None
+        try:
+            results_row = _back_to_results_row(context, search_ref)
+            if results_row:
+                results_markup = InlineKeyboardMarkup([results_row])
+        except Exception:
+            pass
         await safe_edit_message(
             query,
             f"No courses found in '{cat_name}' on page {page}.",
+            reply_markup=results_markup,
             action_key=getattr(query, "data", None),
         )
         return
@@ -3937,6 +4063,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 ),
             ],
         )
+        # Back to search results when this view came from search
+        results_row = _back_to_results_row(context, search_ref)
+        if results_row:
+            kb.append(results_row)
         reply_markup = InlineKeyboardMarkup(kb)
     except Exception:
         pass
@@ -4501,6 +4631,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             )
         except Exception:
             origin_context_page = None
+        search_ref = payload.get("search_ref") or None
         # Prefer an explicit appended back token, otherwise fall back to saved payload
         saved_back_cb = appended_back or payload.get("back_cb")
     else:
@@ -5112,6 +5243,13 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 keyboard = [nav_row]
                 if extra_row:
                     keyboard.append(extra_row)
+            # Back to search results when this course was opened from search results
+            try:
+                results_row = _back_to_results_row(context, search_ref)
+                if results_row:
+                    keyboard.append(results_row)
+            except Exception:
+                pass
             reply_markup = InlineKeyboardMarkup(keyboard)
             details = (
                 f"📚 **Course Details**\n\n"
@@ -5457,6 +5595,18 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 InlineKeyboardButton(
                                     "\U0001f50d Search",
                                     callback_data=_search_category_courses_cb(category, page),
+                                ),
+                            ],
+                        )
+                    elif origin_type == "coach" and category:
+                        # Carry the coach name (it lives in `category` here) so
+                        # the search stays scoped to this coach instead of
+                        # degrading to a name-less global search.
+                        kb.append(
+                            [
+                                InlineKeyboardButton(
+                                    "\U0001f50d Search",
+                                    callback_data=_search_courses_coach_cb(category, page),
                                 ),
                             ],
                         )

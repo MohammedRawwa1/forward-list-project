@@ -62,6 +62,7 @@ from handlers.delete_callbacks import (
 
 # Search handlers
 from handlers.search_handlers import (
+    back_to_results_callback,
     get_search_conversation_handler,
     search_categories_pagination_callback,
     search_category_courses_pagination_callback,
@@ -325,6 +326,8 @@ async def setup_handlers(application: Application):
     application.add_handler(
         CallbackQueryHandler(search_category_courses_pagination_callback, pattern=r"^search_cat_courses_pg::"),
     )
+    # 'Back to Results' from deep views opened from search results
+    application.add_handler(CallbackQueryHandler(back_to_results_callback, pattern=r"^back_to_results::"))
 
     # ---------- error handler ----------
     application.add_error_handler(course_error_handler)
