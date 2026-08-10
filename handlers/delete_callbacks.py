@@ -17,7 +17,6 @@ from handlers.base_handlers import (
 )
 
 logger = logging.getLogger(__name__)
-# Batch limit to avoid loading very large result sets into memory
 BATCH_LIMIT = 500
 
 
@@ -25,7 +24,6 @@ BATCH_LIMIT = 500
 async def handle_category_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard for category deletion (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -34,7 +32,6 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
             action_key=getattr(query, "data", None),
         )
         return
-    # everything after "delete_category_"
     cat_parts = query.data.split("_", 2)
     if len(cat_parts) < 3:
         await safe_edit_message(query, "Invalid category deletion callback.", action_key=getattr(query, "data", None))
@@ -49,24 +46,15 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
         )
         return
 
-    # Recursively collect this category and all descendants, then delete them.
     try:
-        # Prefer id/path-based resolution to avoid removing same-named categories
-        # in unrelated parts of the tree. Fall back to name-based deletion only
-        # when path/id information cannot be resolved.
         payload = None
         try:
-            # Use the central helper to check whether `cat` is a stored callback ref
-            # (16-char hex key) or a real category name. This prevents a false-positive
-            # edge case where a category named with 16 hex characters would be
-            # incorrectly resolved as a CALLBACK_MAP key.
             payload = await _resolve_callback_ref_key(db, cat)
         except Exception:
             payload = None
 
         cat_doc = None
         if payload and isinstance(payload, dict) and payload.get("category"):
-            # If payload supplies an explicit category id, use it
             try:
                 cat_id = payload.get("category_id") or payload.get("id")
                 if cat_id:
@@ -77,7 +65,6 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
             except Exception:
                 cat_doc = None
 
-        # If no payload or id-based resolve, try to find by path or name as before
         if not cat_doc:
             cat_doc = await db["categories"].find_one(
                 {"$or": [{"path": cat}, {"name": cat}]},
@@ -86,7 +73,6 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
 
         if cat_doc and cat_doc.get("path"):
             base_path = cat_doc.get("path")
-            # find all documents whose path equals the base_path or starts with base_path + '/'
             docs = (
                 await db["categories"]
                 .find(
@@ -115,18 +101,12 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
             else:
                 await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, "data", None))
         else:
-            # Fallback: no path available — preserve existing behavior but
-            # limit the recursive discovery to explicit parent links and
-            # delete only the discovered subtree names.
             to_delete = await collect_subtree_names(
                 db,
                 cat,
                 batch_limit=BATCH_LIMIT,
             )
             if to_delete:
-                # Collect _ids by fetching docs and filtering by subtree relationship.
-                # This avoids deleting unrelated categories that share names (name-based over-match).
-                # Use a single $in query to avoid N+1 round-trips.
                 all_docs = (
                     await db["categories"]
                     .find({"name": {"$in": list(to_delete)}}, {"_id": 1, "parent": 1})
@@ -135,7 +115,6 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
                 ids_to_remove = set()
                 for d in all_docs:
                     parent = d.get("parent")
-                    # Only include if this doc is the root category or its parent is in the subtree
                     if d.get("name") == cat or parent in to_delete:
                         _id = d.get("_id")
                         if _id:
@@ -162,16 +141,8 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
 
 # ----------  delete course from details view  ----------
 async def handle_delete_ref(update: Update, context: CallbackContext):
-    """Delete a course from the Details view (callback: delete_ref::<key>).
-
-    Resolves the stored payload (which carries the course ``id`` and its
-    category) and removes the course by embedded ``id`` when available,
-    falling back to name-based deletion for legacy entries.
-    SECURITY: Owner-only — uses fail-closed is_owner() helper.
-    """
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -231,7 +202,6 @@ async def handle_delete_ref(update: Update, context: CallbackContext):
 async def handle_item_deletion(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard for item deletion (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -241,12 +211,10 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         )
         return
     logger.info("[DEL-ITEM] callback data=%s", query.data)
-    # Support new format: delete_item::category::course or legacy delete_item_{course}
     data = query.data
     db = await MongoDB.get_db()
 
     if data.startswith("delete_item_ref::"):
-        # Stored payload reference (preferred) — resolves to exact category id
         key = data.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
         if not payload:
@@ -279,7 +247,6 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         if len(parts) == 2:
             cat_raw = urllib.parse.unquote_plus(parts[0])
             item = urllib.parse.unquote_plus(parts[1])
-            # If the category token looks like a UUID, prefer id-based deletion
             if is_uuid(cat_raw):
                 res = await db["categories"].update_one({"id": cat_raw}, {"$pull": {"courses": {"name": item}}})
             else:
@@ -294,7 +261,6 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
             await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, "data", None))
             return
 
-    # legacy underscore-style fallback: pull from any category that contains the course
     item = data.split("_", 2)[2] if "_" in data else data
     item = urllib.parse.unquote_plus(item)
     res = await db["categories"].update_one({"courses.name": item}, {"$pull": {"courses": {"name": item}}})
@@ -304,15 +270,10 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, "data", None))
 
 
+# ----------  delete confirmation  ----------
 async def handle_delete_confirm(update: Update, context: CallbackContext):
-    """Perform the confirmed delete action: course, category, or parent.
-
-    Callback format: delete_confirm::{action}::{key}
-    SECURITY: Owner-only — uses fail-closed is_owner() helper.
-    """
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard for confirmed deletes (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -358,7 +319,6 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
 
     try:
         if action == "course":
-            # remove single course from its category; prefer id-based deletion
             if not cat:
                 await safe_edit_message(
                     query,
@@ -368,34 +328,25 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                 return
             course_id = payload.get("id")
             if course_id:
-                # delete by embedded course id when available
                 res = await db["categories"].update_one(
                     {"courses.id": course_id},
                     {"$pull": {"courses": {"id": course_id}}},
                 )
             else:
-                # fallback to name-based deletion for legacy entries
                 res = await db["categories"].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
 
             if res.modified_count:
-                # After deletion, show the updated courses list for the category
                 try:
-                    # Re-fetch the category document to get the updated courses
                     cat_doc = await db["categories"].find_one({"name": cat})
                     courses = cat_doc.get("courses", []) if cat_doc else []
-                    # Normalize to list of dicts with name/link/category for the page builder
                     all_courses = [{"name": c.get("name"), "link": c.get("link"), "category": cat} for c in courses]
-                    # Ensure deterministic ordering
                     all_courses = sorted(all_courses, key=lambda c: (c.get("name") or "").lower())
-                    # Import build_courses_page from handlers.base_handlers to render
                     from handlers.base_handlers import build_courses_page
 
-                    # origin_page from payload may be present; default to 1
                     try:
                         page = int(payload.get("origin_page", 1))
                     except Exception:
                         page = 1
-                    # Clamp page to available range
                     page_size = 20
                     try:
                         from handlers.base_handlers import PAGE_SIZE
@@ -446,7 +397,6 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                     action_key=getattr(query, "data", None),
                 )
                 return
-            # Recursively collect this category and all descendants, then delete them.
             try:
                 to_delete = await collect_subtree_names(
                     db,
@@ -454,8 +404,6 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                     batch_limit=BATCH_LIMIT,
                 )
                 if to_delete:
-                    # Delete by _id to avoid over-deleting unrelated categories with the same name
-                    # Use a single $in query to avoid N+1 round-trips.
                     all_docs = (
                         await db["categories"]
                         .find({"name": {"$in": list(to_delete)}}, {"_id": 1, "parent": 1})
@@ -500,13 +448,11 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                     action_key=getattr(query, "data", None),
                 )
                 return
-            # find parent of this category
             cat_doc = await db["categories"].find_one({"name": cat})
             parent_name = cat_doc.get("parent") if cat_doc else None
             if not parent_name:
                 await safe_edit_message(query, "Parent not found. ❌", action_key=getattr(query, "data", None))
                 return
-            # Recursively collect parent and all descendants, then delete them
             try:
                 to_delete = await collect_subtree_names(
                     db,
@@ -514,8 +460,6 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                     batch_limit=BATCH_LIMIT,
                 )
                 if to_delete:
-                    # Delete by _id to avoid over-deleting unrelated categories with the same name
-                    # Use a single $in query to avoid N+1 round-trips.
                     all_docs = (
                         await db["categories"]
                         .find({"name": {"$in": list(to_delete)}}, {"_id": 1, "parent": 1})
@@ -562,16 +506,10 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
         return
 
 
+# ----------  delete summary  ----------
 async def handle_delete_summary(update: Update, context: CallbackContext):
-    """Show a pre-delete summary (counts of categories and courses) before confirming.
-
-    Callback format: delete_summary::{action}::{key}
-    action: 'category' or 'parent'
-    SECURITY: Owner-only — uses fail-closed is_owner() helper.
-    """
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard for delete summary (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -610,15 +548,12 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             )
             return
         try:
-            # Fast-path: if the selected category has no courses and no child categories,
-            # show a quick confirm message without scanning the whole subtree.
             cat_doc = await db["categories"].find_one({"name": cat}, projection={"courses": 1})
             if cat_doc is None:
                 await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, "data", None))
                 return
 
             has_courses = bool(cat_doc.get("courses"))
-            # Check for any child categories (either explicit parent or path prefix).
             child_exists = await db["categories"].find_one(
                 {"$or": [{"parent": cat}, {"path": {"$regex": f"^{re.escape(cat)}/"}}]},
                 projection={"_id": 1},
@@ -638,16 +573,13 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                 )
                 return
 
-            # Otherwise, fall back to existing behavior: collect category + descendants
             to_delete = await collect_subtree_names(
                 db,
                 cat,
                 batch_limit=BATCH_LIMIT,
             )
 
-            # count categories and courses (fetch docs once for efficiency)
             cat_count = len(to_delete)
-            # fetch exactly the number of docs we expect to summarize (project minimal fields)
             docs = (
                 await db["categories"]
                 .find({"name": {"$in": list(to_delete)}}, projection={"name": 1, "courses": 1})
@@ -656,7 +588,6 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             doc_map = {d.get("name"): d for d in docs}
             course_count = sum(len(d.get("courses", [])) for d in docs)
 
-            # Prepare preview of affected category names (truncate to first 10)
             preview_limit = 10
             entries = []
             for n in to_delete:
@@ -665,7 +596,6 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                 except Exception:
                     cnt = 0
                 entries.append((n, cnt))
-            # Sort by course count ascending, then name A→Z
             entries_sorted = sorted(entries, key=lambda x: (x[1], x[0].lower()))
             preview_entries = entries_sorted[:preview_limit]
             remaining = max(0, len(entries_sorted) - len(preview_entries))
@@ -725,7 +655,6 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             )
 
             cat_count = len(to_delete)
-            # Bulk-fetch documents for all affected categories to avoid N database calls
             docs = (
                 await db["categories"]
                 .find({"name": {"$in": list(to_delete)}}, projection={"name": 1, "courses": 1})
@@ -734,7 +663,6 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             doc_map = {d.get("name"): d for d in docs}
             course_count = sum(len(d.get("courses", [])) for d in docs)
 
-            # Prepare preview of affected category names (truncate to first 10)
             preview_limit = 10
             entries = []
             for n in to_delete:
@@ -743,7 +671,6 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
                 except Exception:
                     cnt = 0
                 entries.append((n, cnt))
-            # Sort by course count ascending, then name A→Z
             entries_sorted = sorted(entries, key=lambda x: (x[1], x[0].lower()))
             preview_entries = entries_sorted[:preview_limit]
             remaining = max(0, len(entries_sorted) - len(preview_entries))

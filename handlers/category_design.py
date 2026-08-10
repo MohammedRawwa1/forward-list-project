@@ -1,14 +1,3 @@
-"""Category Design Feature — Owner Only.
-
-Allows the bot owner to assign a thumbnail photo as a visual "design"
-for a parent category. When the category is viewed, the design photo
-is sent as a banner before the inline keyboard.
-
-Commands:
-  /design_cat   — Reply to a photo, then pick a parent category to design
-  /remove_design — Remove a design from a parent category
-"""
-
 import logging
 import math
 import urllib.parse
@@ -35,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 def _design_cat_select_cb(name) -> str:
-    """Compact callback for the design-category picker (long Arabic names)."""
     return _fit_cb(
         "design_cat_select",
         f"design_cat_select::{urllib.parse.quote_plus(str(name))}",
@@ -44,7 +32,6 @@ def _design_cat_select_cb(name) -> str:
 
 
 def _remove_design_cb(name) -> str:
-    """Compact callback for the remove-design picker (long Arabic names)."""
     return _fit_cb(
         "remove_design",
         f"remove_design::{urllib.parse.quote_plus(str(name))}",
@@ -58,7 +45,6 @@ DESIGNS_COLLECTION = "category_designs"
 
 
 async def _get_design(db, category_name: str) -> str | None:
-    """Return the file_id of the design for `category_name`, or None."""
     try:
         doc = await db[DESIGNS_COLLECTION].find_one({"name": category_name}, projection={"file_id": 1})
         return doc.get("file_id") if doc else None
@@ -67,7 +53,6 @@ async def _get_design(db, category_name: str) -> str | None:
 
 
 async def _set_design(db, category_name: str, file_id: str):
-    """Store or update the design for `category_name`."""
     try:
         await db[DESIGNS_COLLECTION].update_one(
             {"name": category_name},
@@ -81,7 +66,6 @@ async def _set_design(db, category_name: str, file_id: str):
 
 
 async def _delete_design(db, category_name: str):
-    """Remove the design for `category_name`."""
     try:
         res = await db[DESIGNS_COLLECTION].delete_one({"name": category_name})
         return res.deleted_count > 0
@@ -91,7 +75,6 @@ async def _delete_design(db, category_name: str):
 
 
 async def _list_designed_categories(db) -> list:
-    """Return a list of category names that have designs."""
     try:
         docs = await db[DESIGNS_COLLECTION].find({}, projection={"name": 1}).sort("name", 1).to_list(length=500)
         return [d["name"] for d in docs if d.get("name")]
@@ -100,7 +83,6 @@ async def _list_designed_categories(db) -> list:
 
 
 async def get_category_design(db, category_name: str) -> str | None:
-    """Public helper — return the file_id for a category's design, or None."""
     return await _get_design(db, category_name)
 
 
@@ -108,13 +90,11 @@ async def get_category_design(db, category_name: str) -> str | None:
 
 
 async def design_cat_command(update: Update, context: CallbackContext):
-    """Start the category design flow — owner-only, reply to a photo."""
-    keyboard = []  # defensive initialization
+    keyboard = []
     if not is_owner(update.effective_user.id if update.effective_user else None):
         await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
 
-    # Must be replying to a photo
     reply = update.message.reply_to_message
     if not reply or not reply.photo:
         await update.message.reply_text(
@@ -122,17 +102,14 @@ async def design_cat_command(update: Update, context: CallbackContext):
         )
         return
 
-    # Get the largest photo file_id (best quality)
     try:
         file_id = reply.photo[-1].file_id
     except (IndexError, AttributeError):
         await update.message.reply_text("Could not read the photo. Try again.")
         return
 
-    # Store file_id temporarily
     context.user_data["design_file_id"] = file_id
 
-    # Show parent category picker
     db = await get_db()
     if db is None:
         await update.message.reply_text("Error: Cannot connect to database.")
@@ -166,7 +143,6 @@ async def design_cat_command(update: Update, context: CallbackContext):
             [InlineKeyboardButton(name, callback_data=_design_cat_select_cb(name))],
         )
 
-    # Pagination nav
     nav = []
     total_pages = max(1, math.ceil(total / page_size)) if total else 1
     last_page = max(1, total_pages)
@@ -186,7 +162,6 @@ async def design_cat_command(update: Update, context: CallbackContext):
 
 
 async def design_cat_select_callback(update: Update, context: CallbackContext):
-    """Handle parent category selection for /design_cat."""
     query = update.callback_query
     await safe_answer(query)
 
@@ -197,7 +172,6 @@ async def design_cat_select_callback(update: Update, context: CallbackContext):
     data = query.data
     category_name = None
     if data.startswith("design_cat_select_ref::"):
-        # Compact ref form used when the category name exceeds 64 bytes
         try:
             payload = await _resolve_callback_payload(data.split("::", 1)[1])
             if payload:
@@ -244,8 +218,7 @@ async def design_cat_select_callback(update: Update, context: CallbackContext):
 
 
 async def design_cat_page_callback(update: Update, context: CallbackContext):
-    keyboard = []  # defensive initialization
-    """Handle pagination for the /design_cat category picker."""
+    keyboard = []
     query = update.callback_query
     await safe_answer(query)
 
@@ -311,7 +284,6 @@ async def design_cat_page_callback(update: Update, context: CallbackContext):
 
 
 async def design_cat_cancel_callback(update: Update, context: CallbackContext):
-    """Cancel the design flow."""
     query = update.callback_query
     await safe_answer(query)
     context.user_data.pop("design_file_id", None)
@@ -322,7 +294,6 @@ async def design_cat_cancel_callback(update: Update, context: CallbackContext):
 
 
 async def remove_design_command(update: Update, context: CallbackContext):
-    """Show categories with designs so the owner can remove one."""
     if not is_owner(update.effective_user.id if update.effective_user else None):
         await update.message.reply_text("⛔ Only the bot owner can run this command.")
         return
@@ -351,7 +322,6 @@ async def remove_design_command(update: Update, context: CallbackContext):
 
 
 async def remove_design_callback(update: Update, context: CallbackContext):
-    """Remove a design from a selected category."""
     query = update.callback_query
     await safe_answer(query)
 
@@ -362,7 +332,6 @@ async def remove_design_callback(update: Update, context: CallbackContext):
     data = query.data
     category_name = None
     if data.startswith("remove_design_ref::"):
-        # Compact ref form used when the category name exceeds 64 bytes
         try:
             payload = await _resolve_callback_payload(data.split("::", 1)[1])
             if payload:
@@ -403,17 +372,12 @@ async def remove_design_callback(update: Update, context: CallbackContext):
 
 
 def setup_design_handlers(application):
-    """Register all category design handlers."""
-    # Commands
     application.add_handler(CommandHandler("design_cat", design_cat_command))
     application.add_handler(CommandHandler("remove_design", remove_design_command))
 
-    # Callbacks
     application.add_handler(CallbackQueryHandler(design_cat_select_callback, pattern=r"^design_cat_select::"))
-    # Compact ref form (long Arabic category names)
     application.add_handler(CallbackQueryHandler(design_cat_select_callback, pattern=r"^design_cat_select_ref::"))
     application.add_handler(CallbackQueryHandler(design_cat_page_callback, pattern=r"^design_cat_page::"))
     application.add_handler(CallbackQueryHandler(design_cat_cancel_callback, pattern=r"^design_cat_cancel$"))
     application.add_handler(CallbackQueryHandler(remove_design_callback, pattern=r"^remove_design::"))
-    # Compact ref form (long Arabic category names)
     application.add_handler(CallbackQueryHandler(remove_design_callback, pattern=r"^remove_design_ref::"))

@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import os
-import re  # For URL validation
+import re
 import time
 import urllib.parse
 import uuid
@@ -23,6 +23,7 @@ from handlers.db_connection import get_db
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
+# ----------  helpers  ----------
 def is_uuid(s: str) -> bool:
     try:
         return bool(UUID_RE.match(str(s).strip()))
@@ -31,20 +32,8 @@ def is_uuid(s: str) -> bool:
 
 
 async def _resolve_callback_ref_key(db, key: str) -> dict | None:
-    """Check if *key* looks like a stored callback ref (16-char hex) and is
-    not a real category name in the database.
-
-    Returns the CALLBACK_MAP payload when the key is a valid stored ref,
-    or ``None`` when the key is a real category name or does not match
-    the 16-char hex format used by :func:`_store_callback_payload`.
-
-    This prevents a false-positive edge case where a category named with
-    16 hex characters (e.g. ``a1b2c3d4e5f67890``) would be incorrectly
-    resolved as a CALLBACK_MAP key instead of a real category.
-    """
     if not isinstance(key, str) or len(key) != 16 or not re.match(r"^[0-9a-fA-F]{16}$", key):
         return None
-    # Verify the key is NOT a real category before treating it as a ref
     try:
         existing = await db["categories"].find_one(
             {"name": key},
@@ -66,19 +55,6 @@ async def collect_subtree_names(
     max_nodes: int = 5000,
     collection: str = "categories",
 ) -> set[str]:
-    """Collect all category names in the subtree rooted at *root_name* using iterative DFS.
-
-    Uses an explicit stack to avoid recursion depth issues. Raises RuntimeError
-    if the traversal exceeds *max_nodes* (cycle detection).
-
-    If *filter_fn* is provided, it receives the current node name and should
-    return the MongoDB filter dict to find child categories. The default filter
-    matches by explicit parent field or path prefix:
-
-        {"$or": [{"parent": curr}, {"path": {"$regex": f"^{re.escape(curr)}/"}}]}
-
-    Returns a set of discovered category names (including the root).
-    """
     if filter_fn is None:
 
         def _default_filter(curr):
@@ -108,28 +84,17 @@ async def collect_subtree_names(
     return discovered
 
 
-# How long to persist callback refs (seconds). Default: 7 days.
 CALLBACK_REF_TTL = env_int("CALLBACK_REF_TTL", 7 * 24 * 3600)
 
-# In-memory mapping for short callback ids -> payload
 CALLBACK_MAP = {}
-# Maximum size of CALLBACK_MAP to prevent unbounded memory growth
 CALLBACK_MAP_MAX = env_int("CALLBACK_MAP_MAX", 50000)
 
-# Ensure the callback_refs TTL index is created only once per process.
-# Avoids paying a create_index round-trip on every background persist
-# (a single courses page render can schedule dozens of persists).
 _CALLBACK_INDEX_ENSURE_DONE = False
 
-# Cap the number of concurrent background MongoDB callback-ref writes.
-# A single courses page render schedules one persist per course row, and
-# without a cap they'd all hit Atlas simultaneously, causing connection
-# churn. Redis writes are cheap and are not capped. Tune via env.
 CALLBACK_PERSIST_CONCURRENCY = max(1, env_int("CALLBACK_PERSIST_CONCURRENCY", 10))
 _persist_semaphore = asyncio.Semaphore(CALLBACK_PERSIST_CONCURRENCY)
 
 
-# How long to keep an interactive inline keyboard session open (seconds)
 def _parse_ttl(value, default=300):
     if value is None or str(value).strip() == "":
         return default
@@ -152,33 +117,21 @@ GUI_SESSION_TTL = _parse_ttl(os.getenv("GUI_SESSION_TTL", "300"), 300)
 logger = logging.getLogger(__name__)
 logger.debug("GUI_SESSION_TTL=%s seconds (env=%r)", GUI_SESSION_TTL, os.getenv("GUI_SESSION_TTL"))
 
-# Reusable filter for top-level categories that handles missing, null, or empty-string parents
 TOP_LEVEL_FILTER = {"$or": [{"parent": {"$exists": False}}, {"parent": None}, {"parent": ""}]}
 
-# Basic DB timing and count helpers (ensure available early so handlers can use them)
-# Simple in-memory TTL cache for inexpensive totals; keyed by JSON'd filter.
 _COUNT_CACHE = {}
-_COUNT_CACHE_MAX = 5000  # max entries before pruning oldest
+_COUNT_CACHE_MAX = 5000
 
 
+# ----------  cache maintenance  ----------
 def _prune_count_cache():
-    """Prune _COUNT_CACHE: evict expired entries by TTL first, then oldest
-    by insertion order when the cache exceeds the maximum size.
-
-    Expired entries (where the stored expire timestamp is in the past) are
-    removed inline, preserving useful cached values. If the cache still
-    exceeds ``_COUNT_CACHE_MAX`` after TTL eviction, the oldest 25 % of
-    entries are evicted by insertion order (same pattern as other maps).
-    """
     now = time.time()
-    # Step 1: Remove all expired entries (TTL-based eviction)
     expired = [k for k, (_, ts) in _COUNT_CACHE.items() if ts < now]
     for k in expired:
         try:
             del _COUNT_CACHE[k]
         except Exception:
             pass
-    # Step 2: If still too large, evict oldest by insertion order
     if len(_COUNT_CACHE) > _COUNT_CACHE_MAX:
         drop = max(1, len(_COUNT_CACHE) // 4)
         for _ in range(drop):
@@ -189,11 +142,6 @@ def _prune_count_cache():
 
 
 def _prune_page_cache():
-    """Prune _PAGE_CACHE: evict expired entries by TTL first, then oldest
-    by insertion order when the cache exceeds the maximum size.
-
-    Mirrors the two-phase pattern used by :func:`_prune_count_cache`.
-    """
     now = time.time()
     expired = [k for k, (_, ts) in _PAGE_CACHE.items() if ts < now]
     for k in expired:
@@ -211,9 +159,6 @@ def _prune_page_cache():
 
 
 def _prune_callback_resolve_cache():
-    """Prune _CALLBACK_RESOLVE_CACHE: evict expired entries by TTL first,
-    then oldest by expiry order when the cache exceeds the maximum size.
-    """
     now = time.time()
     expired = [k for k, (_, ts) in _CALLBACK_RESOLVE_CACHE.items() if ts < now]
     for k in expired:
@@ -222,7 +167,6 @@ def _prune_callback_resolve_cache():
         except Exception:
             pass
     if len(_CALLBACK_RESOLVE_CACHE) > _CALLBACK_RESOLVE_CACHE_MAX:
-        # sort by expire_ts ascending and drop oldest quarter
         items = sorted(_CALLBACK_RESOLVE_CACHE.items(), key=lambda kv: kv[1][1])
         drop = max(1, len(items) // 4)
         for k, _ in items[:drop]:
@@ -233,22 +177,11 @@ def _prune_callback_resolve_cache():
 
 
 def _prune_user_buckets():
-    """Prune _USER_BUCKETS: remove entries inactive for >1 hour.
-
-    Two-phase stale-first strategy matching the pattern in ``_consume_token``:
-
-    * If fewer than 25% of entries are stale: remove ALL stale entries, then
-      supplement by insertion order to reach exactly 25% total reduction.
-    * If 25% or more are stale: remove only 25% of stale entries (partial
-      cleanup avoids burst work on a hot path).
-    """
     if len(_USER_BUCKETS) > _USER_BUCKETS_MAX:
         now = time.time()
         cutoff = now - 3600.0
         stale = [uid for uid, b in _USER_BUCKETS.items() if b.get("last_refill", 0) < cutoff]
         if len(stale) < len(_USER_BUCKETS) // 4:
-            # Fewer than 25% stale — remove all stale then supplement
-            # by insertion order to reach exactly 25% reduction.
             drop = max(1, len(_USER_BUCKETS) // 4)
             for uid in stale:
                 try:
@@ -262,8 +195,6 @@ def _prune_user_buckets():
                 except StopIteration:
                     break
         else:
-            # At least 25% stale — remove only 25% of stale entries
-            # (partial cleanup avoids burst work on a hot path).
             drop = max(1, len(stale) // 4)
             for uid in stale[:drop]:
                 try:
@@ -272,22 +203,17 @@ def _prune_user_buckets():
                     pass
 
 
-_COUNT_CACHE_LOCKS = {}  # key -> (asyncio.Lock, created_at), prevents cache stampede
-_COUNT_CACHE_LOCKS_MAX = 1000  # max locks before pruning
-_COUNT_CACHE_LOCKS_TTL = 300  # prune locks older than 5 min
-_PAGE_CACHE = {}  # key -> (payload, expire_ts)
-_PAGE_CACHE_MAX = 5000  # max entries before pruning oldest
+_COUNT_CACHE_LOCKS = {}
+_COUNT_CACHE_LOCKS_MAX = 1000
+_COUNT_CACHE_LOCKS_TTL = 300
+_PAGE_CACHE = {}
+_PAGE_CACHE_MAX = 5000
 PAGE_CACHE_TTL = env_int("PAGE_CACHE_TTL", 30)
-# Short in-memory cache for resolved callback payloads to avoid Redis/Mongo
-# round-trips for hot refs. Values: key -> (payload, expire_ts)
 _CALLBACK_RESOLVE_CACHE = {}
 _CALLBACK_RESOLVE_CACHE_MAX = env_int("CALLBACK_RESOLVE_CACHE_MAX", 2000)
 
 
 def _set_callback_resolve_cache(key: str, payload, ttl: int = 60):
-    """Set a payload into the small in-process resolve cache with TTL
-    and enforce a maximum size to avoid unbounded memory growth.
-    """
     try:
         expire = time.time() + ttl
         _CALLBACK_RESOLVE_CACHE[key] = (payload, expire)
@@ -296,12 +222,8 @@ def _set_callback_resolve_cache(key: str, payload, ttl: int = 60):
         pass
 
 
-# Tracks sessions (chat_id, message_id) that should be kept open
-# when the scheduled close worker runs. Handlers that render coach
-# lists set this so the session isn't closed while the user is browsing.
-# Values are epoch timestamps set when the entry was last added.
 _SESSION_KEEP_OPEN: dict[tuple[int, int], float] = {}
-_SESSION_KEEP_OPEN_MAX = 10000  # prevent unbounded growth
+_SESSION_KEEP_OPEN_MAX = 10000
 
 
 def _set_session_keep_open(message, keep: bool = True):
@@ -313,12 +235,7 @@ def _set_session_keep_open(message, keep: bool = True):
         key = (int(chat_id), int(msg_id))
         if keep:
             now = time.time()
-            # Prune entries older than GUI_SESSION_TTL to prevent
-            # stale entries from accumulating when sessions are no longer active.
             cutoff = now - GUI_SESSION_TTL
-            # Only prune when the dict exceeds 75% of its max capacity to
-            # avoid an O(n) scan on every call; this is a reasonable trade-off
-            # given the expected small size of this set.
             if len(_SESSION_KEEP_OPEN) > _SESSION_KEEP_OPEN_MAX // 4 * 3:
                 stale = [k for k, ts in _SESSION_KEEP_OPEN.items() if ts < cutoff]
                 for k in stale:
@@ -327,7 +244,6 @@ def _set_session_keep_open(message, keep: bool = True):
                     except Exception:
                         pass
             _SESSION_KEEP_OPEN[key] = now
-            # Enforce absolute size cap as a safety net
             if len(_SESSION_KEEP_OPEN) > _SESSION_KEEP_OPEN_MAX:
                 drop = max(1, len(_SESSION_KEEP_OPEN) // 4)
                 for _ in range(drop):
@@ -342,6 +258,7 @@ def _set_session_keep_open(message, keep: bool = True):
 
 
 @asynccontextmanager
+# ----------  counts & timing  ----------
 async def _db_timing(name: str):
     t0 = time.time()
     try:
@@ -355,27 +272,15 @@ async def _db_timing(name: str):
 
 
 async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
-    """Get total count with optional caching. Prefers Redis when configured.
-
-    coll_name is the collection attribute name on the db object (e.g. "categories").
-    """
     key = f"count:{coll_name}:{json.dumps(filter_q or {}, sort_keys=True)}"
     now = time.time()
     entry = _COUNT_CACHE.get(key)
     if entry and entry[1] > now:
         return entry[0]
 
-    # Per-key lock to prevent cache stampede: when the TTL expires and N
-    # requests arrive simultaneously, only the first one rebuilds the
-    # cache while the rest wait for it.
     if key not in _COUNT_CACHE_LOCKS:
         _COUNT_CACHE_LOCKS[key] = (asyncio.Lock(), time.time())
     lock, _ = _COUNT_CACHE_LOCKS[key]
-    # Prune stale locks periodically to prevent memory leak.
-    # Removes locks older than _COUNT_CACHE_LOCKS_TTL seconds, regardless
-    # of whether the corresponding key still exists in _COUNT_CACHE.
-    # This handles one-time-use / rare cache keys that would otherwise
-    # accumulate forever.
     if len(_COUNT_CACHE_LOCKS) > _COUNT_CACHE_LOCKS_MAX:
         cutoff = time.time() - _COUNT_CACHE_LOCKS_TTL
         stale = [k for k, (_, created) in _COUNT_CACHE_LOCKS.items() if created < cutoff]
@@ -385,12 +290,10 @@ async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int =
             except Exception:
                 pass
     async with lock:
-        # Double-check after acquiring lock
         entry = _COUNT_CACHE.get(key)
         if entry and entry[1] > time.time():
             return entry[0]
 
-        # Try Redis first (best-effort)
         try:
             if _redis is not None:
                 val = await _redis.get(key)
@@ -405,7 +308,6 @@ async def _get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int =
         except Exception:
             pass
 
-        # Fallback: run count_documents on the collection
         try:
             coll = getattr(db, coll_name) if hasattr(db, coll_name) else db[coll_name]
             cnt = await coll.count_documents(filter_q or {})
@@ -431,9 +333,6 @@ def _get_cached_page(key: str):
 
 
 def _has_real_courses(courses):
-    """Return True if `courses` contains at least one real course (not the
-    placeholder '(empty') or empty dicts. Accepts list-like structures.
-    """
     try:
         if not courses:
             return False
@@ -443,7 +342,6 @@ def _has_real_courses(courses):
             if isinstance(c, dict):
                 name = c.get("name")
             else:
-                # allow legacy string entries
                 name = c
             if name and str(name).strip():
                 return True
@@ -455,7 +353,6 @@ def _has_real_courses(courses):
 def _set_cached_page(key: str, payload, ttl: int = 3):
     _PAGE_CACHE[key] = (payload, time.time() + ttl)
     _prune_page_cache()
-    # best-effort Redis backing for multi-process deployments
     try:
         if _redis is not None:
             _bg_task(_redis.set(key, json.dumps(payload), ex=ttl))
@@ -464,16 +361,11 @@ def _set_cached_page(key: str, payload, ttl: int = 3):
 
 
 async def _get_courses_count(db, category: str, ttl: int = 60):
-    """Return the number of courses stored in a category, with in-process
-    caching and optional Redis backing. This avoids repeated aggregations
-    for hot categories and speeds up pagination/back-button computations.
-    """
     key = f"count:category_courses:{category}"
     now = time.time()
     entry = _COUNT_CACHE.get(key)
     if entry and entry[1] > now:
         return entry[0]
-    # Try Redis first (best-effort)
     try:
         if _redis is not None:
             val = await _redis.get(key)
@@ -488,7 +380,6 @@ async def _get_courses_count(db, category: str, ttl: int = 60):
     except Exception:
         pass
 
-    # Fallback: aggregation to compute array size
     try:
         pipeline = [{"$match": {"name": category}}, {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}}]
         agg = await db.categories.aggregate(pipeline).to_list(length=1)
@@ -500,27 +391,20 @@ async def _get_courses_count(db, category: str, ttl: int = 60):
     _prune_count_cache()
     try:
         if _redis is not None:
-            # best-effort async set
             _bg_task(_redis.set(key, str(cnt), ex=ttl))
     except Exception:
         pass
     return cnt
 
 
+# ----------  message scheduling  ----------
 def schedule_close_inline_message(message, delay: int = None, notice: str = "(Session closed due to inactivity)"):
-    """Schedule removal of inline keyboard from a sent Message after `delay` seconds.
-
-    This prefers editing the message to remove `reply_markup` and append a short notice.
-    Runs in background via asyncio.create_task.
-    """
     if delay is None:
         delay = GUI_SESSION_TTL
 
     async def _worker():
         await asyncio.sleep(delay)
         try:
-            # If this message has been marked to keep open (e.g., coach view),
-            # skip auto-closing.
             try:
                 chat_id = getattr(message, "chat", None).id if getattr(message, "chat", None) else None
                 msg_id = getattr(message, "message_id", None)
@@ -530,17 +414,14 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
                 pass
 
             orig = getattr(message, "text", None) or getattr(message, "caption", None) or ""
-            # Try removing inline keyboard first
             try:
                 await message.edit_reply_markup(reply_markup=None)
             except Exception:
                 pass
-            # Then try to append a short notice so user knows it's closed
             try:
                 new_text = orig or ""
                 if notice:
                     new_text = new_text + "\n\n" + notice
-                # Detect if message has a photo and use edit_caption instead
                 if getattr(message, "photo", None):
                     await message.edit_caption(caption=new_text)
                 else:
@@ -553,10 +434,10 @@ def schedule_close_inline_message(message, delay: int = None, notice: str = "(Se
     try:
         _bg_task(_worker())
     except Exception:
-        # Environment may not support creating background tasks; ignore.
         pass
 
 
+# ----------  callback builders  ----------
 def _make_course_ref(
     category: str,
     name: str,
@@ -567,8 +448,6 @@ def _make_course_ref(
     course_id: str = None,
     search_ref: str = None,
 ) -> str:
-    # Compute a concrete back callback so details can always return to the
-    # exact originating UI (category/coach/global) without guessing.
     page_to_use = origin_context_page or origin_page or 1
     if origin_type == "category":
         target = origin_context or category
@@ -591,7 +470,6 @@ def _make_course_ref(
     }
     if search_ref:
         payload["search_ref"] = search_ref
-    # Use the central storage helper so refs are persisted (Redis/Mongo) as a best-effort.
     key = _store_callback_payload(payload)
     try:
         logger.debug(
@@ -606,13 +484,9 @@ def _make_course_ref(
         )
     except Exception:
         pass
-    # Append an encoded back callback to the returned callback_data so the
-    # Details view can use it directly without resolving the stored payload.
     try:
         enc = urllib.parse.quote_plus(back_cb)
         candidate = f"course_ref::{key}::back::{enc}"
-        # Telegram callback_data must be <= 64 bytes. Don't append the
-        # back token if it would exceed that limit; fall back to stored ref.
         if len(candidate.encode("utf-8")) <= 64:
             logger.debug("_make_course_ref: using inline candidate (len=%d)", len(candidate.encode("utf-8")))
             return candidate
@@ -627,15 +501,9 @@ def _make_course_ref(
 
 
 def _store_callback_payload(payload: dict) -> str:
-    """Store an arbitrary payload and return a short key."""
     key = hashlib.sha1(json.dumps(payload, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:16]
     CALLBACK_MAP[key] = payload
-    # Prune CALLBACK_MAP if it exceeds the maximum size to prevent unbounded
-    # memory growth (defense-in-depth for A04: Insecure Design).
     if len(CALLBACK_MAP) > CALLBACK_MAP_MAX:
-        # Remove 25% of entries (oldest by storage order approximation).
-        # dict preserves insertion order in Python 3.7+, so we drop the
-        # first N entries.
         drop = max(1, len(CALLBACK_MAP) // 4)
         keys_to_drop = list(CALLBACK_MAP.keys())[:drop]
         for k in keys_to_drop:
@@ -647,35 +515,15 @@ def _store_callback_payload(payload: dict) -> str:
         logger.debug("_store_callback_payload: key=%s payload=%s", key, payload)
     except Exception:
         pass
-    # Best-effort background persist to Redis or Mongo so refs survive
-    # restarts. Always async/fire-and-forget: the synchronous pymongo write
-    # path previously used here (when Redis was not configured) blocked the
-    # event loop once per rendered button, freezing the bot and making
-    # search/pagination appear broken. The in-memory CALLBACK_MAP already
-    # makes the ref usable immediately; persistence is only for durability
-    # across restarts.
     try:
         _bg_task(_persist_callback_payload(key, payload))
     except Exception:
-        # No running event loop (or scheduling failed) — the in-memory map
-        # still resolves the ref for the current process.
         pass
     return key
 
 
 def _shorten_showcat_cb(path: str, page: int, from_parent: str | None = None, parent_page: int | None = None):
-    """Return a safe callback_data for showcat views.
-
-    Prefer the direct `showcat::{path}::{page}` when it fits; otherwise
-    store a short `showcat_ref::<key>` payload. If `from_parent` and
-    `parent_page` are provided, include them in the stored payload so
-    back-navigation can restore the originating categories page.
-    """
     try:
-        # If origin metadata is provided, always persist it so Back can
-        # reliably restore the originating categories page. This avoids
-        # losing `parent_page` when an inline `showcat::...` callback
-        # would otherwise be used.
         if from_parent is not None or parent_page is not None:
             payload = {"type": "showcat", "path": path, "page": page}
             if from_parent is not None:
@@ -686,7 +534,6 @@ def _shorten_showcat_cb(path: str, page: int, from_parent: str | None = None, pa
                 key = _store_callback_payload(payload)
                 return f"showcat_ref::{key}"
             except Exception:
-                # Fall back to inline representation if persistence fails
                 pass
 
         cb = f"showcat::{urllib.parse.quote_plus(path)}::{page}"
@@ -700,14 +547,6 @@ def _shorten_showcat_cb(path: str, page: int, from_parent: str | None = None, pa
 
 
 def _search_category_courses_cb(category, page: int = 1) -> str:
-    """Return callback_data for the "🔍 Search" button on category views.
-
-    Prefer the inline ``search_category_courses::<category>::<page>`` form when
-    it fits Telegram's 64-byte callback_data limit. Long (especially Arabic)
-    category names would push the payload over the limit and make Telegram
-    reject the entire results-message keyboard; fall back to a short
-    ``search_category_courses_ref::<key>`` stored payload instead.
-    """
     try:
         cb = f"search_category_courses::{urllib.parse.quote_plus(str(category))}::{page}"
         if len(cb.encode("utf-8")) <= 64:
@@ -720,9 +559,6 @@ def _search_category_courses_cb(category, page: int = 1) -> str:
 
 
 def _fit_cb(prefix: str, inline_cb: str, payload: dict) -> str:
-    """Return `inline_cb` when it fits Telegram's 64-byte callback_data limit;
-    otherwise store `payload` and return a compact `<prefix>_ref::<key>` form.
-    """
     try:
         if len(inline_cb.encode("utf-8")) <= 64:
             return inline_cb
@@ -733,7 +569,6 @@ def _fit_cb(prefix: str, inline_cb: str, payload: dict) -> str:
 
 
 def _search_courses_coach_cb(coach_name, page: int = 1) -> str:
-    """Compact callback for the "🔍 Search" button on coach course lists."""
     return _fit_cb(
         "search_courses_coach",
         f"search_courses::coach::{urllib.parse.quote_plus(str(coach_name))}::{page}",
@@ -742,11 +577,6 @@ def _search_courses_coach_cb(coach_name, page: int = 1) -> str:
 
 
 def _showtype_cb(cat_name, t_name, search_ref: str = None) -> str:
-    """Compact callback for the showtype view (long category/type names).
-
-    When ``search_ref`` is provided (view opened from search results), a
-    stored payload is always used so the search context survives navigation.
-    """
     if search_ref:
         payload = {"type": "showtype", "category": str(cat_name), "type_name": str(t_name), "search_ref": search_ref}
         key = _store_callback_payload(payload)
@@ -759,7 +589,6 @@ def _showtype_cb(cat_name, t_name, search_ref: str = None) -> str:
 
 
 def _createcat_parent_cb(name) -> str:
-    """Compact callback for the create-category parent picker."""
     return _fit_cb(
         "createcat_parent",
         f"createcat_parent::{urllib.parse.quote_plus(str(name))}",
@@ -768,12 +597,6 @@ def _createcat_parent_cb(name) -> str:
 
 
 def _courses_home_cb(origin_type: str, category) -> str:
-    """Compact callback for the "🏠 Home" breadcrumb on category/coach pages.
-
-    Falls back to ``courses_ref::<key>`` (a ``courses_page`` payload, resolved
-    by ``courses_callback``) when the inline ``courses::<type>::<category>::1``
-    form would exceed 64 bytes (long Arabic category/coach names).
-    """
     inline = f"courses::{origin_type}::{urllib.parse.quote_plus(str(category))}::1"
     payload = {
         "type": "courses_page",
@@ -789,12 +612,6 @@ def _courses_home_cb(origin_type: str, category) -> str:
 
 
 def _category_page_next_cb(cat_path, page: int, total_count=None) -> str:
-    """Compact callback for the quick "➡️ Next" button on category pages.
-
-    Uses the existing ``courses_ref::<key>`` mechanism (a ``courses_page``
-    payload, which ``courses_callback`` resolves) when the inline
-    ``courses::category::...`` form would exceed 64 bytes.
-    """
     try:
         cb = f"courses::category::{urllib.parse.quote_plus(str(cat_path))}::{page}"
         if len(cb.encode("utf-8")) <= 64:
@@ -815,12 +632,9 @@ def _category_page_next_cb(cat_path, page: int, total_count=None) -> str:
         return f"courses::category::{urllib.parse.quote_plus(str(cat_path))}::{page}"
 
 
+# ----------  callback payload store  ----------
 async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 * 24 * 7):
-    """Persist callback payload to Redis (preferred) or MongoDB (fallback).
-    TTL defaults to 7 days.
-    """
     global _CALLBACK_INDEX_ENSURE_DONE
-    # Try Redis
     try:
         if _redis is not None:
             await _redis.set(f"callback:ref:{key}", json.dumps(payload), ex=ttl)
@@ -829,15 +643,12 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
     except Exception:
         logger.exception("Failed to persist callback payload to Redis")
 
-    # Fallback to MongoDB (concurrency-capped to avoid connection churn)
     try:
         async with _persist_semaphore:
             db = await get_db()
             if db is None:
                 return
             expire_at = datetime.now(UTC) + timedelta(seconds=ttl)
-            # ensure TTL index exists exactly once per process (idempotent,
-            # and already ensured at startup by _rehydrate_callback_map)
             try:
                 if not _CALLBACK_INDEX_ENSURE_DONE:
                     await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
@@ -854,8 +665,6 @@ async def _persist_callback_payload(key: str, payload: dict, ttl: int = 60 * 60 
 
 
 async def _resolve_callback_payload(key: str):
-    """Resolve a callback payload by checking in-memory map, then Redis, then MongoDB."""
-    # Short in-process cache for recently-resolved payloads
     try:
         now = time.time()
         entry = _CALLBACK_RESOLVE_CACHE.get(key)
@@ -864,13 +673,11 @@ async def _resolve_callback_payload(key: str):
     except Exception:
         pass
 
-    # In-memory primary map
     payload = CALLBACK_MAP.get(key)
     if payload:
         _set_callback_resolve_cache(key, payload, ttl=60)
         return payload
 
-    # Redis
     try:
         if _redis is not None:
             val = await _redis.get(f"callback:ref:{key}")
@@ -882,7 +689,6 @@ async def _resolve_callback_payload(key: str):
     except Exception:
         logger.exception("Failed to read callback payload from Redis")
 
-    # MongoDB fallback
     try:
         db = await get_db()
         if db is None:
@@ -901,11 +707,6 @@ async def _resolve_callback_payload(key: str):
 
 
 async def _rehydrate_callback_map(limit: int = None):
-    """Load recent unexpired callback refs from Mongo into in-memory map.
-
-    This helps survive process restarts when Redis isn't configured.
-    `limit` controls the maximum number of docs to load (None -> env or 10000).
-    """
     global _CALLBACK_INDEX_ENSURE_DONE
     cfg_limit = env_int("CALLBACK_REHYDRATE_LIMIT", 10000)
     if limit is None:
@@ -918,7 +719,6 @@ async def _rehydrate_callback_map(limit: int = None):
 
         now = datetime.now(UTC)
         try:
-            # Ensure TTL index exists idempotently
             try:
                 await db.callback_refs.create_index("expireAt", expireAfterSeconds=0)
                 _CALLBACK_INDEX_ENSURE_DONE = True
@@ -945,17 +745,12 @@ async def _rehydrate_callback_map(limit: int = None):
         return 0
 
 
+# ----------  back navigation  ----------
 async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, origin_page: int = None):
-    """Verify that `back_cb` actually resolves to a non-empty courses page.
-    If it doesn't, try alternate lookups (unquote, name/path swap) and
-    clamp the page to an available range. Returns a possibly-modified
-    `back_cb` that is more likely to show the user useful results.
-    """
     try:
         if not back_cb or not isinstance(back_cb, str):
             return back_cb
 
-        # Only reconcile category-course callbacks for now
         if back_cb.startswith("courses::category::"):
             parts = back_cb.split("::")
             if len(parts) >= 4:
@@ -965,7 +760,6 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                 except Exception:
                     page = int(origin_page or 1)
 
-                # Evict any short-lived cached page for this category/page
                 try:
                     cache_key = f"page:category:{urllib.parse.quote_plus(str(raw_cat))}:{page}:{PAGE_SIZE}"
                     _PAGE_CACHE.pop(cache_key, None)
@@ -977,11 +771,9 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                 except Exception:
                     pass
 
-                # try the requested page first (fresh fetch)
                 try:
                     items = await get_courses_by_category(None, raw_cat, page)
                 except Exception:
-                    # get_courses_by_category accepts a user_id first in some calls
                     try:
                         items = await get_courses_by_category(0, raw_cat, page)
                     except Exception:
@@ -990,10 +782,8 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                 if items and _has_real_courses(items):
                     return back_cb
 
-                # If empty, try unquoting/alternative category representations
                 alternates = [raw_cat]
                 try:
-                    # If the stored category looks like a path, also try matching by name
                     doc = await db.categories.find_one(
                         {"$or": [{"path": raw_cat}, {"name": raw_cat}]},
                         projection={"name": 1, "path": 1},
@@ -1004,10 +794,8 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                 except Exception:
                     pass
 
-                # Try alternates and also clamp to page 1 if necessary
                 for alt in alternates:
                     try:
-                        # Evict cached page for alternate
                         try:
                             alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:{page}:{PAGE_SIZE}"
                             _PAGE_CACHE.pop(alt_cache, None)
@@ -1031,10 +819,8 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                     if items and _has_real_courses(items):
                         return f"courses::category::{urllib.parse.quote_plus(str(alt))}::{page}"
 
-                # try clamping to page 1 as a last-ditch
                 for alt in alternates:
                     try:
-                        # Evict cached page for alternate page 1
                         try:
                             alt_cache = f"page:category:{urllib.parse.quote_plus(str(alt))}:1:{PAGE_SIZE}"
                             _PAGE_CACHE.pop(alt_cache, None)
@@ -1058,19 +844,13 @@ async def _reconcile_back_cb(db, back_cb: str, course_category: str = None, orig
                     if items and _has_real_courses(items):
                         return f"courses::category::{urllib.parse.quote_plus(str(alt))}::1"
 
-        # For other callback kinds, leave unchanged
         return back_cb
     except Exception:
         return back_cb
 
 
+# ----------  children & prefetch  ----------
 async def _get_children_flags(db, names, ttl: int = 30):
-    """Return a set of names that have children. Uses Redis as a cache when available.
-
-    `names` is an iterable of category names. The function will check Redis
-    first (mget) and only query MongoDB for misses, then populate Redis for
-    future hits. Returns a set of names that have children.
-    """
     if not names:
         return set()
     names = list(names)
@@ -1104,7 +884,6 @@ async def _get_children_flags(db, names, ttl: int = 30):
             parents = {d.get("parent") for d in docs if d.get("parent")}
         except Exception:
             parents = set()
-        # populate Redis for misses
         if _redis is not None:
             for n in misses:
                 key = f"cat:has_children:{urllib.parse.quote_plus(n)}"
@@ -1118,28 +897,20 @@ async def _get_children_flags(db, names, ttl: int = 30):
 
 
 async def _prefetch_category_page(category_name: str, page: int = 1, page_size: int = None):
-    """Background prefetch: fetch page for `category_name` and warm caches.
-
-    This is fire-and-forget: callers should schedule with
-    `asyncio.create_task(_prefetch_category_page(...))` so UI isn't blocked.
-    """
     try:
         if page_size is None:
             page_size = PAGE_SIZE
-        # call the main fetcher which itself will populate _PAGE_CACHE and Redis
         await get_courses_by_category(None, category_name, page=page, page_size=page_size)
     except Exception:
         pass
 
 
-# Simple in-memory debounce/rate-limit to ignore very fast repeated
-# callback presses from the same user. This reduces duplicated edits and
-# avoids hitting Telegram's flood limits when users rapidly navigate pages.
 _LAST_CALLBACK = {}
-_LAST_CALLBACK_MAX = 10000  # prevent unbounded growth
+_LAST_CALLBACK_MAX = 10000
 DEFAULT_DEBOUNCE = env_float("EDIT_DEBOUNCE", 0.2)
 
 
+# ----------  rate limiting  ----------
 def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool:
     if interval is None:
         interval = DEFAULT_DEBOUNCE
@@ -1149,8 +920,6 @@ def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool
     if last and (now - last) < interval:
         return True
     _LAST_CALLBACK[key] = now
-    # Prune: remove entries older than 30s first (TTL-based), then
-    # enforce size cap when the dict exceeds 75% of max capacity.
     if len(_LAST_CALLBACK) > _LAST_CALLBACK_MAX // 4 * 3:
         cutoff_lc = now - 30.0
         stale_lc = [k for k, ts in _LAST_CALLBACK.items() if ts < cutoff_lc]
@@ -1160,7 +929,6 @@ def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool
             except Exception:
                 pass
     if len(_LAST_CALLBACK) > _LAST_CALLBACK_MAX:
-        # Evict oldest 25% of entries (dict preserves insertion order)
         drop = max(1, len(_LAST_CALLBACK) // 4)
         for _ in range(drop):
             try:
@@ -1170,16 +938,12 @@ def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool
     return False
 
 
-_USER_BUCKETS = {}  # user_id -> {tokens, capacity, last_refill, refill_rate}
-_USER_BUCKETS_MAX = 50000  # prevent unbounded growth
+_USER_BUCKETS = {}
+_USER_BUCKETS_MAX = 50000
 _GLOBAL_BUCKET = {"tokens": 20.0, "capacity": 20.0, "last_refill": time.time(), "refill_rate": 5.0}
-# Per-user token bucket sizing. Raised from the old 5-token @ 1/s defaults so
-# rapid search pagination (answer + edit = 2 API calls per click) isn't
-# silently throttled. Shared by the Redis-backed and in-memory paths.
 USER_BUCKET_CAPACITY = env_float("USER_BUCKET_CAPACITY", 20.0)
 USER_BUCKET_REFILL_RATE = env_float("USER_BUCKET_REFILL_RATE", 5.0)
 
-# Optional Redis-backed token buckets for multi-process deployments.
 REDIS_URL = os.getenv("REDIS_URL")
 _redis = None
 _redis_token_script = None
@@ -1188,8 +952,6 @@ if REDIS_URL:
         import redis.asyncio as redis_async
 
         _redis = redis_async.from_url(REDIS_URL)
-        # Lua script: atomically refill tokens based on elapsed time and
-        # consume if available, otherwise return required wait seconds.
         _redis_token_script = """
         local key = KEYS[1]
         local now = tonumber(ARGV[1])
@@ -1219,12 +981,7 @@ if REDIS_URL:
         _redis_token_script = None
 
 
-# Public wrapper for _get_total_count - accessible from other modules
 async def get_total_count(db, coll_name: str, filter_q: dict = None, ttl: int = 60):
-    """Cached count_documents with optional Redis backing.
-
-    Wraps _get_total_count as a public API for use by other handlers.
-    """
     return await _get_total_count(db, coll_name, filter_q, ttl)
 
 
@@ -1241,11 +998,9 @@ def _refill_bucket(bucket):
 
 
 async def _consume_token(user_id: int, cost: float = 1.0):
-    # If Redis is configured, prefer the Redis-backed atomic token bucket.
     if _redis is not None and _redis_token_script is not None:
         try:
             now = int(time.time())
-            # global first
             res = await _redis.eval(
                 _redis_token_script,
                 1,
@@ -1255,10 +1010,8 @@ async def _consume_token(user_id: int, cost: float = 1.0):
                 _GLOBAL_BUCKET["refill_rate"],
                 cost,
             )
-            # res is JSON like [1,0] or [0,wait]
             ok, wait = json.loads(res)
             if ok == 1:
-                # now consume user bucket
                 user_key = f"bucket:user:{user_id}"
                 res2 = await _redis.eval(
                     _redis_token_script,
@@ -1280,16 +1033,13 @@ async def _consume_token(user_id: int, cost: float = 1.0):
                 return False, wait2
             return False, wait
         except Exception:
-            # Fall back to local in-memory buckets on any Redis error
             pass
 
-    # Refill global (in-memory fallback)
     _refill_bucket(_GLOBAL_BUCKET)
     if _GLOBAL_BUCKET["tokens"] < cost:
         needed = cost - _GLOBAL_BUCKET["tokens"]
         wait = math.ceil(needed / _GLOBAL_BUCKET["refill_rate"])
         return False, wait
-    # Refill / init user bucket
     b = _USER_BUCKETS.get(user_id)
     if b is None:
         b = {
@@ -1305,30 +1055,22 @@ async def _consume_token(user_id: int, cost: float = 1.0):
         needed = cost - b["tokens"]
         wait = math.ceil(needed / b["refill_rate"])
         return False, wait
-    # consume
     _GLOBAL_BUCKET["tokens"] -= cost
     b["tokens"] -= cost
     METRICS["token_consumed"] += 1
     try:
         if _redis is not None:
-            # best-effort increment
             _bg_task(_redis.incr("metrics:token_consumed"))
     except Exception:
         pass
     return True, 0
 
 
-# Track background tasks so they aren't garbage-collected before completion.
 _background_tasks: set[asyncio.Task] = set()
 
 
+# ----------  background tasks  ----------
 def _bg_task(coro):
-    """Create and track a fire-and-forget background task.
-
-    Prevents garbage collection of the task before it completes.
-    The task is automatically removed from tracking when done, and
-    unexpected exceptions are logged instead of silently swallowed.
-    """
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
 
@@ -1351,13 +1093,11 @@ def _bg_task(coro):
     return task
 
 
-# Retry queue for scheduling edit retries when Telegram returns RetryAfter
-# or when tokens are temporarily exhausted.
-_RETRY_QUEUE = {}  # key -> asyncio.Task
+_RETRY_QUEUE = {}
 
 
+# ----------  retry scheduling  ----------
 def _retry_key_for(query):
-    # Use chat_id + message_id if available; fall back to callback data
     chat_id = getattr(getattr(query, "message", None), "chat_id", None)
     msg_id = getattr(getattr(query, "message", None), "message_id", None)
     if chat_id and msg_id:
@@ -1388,14 +1128,12 @@ def _schedule_retry(query, text, reply_markup=None, action_key=None, delay=1, ma
                     logger.exception("Retry loop error")
                     break
         finally:
-            # cleanup — always remove the key, even if the task is cancelled
             _RETRY_QUEUE.pop(key, None)
 
     task = asyncio.create_task(_retry_loop())
     _RETRY_QUEUE[key] = task
 
 
-# Redis-backed retry scheduling and metrics (multi-process safe)
 METRICS = {
     "token_consumed": 0,
     "retry_scheduled": 0,
@@ -1438,7 +1176,6 @@ def _deserialize_markup(rows):
 
 
 async def _redis_schedule_retry(chat_id, message_id, text, reply_markup, execute_at: int):
-    """Schedule a retry in Redis sorted set. Payload stored as JSON."""
     if _redis is None:
         return
     payload = {
@@ -1459,7 +1196,6 @@ async def _redis_schedule_retry(chat_id, message_id, text, reply_markup, execute
 
 
 async def schedule_retry_via_redis_or_local(query, text, reply_markup=None, delay=1):
-    # Try Redis-based scheduling first
     try:
         chat_id = getattr(getattr(query, "message", None), "chat_id", None)
         message_id = getattr(getattr(query, "message", None), "message_id", None)
@@ -1469,7 +1205,6 @@ async def schedule_retry_via_redis_or_local(query, text, reply_markup=None, dela
             return
     except Exception:
         logger.exception("schedule_retry_via_redis_or_local failed")
-    # Fallback: use in-process scheduler
     _schedule_retry(query, text, reply_markup=reply_markup, delay=delay)
 
 
@@ -1493,7 +1228,6 @@ async def _process_redis_retry_item(application, raw_member: str):
             except Exception:
                 pass
         except Exception as e:
-            # If Telegram responds with RetryAfter, reschedule
             from telegram.error import RetryAfter
 
             if isinstance(e, RetryAfter):
@@ -1511,27 +1245,15 @@ async def _process_redis_retry_item(application, raw_member: str):
         logger.exception("Failed to process redis retry item: %s", raw_member)
 
 
-# Background cache cleanup interval (seconds). Default: 300 (5 minutes).
 CACHE_CLEANUP_INTERVAL = env_int("CACHE_CLEANUP_INTERVAL", 300)
 
 
+# ----------  workers  ----------
 def _prune_all_caches():
-    """Prune all in-memory caches in a single pass.
-
-    Iterates each cache and removes TTL-expired entries, then enforces
-    the per-cache maximum size cap.  Called periodically by the background
-    cleanup worker (:func:`start_cache_cleanup_worker`) to prevent stale
-    entries from accumulating when on-demand pruning thresholds are not
-    reached (e.g. ``_SESSION_KEEP_OPEN`` only prunes when >75% full).
-
-    Skips caches that have no TTL mechanism (``CALLBACK_MAP``, which is
-    pruned only on insert by size, not by time).
-    """
     _prune_count_cache()
     _prune_page_cache()
     _prune_callback_resolve_cache()
 
-    # _COUNT_CACHE_LOCKS — remove locks older than _COUNT_CACHE_LOCKS_TTL (5 min)
     now_ccl = time.time()
     cutoff_ccl = now_ccl - _COUNT_CACHE_LOCKS_TTL
     stale_ccl = [k for k, (_, created) in _COUNT_CACHE_LOCKS.items() if created < cutoff_ccl]
@@ -1548,7 +1270,6 @@ def _prune_all_caches():
             except StopIteration:
                 break
 
-    # _SESSION_KEEP_OPEN — remove entries older than GUI_SESSION_TTL
     now = time.time()
     cutoff_sk = now - GUI_SESSION_TTL
     stale_sk = [k for k, ts in _SESSION_KEEP_OPEN.items() if ts < cutoff_sk]
@@ -1565,7 +1286,6 @@ def _prune_all_caches():
             except StopIteration:
                 break
 
-    # _LAST_CALLBACK — remove entries older than 30s (the debounce window)
     cutoff_lc = now - 30.0
     stale_lc = [k for k, ts in _LAST_CALLBACK.items() if ts < cutoff_lc]
     for k in stale_lc:
@@ -1581,10 +1301,8 @@ def _prune_all_caches():
             except StopIteration:
                 break
 
-    # _USER_BUCKETS — remove entries inactive for >1 hour (stale-first + supplement)
     _prune_user_buckets()
 
-    # _RETRY_QUEUE — remove completed/cancelled tasks
     stale_rq = [k for k, v in _RETRY_QUEUE.items() if v.done()]
     for k in stale_rq:
         try:
@@ -1594,16 +1312,6 @@ def _prune_all_caches():
 
 
 async def start_cache_cleanup_worker():
-    """Background worker that periodically prunes all in-memory caches.
-
-    Runs ``_prune_all_caches()`` every ``CACHE_CLEANUP_INTERVAL`` seconds
-    (default 300 = 5 minutes, configurable via the ``CACHE_CLEANUP_INTERVAL``
-    env var).  This prevents stale entries from accumulating even when the
-    on-demand pruning thresholds (e.g. ``_SESSION_KEEP_OPEN`` 75% threshold)
-    are not reached.
-
-    Safe to call even if the event loop is not yet running.
-    """
     logger.info(
         "Starting cache cleanup worker (interval=%ds)",
         CACHE_CLEANUP_INTERVAL,
@@ -1620,9 +1328,6 @@ async def start_cache_cleanup_worker():
 
 
 async def start_redis_retry_worker(application):
-    """Background worker that executes due retry items from Redis sorted set.
-    This is safe to call even if Redis is not configured; it will just return.
-    """
     if _redis is None:
         logger.debug("Redis not configured; skipping redis retry worker")
         return
@@ -1632,13 +1337,11 @@ async def start_redis_retry_worker(application):
         while True:
             try:
                 now = int(time.time())
-                # Get due items
                 members = await _redis.zrangebyscore("retry:queue", "-inf", now, start=0, num=100)
                 if not members:
                     await asyncio.sleep(1)
                     continue
                 for raw in members:
-                    # Try to remove atomically; if removed, process
                     removed = await _redis.zrem("retry:queue", raw)
                     if removed:
                         await _process_redis_retry_item(application, raw)
@@ -1650,6 +1353,7 @@ async def start_redis_retry_worker(application):
     _bg_task(_worker())
 
 
+# ----------  message editing  ----------
 async def safe_edit_message(
     query,
     text: str,
@@ -1657,17 +1361,6 @@ async def safe_edit_message(
     action_key: str = None,
     debounce_interval: float = None,
 ):
-    """Edit a CallbackQuery message safely with rate-limiting, debounce,
-    and automatic retry for RetryAfter.
-
-    Behavior:
-    - Debounces rapid repeated presses per-user using `_is_debounced`.
-    - Checks global and per-user token buckets; if tokens unavailable,
-      schedules a retry after the estimated wait time.
-    - Attempts edit; on RetryAfter, schedules a retry using the provided
-      retry_after value and returns False.
-    - Falls back to sending a new message if edit fails for other reasons.
-    """
     try:
         user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
         key = action_key or getattr(query, "data", None) or "callback"
@@ -1678,7 +1371,6 @@ async def safe_edit_message(
                 pass
             return False
 
-        # Check tokens
         uid = user_id or 0
         ok, wait = await _consume_token(uid)
         if not ok:
@@ -1690,8 +1382,6 @@ async def safe_edit_message(
                 pass
             return False
 
-        # Detect photo vs text messages: photos need edit_caption,
-        # text messages need edit_message_text.
         _msg = getattr(query, "message", None)
         if _msg and getattr(_msg, "photo", None):
             await _msg.edit_caption(caption=text, reply_markup=reply_markup)
@@ -1708,7 +1398,6 @@ async def safe_edit_message(
             pass
         return False
     except Exception as e:
-        # Handle common benign BadRequest cases specially to avoid noisy stacktraces
         msg = str(e)
         if isinstance(e, BadRequest) and ("Message is not modified" in msg or "message is not modified" in msg):
             logger.debug("Edit skipped: message not modified")
@@ -1717,7 +1406,6 @@ async def safe_edit_message(
         try:
             _fb_msg = getattr(query, "message", None)
             if _fb_msg and getattr(_fb_msg, "photo", None):
-                # Photo message: try edit_caption before giving up
                 try:
                     await _fb_msg.edit_caption(caption=text, reply_markup=None)
                 except Exception:
@@ -1730,10 +1418,6 @@ async def safe_edit_message(
 
 
 async def safe_answer(query, text: str = None):
-    """Safely answer a CallbackQuery, ignoring expired/old-query errors.
-
-    Returns True if answered (or no-op), False if ignored due to being too old.
-    """
     try:
         if text is not None:
             await query.answer(text=text)
@@ -1742,11 +1426,9 @@ async def safe_answer(query, text: str = None):
         return True
     except BadRequest as e:
         m = str(e)
-        # Telegram returns BadRequest for expired callback queries — ignore those.
         if "Query is too old" in m or "query id is invalid" in m:
             logger.debug("Ignoring expired callback query: %s", m)
             return False
-        # Treat other benign BadRequest messages quietly when possible
         if "message is not modified" in m.lower():
             logger.debug("Ignoring 'message is not modified' while answering callback")
             return True
@@ -1757,11 +1439,11 @@ async def safe_answer(query, text: str = None):
         return False
 
 
-# Constants
-MAX_CATEGORY_NAME_LENGTH = 30  # Maximum allowed length for category names
-PAGE_SIZE = 50  # Default number of items per page for pagination
+MAX_CATEGORY_NAME_LENGTH = 30
+PAGE_SIZE = 50
 
 
+# ----------  courses page builder  ----------
 def build_courses_page(
     all_courses,
     page: int = 1,
@@ -1774,16 +1456,8 @@ def build_courses_page(
     store_page_ref: bool = False,
     search_ref: str = None,
 ):
-    """Builds the text and InlineKeyboardMarkup for a courses page.
-
-    `all_courses` may be either the full list of items or, when
-    `is_page=True`, already the list of items for the requested page.
-
-    Returns (text, InlineKeyboardMarkup) or (None, None) when no items.
-    """
     page_size = PAGE_SIZE
     try:
-        # If the caller passed in pre-sliced page items, use them directly.
         if is_page:
             display = list(all_courses) if all_courses is not None else []
             effective_total = total_count if total_count is not None else len(display)
@@ -1807,10 +1481,6 @@ def build_courses_page(
             effective_total,
         )
 
-        # Compute total pages once and use it consistently to decide
-        # whether to show Next / End buttons. This avoids edge cases
-        # where an imprecise `effective_total` caused a Next button to
-        # appear on the final page.
         try:
             total_pages = math.ceil(effective_total / page_size) if effective_total is not None else page
         except Exception:
@@ -1824,8 +1494,6 @@ def build_courses_page(
         keyboard = []
         for c in display:
             try:
-                # Determine course's category: prefer explicit field on item,
-                # else use the `category` argument passed to this page builder.
                 course_cat = c.get("category") if isinstance(c, dict) else None
                 if not course_cat:
                     course_cat = category
@@ -1834,16 +1502,9 @@ def build_courses_page(
                 if not name:
                     logger.debug("build_courses_page: skipping course without name: %s", repr(c))
                     continue
-                # details callback may omit back token if too long; _make_course_ref handles that
-                # Ensure coach-origin pages pass the coach as origin_context so
-                # Back returns to the coach's main course list rather than the
-                # course's category.
                 make_origin_ctx = origin_context
                 try:
                     if origin_type == "coach" and (not make_origin_ctx) and category:
-                        # `category` argument contains the coach name when
-                        # `origin_type=='coach'` (see callers), so use it as
-                        # the origin_context for details refs.
                         make_origin_ctx = category
                 except Exception:
                     make_origin_ctx = origin_context
@@ -1868,15 +1529,10 @@ def build_courses_page(
         logger.exception("build_courses_page: unexpected error")
         return None, None
 
-    # Pagination controls (Previous / Next)
     pagination_buttons = []
     if start > 0:
         if origin_type == "category" and category:
             if store_page_ref:
-                # store compact page payload and link to it. When the full
-                # `all_courses` list is available we can populate the target
-                # page items; otherwise store only the metadata so the
-                # handler can fetch the page server-side on demand.
                 try:
                     items_to_store = None
                     if not is_page and hasattr(all_courses, "__len__"):
@@ -1918,8 +1574,6 @@ def build_courses_page(
                         )
             else:
                 prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page - 1}"
-                # preserve origin context and origin page so Prev/Next keep the
-                # same parent pagination when navigating between course pages
                 if origin_context:
                     prev_cb = (
                         prev_cb
@@ -2021,20 +1675,15 @@ def build_courses_page(
     if pagination_buttons:
         keyboard.append(pagination_buttons)
 
-    # Defensive: ensure we don't exceed Telegram's inline keyboard button limits.
-    # Telegram limits ~100 buttons per message; be conservative and cap at 90.
     try:
         total_buttons = sum(len(r) for r in keyboard)
     except Exception:
         total_buttons = 0
     MAX_BUTTONS = 90
     if total_buttons > MAX_BUTTONS:
-        # Reduce the number of course rows shown to fit within MAX_BUTTONS.
-        # Each course row typically has 2 buttons; reserve some slots for nav/breadcrumb.
         reserved = 6
         max_course_buttons = max(1, MAX_BUTTONS - reserved)
         max_course_rows = max_course_buttons // 2
-        # Recompute display to the smaller size and rebuild keyboard
         display = display[:max_course_rows]
         keyboard = []
         for c in display:
@@ -2061,7 +1710,6 @@ def build_courses_page(
                 )
             except Exception:
                 continue
-        # Re-add a minimal pagination row if necessary
         pagination_buttons = []
         if start > 0:
             prev_cb = f"courses::global::{page - 1}" if origin_type == "global" else prev_cb
@@ -2072,32 +1720,19 @@ def build_courses_page(
         if pagination_buttons:
             keyboard.append(pagination_buttons)
 
-    # Compute total pages for End button placement
     try:
         total_pages = math.ceil(effective_total / page_size) if effective_total is not None else page
     except Exception:
         total_pages = page
 
-    # Prepare breadcrumb/home row: always show Home; when there are
-    # multiple pages and we're not on the last page, show an End button
-    # beside Home. If `category` is provided, include it as a breadcrumb
-    # button as well for context.
     try:
-        # Choose Home callback depending on origin: global pages go to
-        # explicit `courses::global::<page>` callbacks; category pages
-        # use `courses::category::<category>::<page>` so the handler can
-        # unambiguously route the request.
         breadcrumb_buttons = None
-        # Decide Home callback and visibility based on origin
         if origin_type == "global":
-            # Show Home for global listing only when not on the first page
             if page > 1:
                 breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="courses::global::1")]
             else:
                 breadcrumb_buttons = None
         elif origin_type == "coach" and category:
-            # For coach-origin pages, Home should return to the coach's
-            # course list page 1. Hide the Home button when already on page 1.
             if page > 1:
                 breadcrumb_buttons = [
                     InlineKeyboardButton(
@@ -2108,9 +1743,6 @@ def build_courses_page(
             else:
                 breadcrumb_buttons = None
         elif origin_type == "category" and category:
-            # For category-origin pages, Home should return to the category's
-            # course list page 1 (keep user inside the same category). Hide
-            # the Home button when already on page 1.
             if page > 1:
                 breadcrumb_buttons = [
                     InlineKeyboardButton(
@@ -2121,17 +1753,13 @@ def build_courses_page(
             else:
                 breadcrumb_buttons = None
         else:
-            # Default Home goes to the top-level categories view
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="back_to_cats")]
 
-        # If there are multiple pages and we're not on the last page, show an End button.
         if total_pages > 1 and page < total_pages:
-            # build end callback depending on origin type
             if origin_type == "category" and category:
                 if store_page_ref:
                     try:
                         items_to_store = None
-                        # compute items for final page only when full list is available
                         if not is_page and hasattr(all_courses, "__len__"):
                             start_end = (total_pages - 1) * page_size
                             slice_items = all_courses[start_end : start_end + page_size]
@@ -2218,33 +1846,23 @@ def build_courses_page(
                 end_cb = f"courses::global::{total_pages}"
             breadcrumb_buttons.append(InlineKeyboardButton("⏭️ End", callback_data=end_cb))
 
-        # insert breadcrumb row (Home +/- End) when present
         if breadcrumb_buttons:
             keyboard.insert(0, breadcrumb_buttons)
 
     except Exception:
         pass
 
-    # (Breadcrumb row inserted above with Home/End when applicable)
 
-    # Ensure a clear Back button for category-origin pages so users can
-    # return to the categories listing (consistent with other views).
     try:
         if origin_type == "category":
-            # For category-origin pages: Home -> top-level categories,
-            # Back -> return to the parent/topic view (origin_context if provided).
             if not any((getattr(b, "text", "") == "🔙 Back") for row in keyboard for b in row):
-                # prefer origin_context (parent path) when available
                 target = origin_context or category
                 if target:
-                    # If origin_context points to the categories listing (special sentinel),
-                    # route back to the correct categories page instead of a showcat.
                     if origin_context == "categories":
                         back_cb = f"categories_page::{origin_context_page or 1}"
                     elif origin_context == "back_to_cats":
                         back_cb = "back_to_cats"
                     else:
-                        # Preserve the parent page when returning to the target
                         back_page = origin_context_page if origin_context_page is not None else page
                         back_cb = _shorten_showcat_cb(str(target), back_page)
                 else:
@@ -2265,9 +1883,8 @@ def build_courses_page(
     return text, InlineKeyboardMarkup(keyboard)
 
 
-# Input Validation for Category Name
+# ----------  browse commands  ----------
 async def help_command(update: Update, context: CallbackContext):
-    """Display the help message with available commands."""
     help_message = (
         "📚 **Course Navigator Bot** — I'll help you find and manage courses organized by coaches and categories!\n\n"
         "/start - Set your name and introduce yourself\n"
@@ -2285,8 +1902,6 @@ async def help_command(update: Update, context: CallbackContext):
 
 
 async def list_categories(update: Update, context: CallbackContext):
-    """Show every category as an inline button that opens its courses."""
-    # Show paginated top-level categories (page 1)
     try:
         await categories_page(update.message, context, page=1)
     except Exception:
@@ -2294,14 +1909,8 @@ async def list_categories(update: Update, context: CallbackContext):
         await update.message.reply_text("An unexpected error occurred. Please try again later.")
 
 
+# ----------  category pages  ----------
 async def createcat_page(update_or_message, context: CallbackContext, *, page: int = 1):
-    """Paginated top-level categories view for the `/create_category` flow.
-
-    Buttons use `createcat_parent::{name}` callback_data so the
-    existing `handle_create_category_parent` handler can be reused.
-    Accepts either a `Message` (initial call) or a `CallbackQuery`
-    (callback_data: `createcat_page::{page}`).
-    """
     query = getattr(update_or_message, "callback_query", None)
     is_query = query is not None
     if is_query:
@@ -2317,7 +1926,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         except Exception:
             page = 1
 
-    # Store the page for backtracing after category creation
 
     try:
         context.user_data["createcat_last_page"] = page
@@ -2340,7 +1948,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        # Use server-side pagination: cached count + sort + skip/limit for top-level categories
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         async with _db_timing(f"createcat_page:{page}"):
@@ -2357,7 +1964,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         cats = []
         total = 0
 
-    # cats already contains only the current page slice (server-side)
     page_cats = cats
 
     if not page_cats and not is_query:
@@ -2365,7 +1971,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         return
 
     keyboard = []
-    # Provide explicit Top-level option
     keyboard.append([InlineKeyboardButton("(Top-level)", callback_data="createcat_parent::")])
     for cat in page_cats:
         keyboard.append(
@@ -2383,7 +1988,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"createcat_page::{page - 1}"))
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"createcat_page::{page + 1}"))
-    # End (only show when there are more pages beyond the current one)
     if total_pages > 1 and page < last_page:
         nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"createcat_page::{last_page}"))
 
@@ -2400,18 +2004,12 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
 
 
 async def children_page(update_or_message, context: CallbackContext, parent: str, *, page: int = 1):
-    """Paginated child categories view for a given `parent`.
-
-    Shows child categories of `parent` with `showcat::` callbacks so the
-    user can inspect the newly created child. Accepts Message or CallbackQuery.
-    """
     query = getattr(update_or_message, "callback_query", None)
     is_query = query is not None
     if is_query:
         await safe_answer(query)
         data = query.data
         parts = data.split("::")
-        # support showcat::<path>::<page> format — ignored here, page parsed below
         if len(parts) > 2:
             try:
                 page = int(parts[-1])
@@ -2431,7 +2029,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        # Use server-side pagination for children; fetch only this page slice
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
         async with _db_timing(f"children_page:{parent}:{page}"):
@@ -2446,7 +2043,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     except Exception:
         children = []
 
-    # children already contains only the current page slice (server-side)
     sorted_children = sorted(children, key=lambda c: (c.get("name") or "").lower())
     page_size = PAGE_SIZE
     page_children = sorted_children
@@ -2462,13 +2058,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             await update_or_message.reply_text("No subcategories available.")
         return
 
-    # When linking into a child category, store a short callback payload so
-    # the callback_data remains under Telegram's 64-byte limit. Payload
-    # includes child path and parent page info so the child can return to
-    # the same parent page via its Up/Back buttons.
-    # Batch-check which of the page children have their own children to
-    # avoid N queries. This mirrors the optimization used in
-    # `categories_page` above.
     child_names = [c.get("name") for c in page_children if c.get("name")]
     names_with_children = set()
     if child_names:
@@ -2478,9 +2067,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             names_with_children = set()
 
     keyboard = []
-    # Capture a compact parent index (paths or names) to persist with
-    # child callbacks. This hidden tracker lets us reconstruct the
-    # parent's full index quickly on Back/Forward without extra DB hits.
     try:
         parent_index = [
             {
@@ -2503,8 +2089,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
             "parent_index": parent_index,
         }
         key = _store_callback_payload(payload)
-        # Prefetch the child's first courses page in background to
-        # improve perceived responsiveness when users open it.
         try:
             if _redis is not None:
                 _bg_task(_prefetch_category_page(child_path, page=1))
@@ -2524,7 +2108,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     last_page = max(1, total_pages)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(parent, page - 1)))
-        # Only show Home when not already on the first page
         nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent, 1)))
     if page < last_page:
         nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent, page + 1)))
@@ -2533,11 +2116,9 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
     if nav:
         keyboard.append(nav)
 
-    # Up button to parent view
     pdoc = await db.categories.find_one({"name": parent})
     ppath = pdoc.get("path") if pdoc and pdoc.get("path") else parent
     keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
-    # Add Search button for child categories/coaches
     try:
         keyboard.append([InlineKeyboardButton("🔍 Search", callback_data=f"search_categories::{page}")])
     except Exception:
@@ -2553,11 +2134,6 @@ async def children_page(update_or_message, context: CallbackContext, parent: str
 
 
 async def categories_page(update_or_message, context: CallbackContext, *, page: int = 1):
-    """Paginated top-level categories view.
-
-    Accepts either a `Message` (from the `/categories` command) or a
-    `CallbackQuery` (callback_data: `categories_page::{page}`).
-    """
     query = getattr(update_or_message, "callback_query", None)
     is_query = query is not None
     if is_query:
@@ -2582,14 +2158,19 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
                 await update_or_message.reply_text("Error: Unable to connect to the database.")
             return
 
-        # Use server-side pagination for categories listing. Fetch only
-        # the minimal fields (name/path) and defer any child/course
-        # checks until the user actually opens a parent (AJAX-style).
         page_size = PAGE_SIZE
-        start = (page - 1) * page_size
         async with _db_timing(f"categories_page:{page}"):
             filter_q = TOP_LEVEL_FILTER
             total = await _get_total_count(db, "categories", filter_q, ttl=30)
+            try:
+                total_pages = max(1, (total - 1) // page_size + 1) if total else 1
+                if page < 1:
+                    page = 1
+                elif page > total_pages:
+                    page = total_pages
+            except Exception:
+                pass
+            start = (page - 1) * page_size
             proj = {"name": 1, "path": 1, "parent": 1, "_id": 1}
             raw = (
                 await db.categories.find(filter_q, proj)
@@ -2607,8 +2188,6 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             len(cats),
             have_more,
         )
-        # Fallback: some data models store top-level categories with parent==None
-        # or an empty string. If we got no results, try relaxed filter once.
         page_cats = cats
         if not page_cats and total == 0:
             try:
@@ -2633,8 +2212,6 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
         keyboard = []
         for cat in page_cats:
             cat_path = cat.get("path") or cat.get("name")
-            # Persist a short ref including the current categories page so
-            # returning from the category view restores the same page.
             payload = {"type": "showcat", "path": cat_path, "from_parent": "categories", "parent_page": page}
             key = _store_callback_payload(payload)
             try:
@@ -2642,9 +2219,6 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             except Exception:
                 pass
 
-            # For top-level categories we deliberately do not append an '(empty)'
-            # suffix — child/course checks are deferred until the user opens
-            # the category (AJAX-style).
             display_name = cat.get("name") if isinstance(cat, dict) else str(cat)
             cb = f"showcat_ref::{key}"
             try:
@@ -2652,8 +2226,6 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
             except Exception:
                 pass
 
-            # Prefetch the child's first courses page in background to
-            # improve perceived responsiveness when users open it.
             try:
                 if _redis is not None:
                     _bg_task(_prefetch_category_page(cat_path, page=1))
@@ -2684,7 +2256,6 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     if nav:
         keyboard.append(nav)
 
-    # Breadcrumb / Home row: show Home only when not already on page 1
     try:
         if page > 1:
             breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data="categories_page::1")]
@@ -2692,10 +2263,8 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     except Exception:
         pass
 
-        # Add Search button for categories
     keyboard.append([InlineKeyboardButton("🔍 Search", callback_data=f"search_categories::{page}")])
 
-    # Back to search results when the user reached /categories from a search
     try:
         results_row = _back_to_results_row(context)
         if results_row:
@@ -2716,8 +2285,8 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     return
 
 
+# ----------  debug  ----------
 async def debug_db(update: Update, context: CallbackContext):
-    """Owner-only debug command returning basic DB diagnostics."""
     try:
         owner_env = os.getenv("BOT_OWNER_ID")
         if owner_env is None:
@@ -2757,19 +2326,16 @@ async def debug_db(update: Update, context: CallbackContext):
         indexes = f"error: {e}"
 
     msg = f"categories_count: {cat_count}\nindexes: {list(indexes.keys()) if isinstance(indexes, dict) else indexes}\nsample: {sample}"
-    # Trim if too long
     if len(msg) > 4000:
         msg = msg[:3990] + "..."
     await update.message.reply_text(msg)
 
 
+# ----------  coach views  ----------
 async def show_coach_handler(update: Update, context: CallbackContext):
-    """Show courses for a selected coach. Supports coaches stored in a `coaches` collection or derived from categories/courses."""
     query = update.callback_query
     await safe_answer(query)
     raw = getattr(query, "data", "") or ""
-    # Support multiple callback formats: 'coach_<slug>' (legacy) and
-    # 'coach::<slug>::<page>' (explicit). Default to page=1.
     page = 1
     page_size = PAGE_SIZE
     coach_slug = None
@@ -2784,13 +2350,11 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                 except Exception:
                     page = 1
         elif raw.startswith("coach_"):
-            # legacy underscore format: coach_<slug>
             try:
                 coach_slug = urllib.parse.unquote_plus(raw.split("_", 1)[1])
             except Exception:
                 coach_slug = raw
         else:
-            # Fallback: treat entire payload as slug
             coach_slug = urllib.parse.unquote_plus(raw)
     except Exception:
         coach_slug = urllib.parse.unquote_plus(raw)
@@ -2804,7 +2368,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
         )
         return
 
-    # Try to find coach by slug in dedicated collection
     coach_name = None
     try:
         if hasattr(db, "coaches"):
@@ -2814,21 +2377,11 @@ async def show_coach_handler(update: Update, context: CallbackContext):
     except Exception:
         coach_name = None
 
-    # Fallback: treat slug as a name
     if not coach_name:
         coach_name = urllib.parse.unquote_plus(coach_slug)
 
-    # Collect all courses for this coach: prefer explicit 'coach' field, else category name match
     try:
-        # Query only categories that could contain this coach's courses or
-        # whose name matches the coach (legacy modeling). This avoids
-        # fetching the entire collection into memory.
         filter_q = {"$or": [{"courses.coach": coach_name}, {"name": coach_name}]}
-        # Use aggregation to unwind courses and project only the fields we need
-        # This avoids transferring entire category documents when only course
-        # metadata is required for coach views.
-        # Paginated aggregation: count total matching coach courses, then
-        # fetch only the requested page of items server-side.
         start = (page - 1) * page_size
         items_pipeline = [
             {"$match": filter_q},
@@ -2847,7 +2400,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             {"$limit": page_size + 1},
         ]
         async with _db_timing(f"show_coach:{coach_name}:{page}"):
-            # Try to serve a cached page for this coach first (short TTL)
             cache_key = f"page:coach:{coach_name}:{page}"
             cached = _get_cached_page(cache_key)
             if cached is not None:
@@ -2857,7 +2409,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                     items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
                 except Exception:
                     items = []
-                # cache the raw items briefly to improve UX on rapid nav
                 try:
                     _set_cached_page(cache_key, items, ttl=3)
                 except Exception:
@@ -2865,7 +2416,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
         has_more = len(items) > page_size
         coach_courses = items[:page_size]
         coach_courses = sorted(coach_courses, key=lambda c: (c.get("name") or "").lower())
-        # Compute accurate total for coach by aggregating on the server when possible
         try:
             cnt_doc = await db.categories.aggregate(
                 [
@@ -2893,7 +2443,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
             is_page=True,
             store_page_ref=True,
         )
-        # Add Search button for this coach's courses
         try:
             kb = list(reply_markup.inline_keyboard)
             kb.append(
@@ -2904,7 +2453,6 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                     ),
                 ],
             )
-            # Back to search results when the user came from a search
             results_row = _back_to_results_row(context)
             if results_row:
                 kb.append(results_row)
@@ -2925,11 +2473,9 @@ async def show_coach_handler(update: Update, context: CallbackContext):
 
 
 async def show_coach_in_category(update: Update, context: CallbackContext):
-    """Handle coach selection within a specific category: coach_in_cat::{category}::{coach_slug}"""
     query = update.callback_query
     await safe_answer(query)
     data = query.data
-    # Support short stored refs for coach_in_cat (coach_in_cat_ref::<key>)
     parent_origin = None
     parent_origin_page = None
     search_ref = None
@@ -2944,7 +2490,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                 action_key=getattr(query, "data", None),
             )
             return
-        # payload contains category, coach_slug, page and optionally from_parent/parent_page/search_ref
         category = payload.get("category")
         coach_slug = payload.get("coach_slug")
         page = int(payload.get("page", 1) or 1)
@@ -2960,30 +2505,21 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             await safe_edit_message(query, "Invalid coach callback.", action_key=getattr(query, "data", None))
             return
         parts = data.split("::")
-        # Accept either: coach_in_cat::{category}::{coach_slug}
-        # Or: coach_in_cat::{category}::{coach_slug}::{type_slug}
         if len(parts) < 3:
             await safe_edit_message(query, "Invalid coach callback.", action_key=getattr(query, "data", None))
             return
             return
         category = urllib.parse.unquote_plus(parts[1])
         coach_slug = urllib.parse.unquote_plus(parts[2])
-        # Support optional forms:
-        #  - coach_in_cat::{category}::{coach_slug}
-        #  - coach_in_cat::{category}::{coach_slug}::{type_slug}
-        #  - coach_in_cat::{category}::{coach_slug}::{page}
-        #  - coach_in_cat::{category}::{coach_slug}::{type_slug}::{page}
         type_slug = None
         page = 1
         if len(parts) >= 4:
             maybe = parts[3]
-            # if numeric, treat as page
             try:
                 page = int(maybe)
             except Exception:
                 type_slug = urllib.parse.unquote_plus(maybe)
         if len(parts) >= 5:
-            # treat parts[4] as page if present
             try:
                 page = int(parts[4])
             except Exception:
@@ -2998,7 +2534,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         )
         return
 
-    # Resolve coach name: try coaches collection then fallback to slug-as-name
     coach_name = None
     try:
         if hasattr(db, "coaches"):
@@ -3011,26 +2546,19 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         coach_name = coach_slug
 
     try:
-        # First, check if the coach is modeled as a child category under this category
         coach_child = await db.categories.find_one({"name": coach_name, "parent": category})
         coach_courses = []
         if coach_child:
-            # use child's embedded courses
             for crs in coach_child.get("courses", []):
                 coach_courses.append({"name": crs.get("name"), "link": crs.get("link"), "category": coach_name})
-            # Remember that the user is viewing this coach child category so
-            # `/add` can automatically target this exact location (child category).
             try:
-                # prefer storing the canonical path when available
                 last_view = coach_child.get("path") or coach_child.get("name")
                 context.user_data["last_viewed_category"] = last_view
-                # also store explicit ids to allow id-based resolution later
                 try:
                     if coach_child.get("id"):
                         context.user_data["last_viewed_category_id"] = coach_child.get("id")
                 except Exception:
                     pass
-                # store parent for quick resolution
                 try:
                     if coach_child.get("parent"):
                         context.user_data["last_viewed_category_parent"] = coach_child.get("parent")
@@ -3039,7 +2567,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             except Exception:
                 pass
         else:
-            # Fallback: look for courses in the parent category that have a 'coach' field
             category_doc = await db.categories.find_one({"name": category})
             if not category_doc or not category_doc.get("courses"):
                 await safe_edit_message(
@@ -3050,7 +2577,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                 return
 
             for crs in category_doc.get("courses", []):
-                # If a type filter was provided, only include courses matching that type
                 if type_slug:
                     c_type = crs.get("type") or crs.get("category_type") or crs.get("categoryType")
                     if not c_type:
@@ -3062,7 +2588,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                         coach_courses.append({"name": crs.get("name"), "link": crs.get("link"), "category": category})
 
         coach_courses = sorted(coach_courses, key=lambda c: (c.get("name") or "").lower())
-        # Determine parent path so Home can return to the parent directory
         origin_ctx = None
         try:
             cdoc = await db.categories.find_one({"name": category})
@@ -3074,14 +2599,8 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         except Exception:
             origin_ctx = None
 
-        # If this coach/category view originated from a parent (e.g., the
-        # paginated categories listing), prefer using that parent_origin so
-        # Back returns to the correct parent page.
         if parent_origin:
             origin_ctx = parent_origin
-        # Ensure coach lists are fully paginated server-side: compute total
-        # and slice the requested page, then pass `is_page=True` with
-        # `total_count` so `build_courses_page` doesn't re-slice incorrectly.
         total_courses = len(coach_courses)
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
@@ -3098,7 +2617,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             store_page_ref=True,
             search_ref=search_ref,
         )
-        # Add Search button for courses in this category
         try:
             kb = list(reply_markup.inline_keyboard)
             kb.append(
@@ -3109,7 +2627,6 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
                     ),
                 ],
             )
-            # Back to search results when this view came from search
             results_row = _back_to_results_row(context, search_ref)
             if results_row:
                 kb.append(results_row)
@@ -3137,11 +2654,8 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         )
 
 
+# ----------  types & search nav  ----------
 async def showtype_handler(update: Update, context: CallbackContext):
-    """Handle type selection inside a category.
-    Expected callback format:
-    showtype::{category}::{type_name}
-    """
     query = update.callback_query
     await safe_answer(query)
 
@@ -3150,7 +2664,6 @@ async def showtype_handler(update: Update, context: CallbackContext):
     type_name = ""
     search_ref = None
     if raw.startswith("showtype_ref::"):
-        # Compact ref form used when category/type names exceed 64 bytes
         try:
             payload = await _resolve_callback_payload(raw.split("::", 1)[1])
             if payload:
@@ -3203,10 +2716,8 @@ async def showtype_handler(update: Update, context: CallbackContext):
                     },
                 )
 
-        # Sort case-insensitive
         filtered_courses = sorted(filtered_courses, key=lambda c: (c.get("name") or "").lower())
 
-        # Determine parent so Home can return to parent directory
         origin_ctx = None
         try:
             cdoc = await db.categories.find_one({"name": category_name})
@@ -3226,7 +2737,6 @@ async def showtype_handler(update: Update, context: CallbackContext):
             origin_context=origin_ctx,
             search_ref=search_ref,
         )
-        # Add Search button for courses in this category
         try:
             kb = list(reply_markup.inline_keyboard)
             kb.append(
@@ -3237,7 +2747,6 @@ async def showtype_handler(update: Update, context: CallbackContext):
                     ),
                 ],
             )
-            # Back to search results when this view came from search
             results_row = _back_to_results_row(context, search_ref)
             if results_row:
                 kb.append(results_row)
@@ -3253,8 +2762,6 @@ async def showtype_handler(update: Update, context: CallbackContext):
             )
             return
 
-        # Keep this session open while browsing coach lists to avoid
-        # scheduled session closure interfering with navigation.
         try:
             _set_session_keep_open(query.message, True)
         except Exception:
@@ -3271,7 +2778,6 @@ async def showtype_handler(update: Update, context: CallbackContext):
 
 
 def _clear_design_pending(context):
-    """Pop and discard any pending category design from user_data."""
     try:
         context.user_data.pop("_pending_design", None)
         context.user_data.pop("_pending_design_key", None)
@@ -3279,20 +2785,12 @@ def _clear_design_pending(context):
         pass
 
 
-# How long a stored search-results ref stays usable for the
-# "Back to Results" button on deep views (seconds).
-SEARCH_NAV_TTL = 3600  # 1 hour
+SEARCH_NAV_TTL = 3600
 
-# user_data key shared with search handlers for the "Back to Results" nav ref
 SEARCH_NAV_USER_KEY = "search_results_nav"
 
 
 def _store_search_nav_ref(context, ref: str):
-    """Remember the most recent search results ref for this chat.
-
-    Used by the /categories view (and other deep views without a payload
-    ref) to offer a "Back to Results" button while the results are fresh.
-    """
     try:
         context.user_data[SEARCH_NAV_USER_KEY] = {"ref": ref, "ts": time.time()}
     except Exception:
@@ -3300,13 +2798,6 @@ def _store_search_nav_ref(context, ref: str):
 
 
 def _get_search_nav_ref(context) -> str | None:
-    """Return the chat's active search-results ref if it is still fresh.
-
-    Search handlers store ``context.user_data[SEARCH_NAV_USER_KEY]`` =
-    ``{"ref": <key>, "ts": <epoch>}`` whenever results are rendered. Deep
-    views (e.g. /categories) use this to offer a "🔙 Back to Results"
-    button while the results are recent.
-    """
     try:
         nav = context.user_data.get(SEARCH_NAV_USER_KEY) or {}
         ref = nav.get("ref")
@@ -3319,29 +2810,16 @@ def _get_search_nav_ref(context) -> str | None:
 
 
 def _back_to_results_row(context, search_ref: str = None):
-    """Return a keyboard row with a '🔙 Back to Results' button, or None.
-
-    Prefers an explicit ``search_ref`` (carried by the callback payload when
-    the view was opened from search results); otherwise falls back to the
-    chat's most recent search results ref (``search_results_nav``).
-    """
     ref = search_ref or _get_search_nav_ref(context)
     if not ref:
         return None
     try:
-        return [InlineKeyboardButton("🔙 Back to Results", callback_data=f"back_to_results::{ref}")]
+        return [InlineKeyboardButton("🔙 Back to Search Results", callback_data=f"back_to_results::{ref}")]
     except Exception:
         return None
 
 
 async def _send_design_photo(query, context, text, reply_markup):
-    """If a category design is pending in user_data, pop it and send the
-    design photo with text as caption and the inline keyboard; otherwise
-    fall back to safe_edit_message.
-
-    Includes the same debounce and token-bucket rate limiting that
-    safe_edit_message uses to avoid Telegram flood-control errors.
-    """
     try:
         pending_design = context.user_data.pop("_pending_design", None)
 
@@ -3351,7 +2829,6 @@ async def _send_design_photo(query, context, text, reply_markup):
                 user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
                 key = getattr(query, "data", None) or "send_photo"
                 if user_id and _is_debounced(user_id, key):
-                    # Restore design info so a later retry can pick it up
                     context.user_data["_pending_design"] = pending_design
                     try:
                         await safe_answer(query)
@@ -3362,7 +2839,6 @@ async def _send_design_photo(query, context, text, reply_markup):
                 uid = user_id or 0
                 ok, wait = await _consume_token(uid)
                 if not ok:
-                    # Restore design info so a later retry can pick it up
                     context.user_data["_pending_design"] = pending_design
                     await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
                     try:
@@ -3371,16 +2847,12 @@ async def _send_design_photo(query, context, text, reply_markup):
                         pass
                     return
 
-                # Try edit_caption first to preserve the original message.
-                # This avoids message position jumping and flickering.
                 try:
                     await query.message.edit_caption(caption=text, reply_markup=reply_markup)
                     return
                 except Exception:
                     pass
 
-                # Fall back to delete+send_photo if edit_caption fails
-                # (e.g., file_id expired, or the photo needs to be refreshed)
                 try:
                     await query.message.delete()
                     await context.bot.send_photo(
@@ -3394,10 +2866,8 @@ async def _send_design_photo(query, context, text, reply_markup):
                     pass
             except Exception:
                 pass
-        # Fallback: use safe_edit_message which handles both photo and text messages.
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
     except Exception:
-        # Final fallback: try safe_edit_message
         try:
             await safe_edit_message(
                 query,
@@ -3409,15 +2879,11 @@ async def _send_design_photo(query, context, text, reply_markup):
             pass
 
 
+# ----------  category view  ----------
 async def showcat_handler(update: Update, context: CallbackContext):
-    """Show courses in the chosen category as URL buttons."""
-    keyboard = []  # always initialize (fixes UnboundLocalError)
+    keyboard = []
     query = update.callback_query
     await safe_answer(query)
-    # Expect callback_data forms:
-    #  - showcat::{path_or_name}
-    #  - showcat::{path_or_name}::{page}
-    #  - showcat::{path_or_name}::from_parent::{parent_path}::{parent_page}
     raw = query.data
     try:
         logger.debug("showcat_handler: raw callback_data=%r", raw)
@@ -3428,7 +2894,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
     parent_origin_page = None
     encoded = ""
     search_ref = None
-    # Support short stored refs: `showcat_ref::<key>` -> resolve payload
     if raw.startswith("showcat_ref::"):
         key = raw.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
@@ -3440,42 +2905,34 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 action_key=getattr(query, "data", None),
             )
             return
-        # payload may contain `path`, optional `from_parent`, `parent_page`, hidden `parent_index`, and `search_ref` (when opened from search results)
         cat_path = payload.get("path")
         search_ref = payload.get("search_ref") or None
         parent_origin = payload.get("from_parent")
-        # parent_page may be stored as int or string; normalize to int when present
         parent_origin_page = None
         try:
             if "parent_page" in payload and payload.get("parent_page") is not None:
                 parent_origin_page = int(payload.get("parent_page"))
         except Exception:
             parent_origin_page = None
-        # capture any hidden parent_index (list of {path,name}) for fast Back/Forward
         parent_index = None
         try:
             if "parent_index" in payload and isinstance(payload.get("parent_index"), (list, tuple)):
                 parent_index = payload.get("parent_index")
         except Exception:
             parent_index = None
-        # child page (if stored) — preserve when provided
         page_from_callback = None
         try:
             if "page" in payload and payload.get("page") is not None:
                 page_from_callback = int(payload.get("page"))
         except Exception:
             page_from_callback = None
-        # ensure downstream logic that expects `encoded` works
         try:
             encoded = urllib.parse.quote_plus(cat_path) if cat_path else ""
         except Exception:
             encoded = ""
 
-        # If this payload is a parent-index back reference, render the parent
-        # page directly from the stored `parent_index` without extra DB hits.
         try:
             if payload.get("type") == "parent_index_back" and parent_index is not None:
-                # parent name/path
                 parent_name = payload.get("parent")
                 page = int(payload.get("parent_page") or 1)
                 page_size = int(payload.get("page_size") or PAGE_SIZE)
@@ -3484,14 +2941,12 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 slice_items = parent_index[start : start + page_size]
                 keyboard = []
                 for item in slice_items:
-                    # item expected to be dict {path, name} or fallback string
                     if isinstance(item, dict):
                         item_path = item.get("path") or item.get("name")
                         item_name = item.get("name") or item.get("path") or str(item_path)
                     else:
                         item_path = str(item)
                         item_name = item_path
-                    # create standard showcat payloads for the child entries
                     child_payload = {
                         "type": "showcat",
                         "path": item_path,
@@ -3504,7 +2959,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
                     key2 = _store_callback_payload(child_payload)
                     keyboard.append([InlineKeyboardButton(item_name, callback_data=f"showcat_ref::{key2}")])
 
-                # Navigation row
                 nav = []
                 total_pages = (total - 1) // page_size + 1 if total else 1
                 last_page = max(1, total_pages)
@@ -3512,17 +2966,14 @@ async def showcat_handler(update: Update, context: CallbackContext):
                     nav.append(
                         InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(parent_name, page - 1)),
                     )
-                    # Only show Home when not already on the first page
                     nav.append(InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(parent_name, 1)))
                 if page < last_page:
                     nav.append(InlineKeyboardButton("➡️ Next", callback_data=_shorten_showcat_cb(parent_name, page + 1)))
-                # Only show End when there are pages after the current one
                 if total_pages > 1 and page < last_page:
                     nav.append(InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(parent_name, last_page)))
                 if nav:
                     keyboard.append(nav)
 
-                # Back to search results when this view came from search
                 results_row = _back_to_results_row(context, search_ref)
                 if results_row:
                     keyboard.append(results_row)
@@ -3532,19 +2983,15 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 return
         except Exception:
             pass
-    # Handle from_parent suffix first (preserves parent page info while
-    # allowing child to open at page 1)
     elif "::from_parent::" in raw:
         left, right = raw.split("::from_parent::", 1)
         left_parts = left.split("::")
         encoded = left_parts[1] if len(left_parts) > 1 else ""
-        # left may optionally include a page too (rare)
         if len(left_parts) > 2:
             try:
                 page_from_callback = int(left_parts[2])
             except Exception:
                 page_from_callback = None
-        # parse right as parent_path::parent_page
         try:
             rp = right.split("::")
             parent_origin = urllib.parse.unquote_plus(rp[0]) if rp and rp[0] else None
@@ -3569,42 +3016,30 @@ async def showcat_handler(update: Update, context: CallbackContext):
             except Exception:
                 page_from_callback = None
 
-    # Current page for this category view (used when linking to coaches)
     page = page_from_callback or 1
-    # Normalize the encoded token: strip whitespace and unquote safely.
     try:
         encoded = (encoded or "").strip()
         cat_path = urllib.parse.unquote_plus(encoded)
     except Exception:
         cat_path = (encoded or "").strip()
-    # Persist originating categories page into user_data so other flows
-    # (e.g., add-course) can reference the page the user came from.
     try:
         if parent_origin == "categories" and parent_origin_page is not None:
             context.user_data["last_category_page"] = int(parent_origin_page)
         else:
-            # record the page we are currently viewing for convenience
             context.user_data["last_category_page"] = int(page)
     except Exception:
         pass
     db = await get_db()
-    # Try multiple resolution strategies to handle encoded/unencoded and
-    # legacy name/path mismatches. Try exact path, exact name, then
-    # fall back to the raw encoded token as well.
     category_doc = None
     try:
-        # Exact path match
         category_doc = await db.categories.find_one({"path": cat_path})
         if not category_doc:
-            # Exact name match
             category_doc = await db.categories.find_one({"name": cat_path})
         if not category_doc and encoded and encoded != cat_path:
-            # Try using the raw encoded token too (some callbacks send unquoted)
             category_doc = await db.categories.find_one({"path": encoded}) or await db.categories.find_one(
                 {"name": encoded},
             )
         if not category_doc:
-            # Last-ditch case-insensitive match on name (handles minor casing/whitespace)
             try:
                 category_doc = await db.categories.find_one(
                     {"name": {"$regex": f"^{re.escape(cat_path)}$", "$options": "i"}},
@@ -3614,7 +3049,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if not category_doc:
             await safe_edit_message(query, f"Category “{cat_path}” not found.", action_key=getattr(query, "data", None))
             return
-        # Debug: which field matched
         try:
             matched_on = None
             if category_doc.get("path") == cat_path:
@@ -3636,23 +3070,17 @@ async def showcat_handler(update: Update, context: CallbackContext):
         await safe_edit_message(query, f"Category “{cat_path}” not found.", action_key=getattr(query, "data", None))
         return
 
-    # category display name and path
     cat_name = category_doc.get("name")
     cat_path = category_doc.get("path") or cat_name
-    # Store category design photo info so _send_design_photo can attach
-    # it to the keyboard message (instead of sending a standalone photo).
     try:
         from handlers.category_design import get_category_design
 
         design_file_id = await get_category_design(db, cat_name)
         if design_file_id:
-            # Always set pending design so _send_design_photo can attach it
-            # (design_sent_key guard removed to fix photo disappearing on revisit)
             context.user_data["_pending_design"] = design_file_id
     except Exception:
         pass
 
-    # Remember the last viewed category so `/add` can preselect it
     try:
         context.user_data["last_viewed_category"] = cat_path
     except Exception:
@@ -3661,20 +3089,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
         await safe_edit_message(query, f"Category “{cat_name}” not found.", action_key=getattr(query, "data", None))
         return
 
-    # Goal: for a chosen category (topic), list coaches who have courses in this category.
-    # Prefer a dedicated `coaches` collection with a `topics` field; otherwise derive coaches from embedded course 'coach' fields.
     coaches = []
     try:
-        # Look for coaches that explicitly list this topic
         if hasattr(db, "coaches"):
-            # find coaches whose topics array contains this category name (case-insensitive)
-            # coaches collection is typically small but still limit the returned
-            # list to avoid unbounded memory usage.
             coaches = await db.coaches.find({"topics": cat_name}).to_list(length=PAGE_SIZE)
     except Exception:
         coaches = []
 
-    # If no dedicated coaches found, derive from embedded course 'coach' fields
     if not coaches:
         derived = {}
         for crs in category_doc.get("courses", []):
@@ -3682,10 +3103,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
             if coach_name:
                 slug = urllib.parse.quote_plus(coach_name)
                 derived[slug] = coach_name
-        # If still empty, we will fallback to showing the courses directly later
         coaches = [{"name": v, "slug": k} for k, v in derived.items()]
 
-    # First: show any child categories (sub-categories)
     try:
         try:
             logger.debug(
@@ -3697,7 +3116,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
             )
         except Exception:
             pass
-        # Server-side pagination for child categories under this category
         total_children = await _get_total_count(db, "categories", {"parent": cat_name}, ttl=60)
         page_size = PAGE_SIZE
         start = (page - 1) * page_size
@@ -3722,15 +3140,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
         children = []
 
     if children:
-        # Children were fetched server-side with skip/limit — they already
-        # represent the requested page slice. Avoid re-slicing here which
-        # produced empty pages when page>1 (start index >= len(children)).
-        # Keep deterministic ordering within the fetched page.
         sorted_children = sorted(children, key=lambda c: (c.get("name") or "").lower())
         page_children = sorted_children
 
         keyboard = []
-        # Batch-check children existence for page_children to avoid N queries
         child_names = [c.get("name") for c in page_children if c.get("name")]
         names_with_children = set()
         if child_names:
@@ -3745,7 +3158,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
             if search_ref:
                 payload["search_ref"] = search_ref
             key = _store_callback_payload(payload)
-            # Mark child as empty when it has neither sub-children nor courses
             try:
                 has_children = child.get("name") in names_with_children
                 courses = child.get("courses", []) if isinstance(child, dict) else []
@@ -3755,14 +3167,12 @@ async def showcat_handler(update: Update, context: CallbackContext):
             display = f"{child.get('name')}{' (empty)' if is_empty else ''}"
             keyboard.append([InlineKeyboardButton(display, callback_data=f"showcat_ref::{key}")])
 
-        # Navigation row (Previous / End / Next)
         nav = []
         total_pages = (total_children - 1) // page_size + 1 if total_children else 1
         last_page = max(1, total_pages)
         if page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=_shorten_showcat_cb(cat_path, page - 1)))
 
-        # Put End between Prev and Next; only show it when there's a later page
         if total_pages > 1 and page < last_page:
             end_btn = InlineKeyboardButton("⏭️ End", callback_data=_shorten_showcat_cb(cat_path, last_page))
             if page == 1:
@@ -3776,29 +3186,16 @@ async def showcat_handler(update: Update, context: CallbackContext):
         if nav:
             keyboard.append(nav)
 
-        # Breadcrumb / Home row (insert at top for context)
         try:
-            # Show Home only when not already on the first page; Home
-            # should return to this category's subcategories page 1.
             if page > 1:
                 breadcrumb_buttons = [InlineKeyboardButton("🏠 Home", callback_data=_shorten_showcat_cb(cat_path, 1))]
                 keyboard.insert(0, breadcrumb_buttons)
         except Exception:
             pass
 
-        # add up/back button to parent or top-level at the bottom for convenience
-        # If this view was opened via a stored `showcat_ref` from a parent,
-        # prefer returning to the recorded parent page (`parent_origin_page`).
         if parent_origin:
             try:
-                # Special sentinel 'categories' means return to the paginated
-                # top-level categories view rather than trying to open a
-                # category literally called 'categories'. Handle that case
-                # explicitly here.
                 if parent_index:
-                    # Create a stored back-ref that contains the parent's
-                    # compact index so we can render the parent page without
-                    # additional DB round-trips.
                     back_payload = {
                         "type": "parent_index_back",
                         "parent": parent_origin,
@@ -3825,7 +3222,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 keyboard.append([InlineKeyboardButton("🔙 Up", callback_data=_shorten_showcat_cb(ppath, page))])
             else:
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-        # Add Search button for courses in this category
         try:
             keyboard.append(
                 [
@@ -3838,7 +3234,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
         except Exception:
             pass
 
-        # Back to search results when this view came from search
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             keyboard.append(results_row)
@@ -3851,7 +3246,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
         )
         return
 
-    # If the category doc contains a nested 'types' (category_type) level, show types first
     type_keys = None
     for key in ("types", "category_types", "subtypes", "category_type"):
         if category_doc.get(key):
@@ -3859,7 +3253,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
             break
 
     if type_keys:
-        # Build type buttons; each type entry may be a string or dict with 'name'
         types_list = category_doc.get(type_keys) or []
         keyboard = []
         for t in types_list:
@@ -3877,27 +3270,18 @@ async def showcat_handler(update: Update, context: CallbackContext):
                     ),
                 ],
             )
-        # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
-        # Back to search results when this view came from search
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             keyboard.append(results_row)
         await _send_design_photo(query, context, f"{cat_name} — Select a type:", InlineKeyboardMarkup(keyboard))
         return
 
-    # If we found coaches, show them; otherwise fall back to showing courses in this category
     if coaches:
-        # Include the current category page in the coach callback so we can
-        # return the user to the same page after viewing details. Use short
-        # stored refs when the callback_data would exceed Telegram's 64-byte
-        # limit to avoid Button_data_invalid errors.
         keyboard = []
         for coach in coaches:
             coach_name = coach.get("name")
             coach_slug = coach.get("slug") or urllib.parse.quote_plus(coach_name)
-            # If we have a parent_origin, always persist the payload so we
-            # can carry parent_page info; otherwise try direct callback when short.
             if parent_origin:
                 payload = {
                     "type": "coach_in_cat",
@@ -3935,34 +3319,23 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 except Exception:
                     pass
             keyboard.append([InlineKeyboardButton(coach_name, callback_data=cb)])
-        # Back to this category view (preserve current page)
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(cat_path, page))])
-        # Back to search results when this view came from search
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             keyboard.append(results_row)
         await _send_design_photo(query, context, f"Coaches in '{cat_name}':", InlineKeyboardMarkup(keyboard))
         return
 
-    # Fallback: show courses if no coaches found
     courses = category_doc.get("courses", [])
     logger.debug("showcat_handler: category=%s courses_count=%s", cat_name, len(courses))
     if not courses:
-        # Offer a Back button so the user stays in the browsing flow instead
-        # of being dropped out with a plain message.
         parent = category_doc.get("parent")
         keyboard = []
-        # If this view was opened via a stored showcat_ref, prefer returning
-        # to the recorded parent_origin (which may be the paginated categories
-        # listing) using parent_origin_page when available.
         if parent_origin:
             try:
-                # Special sentinel 'categories' means return to the paginated
-                # top-level categories view at the recorded page.
                 if parent_origin == "categories":
                     back_cb = f"categories_page::{parent_origin_page or 1}"
                 else:
-                    # Otherwise treat parent_origin as a category name/path
                     try:
                         pdoc = await db.categories.find_one({"name": parent_origin})
                         ppath = pdoc.get("path") if pdoc and pdoc.get("path") else parent_origin
@@ -3978,14 +3351,12 @@ async def showcat_handler(update: Update, context: CallbackContext):
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=_shorten_showcat_cb(ppath, page))])
         else:
             keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
-    # Back to search results when this view came from search
     try:
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             keyboard.append(results_row)
     except Exception:
         pass
-    # Add Search button for courses in this category
     try:
         keyboard.append(
             [
@@ -3996,11 +3367,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
             ],
         )
     except Exception:
-        # Provide an inline "Add course" button that starts the /add flow with
-        # this category preselected. Store a short payload reference so the
-        # ConversationHandler can be entered via callback without exceeding
-        # Telegram callback_data limits.
-        # Use _send_design_photo so even empty categories show their design banner.
         await _send_design_photo(
             query,
             context,
@@ -4008,13 +3374,8 @@ async def showcat_handler(update: Update, context: CallbackContext):
             InlineKeyboardMarkup(keyboard),
         )
         return
-    # Use paginated courses view for this category. Pass parent path as
-    # origin_context so Home will return to the parent directory.
     page = page_from_callback or 1
     parent = category_doc.get("parent")
-    # Prefer the stored parent_origin (from a showcat_ref) so we restore
-    # the exact parent page the user navigated from; otherwise fall back
-    # to the category's DB parent path.
     origin_ctx = None
     if parent_origin:
         origin_ctx = parent_origin
@@ -4036,8 +3397,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
         search_ref=search_ref,
     )
     if not text:
-        # Even with no courses, keep the Back to Results button available
-        # when this view came from search results.
         results_markup = None
         try:
             results_row = _back_to_results_row(context, search_ref)
@@ -4052,7 +3411,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
             action_key=getattr(query, "data", None),
         )
         return
-    # Add Search button for courses in this category
     try:
         kb = list(reply_markup.inline_keyboard)
         kb.append(
@@ -4063,7 +3421,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 ),
             ],
         )
-        # Back to search results when this view came from search
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             kb.append(results_row)
@@ -4073,11 +3430,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
     await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
 
 
+# ----------  courses listing  ----------
 async def handle_back_to_cats(update: Update, context: CallbackContext):
-    """Handle the Back callback and show the categories list with search button."""
     query = update.callback_query
     await safe_answer(query)
-    # Delegate to the full categories_page which includes pagination, search button, etc.
     try:
         await categories_page(update, context, page=1)
     except Exception:
@@ -4090,20 +3446,14 @@ async def handle_back_to_cats(update: Update, context: CallbackContext):
 
 
 async def list_courses(update: Update, context: CallbackContext):
-    """List all available courses with pagination."""
     db = await get_db()
     if db is None:
         await update.message.reply_text("Error: Unable to connect to the database.")
         return
 
     try:
-        # Build a flattened list of courses via aggregation to avoid loading
-        # full category documents into memory.
         page = 1
         page_size = PAGE_SIZE
-        # Paginated aggregation for unified course listing. Fetch one extra
-        # item (page_size + 1) to detect whether a Next page exists without
-        # performing a full collection count.
         start = (page - 1) * page_size
         items_pipeline = [
             {"$unwind": "$courses"},
@@ -4129,7 +3479,6 @@ async def list_courses(update: Update, context: CallbackContext):
         has_more = len(items) > page_size
         all_courses = items[:page_size]
         all_courses = sorted(all_courses, key=lambda c: (c.get("name") or "").lower())
-        # Compute accurate total count for global listing when possible
         try:
             cnt_doc = await db.categories.aggregate(
                 [
@@ -4145,7 +3494,6 @@ async def list_courses(update: Update, context: CallbackContext):
         except Exception:
             total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
         if all_courses:
-            # Build unified page UI
             text, reply_markup = build_courses_page(
                 all_courses,
                 page=page,
@@ -4157,7 +3505,6 @@ async def list_courses(update: Update, context: CallbackContext):
             if not text:
                 await update.message.reply_text("No courses available.")
                 return
-            # Add Search button for all courses
             try:
                 kb = list(reply_markup.inline_keyboard)
                 kb.append([InlineKeyboardButton("\U0001f50d Search", callback_data=f"search_courses::global::{page}")])
@@ -4179,9 +3526,8 @@ async def list_courses(update: Update, context: CallbackContext):
 logger.info("[STATE] returning CREATE_CAT_NAME=%s id=%s", CREATE_CAT_NAME, id(CREATE_CAT_NAME))
 
 
+# ----------  category creation  ----------
 async def create_category(update: Update, context: CallbackContext):
-    # Present existing categories as optional parents
-    # Owner-only: restrict create category to bot owner
     try:
         owner_env = os.getenv("BOT_OWNER_ID")
         owner_id = int(owner_env) if owner_env else None
@@ -4213,8 +3559,6 @@ async def create_category(update: Update, context: CallbackContext):
     db = await get_db()
     cats = []
     try:
-        # Show only top-level parent categories for parent selection
-        # Limit results to avoid loading the entire collection in fallback paths
         page_size = PAGE_SIZE
         cats = (
             await db.categories.find({"parent": {"$exists": False}})
@@ -4225,12 +3569,10 @@ async def create_category(update: Update, context: CallbackContext):
     except Exception:
         cats = []
 
-    # Use paginated createcat_page for consistent viewing
     try:
         await createcat_page(update.message, context, page=1)
     except Exception:
         logger.exception("create_category: createcat_page failed, falling back to simple keyboard")
-        # Fallback to previous behavior
         keyboard = []
         keyboard.append([InlineKeyboardButton("(Top-level)", callback_data="createcat_parent::")])
         for cat in cats:
@@ -4250,10 +3592,8 @@ async def create_category(update: Update, context: CallbackContext):
 
 
 async def handle_create_category_parent(update: Update, context: CallbackContext):
-    """Callback handler to choose a parent for a new category."""
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard for create category callbacks
     try:
         owner_env = os.getenv("BOT_OWNER_ID")
         owner_id = int(owner_env) if owner_env else None
@@ -4266,7 +3606,6 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
     raw = query.data
     parent = None
     if raw.startswith("createcat_parent_ref::"):
-        # Compact ref form used when the parent name exceeds 64 bytes
         try:
             payload = await _resolve_callback_payload(raw.split("::", 1)[1])
             if payload:
@@ -4276,7 +3615,6 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
     else:
         encoded = raw.split("::", 1)[1] if "::" in raw else ""
         parent = urllib.parse.unquote_plus(encoded) if encoded else None
-    # Store chosen parent in user_data for the following name prompt
     context.user_data["new_cat_parent"] = parent
     try:
         logger.info(
@@ -4290,18 +3628,11 @@ async def handle_create_category_parent(update: Update, context: CallbackContext
         prompt = f"Enter the new category name (parent: {parent}):"
     else:
         prompt = "Enter the new top-level category name:"
-    # Ask for the name via a simple text prompt
     await query.message.reply_text(prompt)
     return CREATE_CAT_NAME
 
 
 async def handle_create_category_parent_text(update: Update, context: CallbackContext):
-    """Allow users to type a parent category name instead of pressing a button.
-
-    Stores chosen parent in `context.user_data['new_cat_parent']` and prompts
-    for the new category name (same as the callback-based flow).
-    """
-    # Owner-only guard for message-based create flows
     try:
         owner_env = os.getenv("BOT_OWNER_ID")
         owner_id = int(owner_env) if owner_env else None
@@ -4335,8 +3666,6 @@ async def handle_create_category_parent_text(update: Update, context: CallbackCo
 
 
 async def create_parent(update: Update, context: CallbackContext):
-    """Create a top-level parent category (explicit command)."""
-    # Owner-only: restrict create parent to bot owner
     try:
         owner_env = os.getenv("BOT_OWNER_ID")
         owner_id = int(owner_env) if owner_env else None
@@ -4357,7 +3686,6 @@ async def create_parent(update: Update, context: CallbackContext):
         except Exception:
             pass
         return ConversationHandler.END
-    # mark that the new category should be top-level
     context.user_data["new_cat_parent"] = None
     await update.message.reply_text("Enter the new parent category name:")
     return CREATE_CAT_NAME
@@ -4389,30 +3717,22 @@ async def handle_category_name(update: Update, context: CallbackContext):
         coll = db["categories"]
         logger.info("[CAT-INSERT] about to insert %r", category_name)
 
-        # Check for a chosen parent stored in user_data
         parent = context.user_data.pop("new_cat_parent", None)
-        # assign a stable UUID for categories so parents/coaches can be
-        # referenced by id like courses do. Keep Mongo _id untouched.
         doc = {"name": category_name, "created_by": user_id, "id": str(uuid.uuid4())}
         if parent:
-            # try to resolve parent's path if present; parent is stored as
-            # name for backward-compatibility. Keep parent field as name.
             parent_doc = await db.categories.find_one({"name": parent})
             parent_path = parent_doc.get("path") if parent_doc and parent_doc.get("path") else parent
             doc["parent"] = parent
             doc["path"] = f"{parent_path}/{category_name}"
 
-        # Duplicate checks: detect same-name siblings or top-level parents
         try:
             if parent:
-                # same parent + name conflict
                 existing_child = await coll.find_one({"name": category_name, "parent": parent})
                 if existing_child:
                     await update.message.reply_text(
                         f"A child category named '{category_name}' already exists under '{parent}' (id: {existing_child.get('id') or existing_child.get('_id')}). Please choose a different name.",
                     )
                     return CREATE_CAT_NAME
-                # warn if there are existing courses under the parent that use this name as a coach
                 try:
                     coach_conflict = await _get_total_count(
                         db,
@@ -4428,7 +3748,6 @@ async def handle_category_name(update: Update, context: CallbackContext):
                 except Exception:
                     pass
             else:
-                # top-level parent duplicate check (name or path)
                 existing_parent = await coll.find_one({"$or": [{"name": category_name}, {"path": category_name}]})
                 if existing_parent:
                     await update.message.reply_text(
@@ -4436,12 +3755,10 @@ async def handle_category_name(update: Update, context: CallbackContext):
                     )
                     return CREATE_CAT_NAME
         except Exception:
-            # non-fatal; proceed to attempt insert which may still fail with DuplicateKeyError
             pass
 
         result = await coll.insert_one(doc)
         logger.info("[CAT-INSERT-DONE] _id=%s", result.inserted_id)
-        # Explicit success logs for parent vs child categories
         if not parent:
             logger.info(
                 "[CAT-INSERT-PARENT] Created top-level parent category %r _id=%s",
@@ -4457,21 +3774,13 @@ async def handle_category_name(update: Update, context: CallbackContext):
             )
         await update.message.reply_text(f"Category ‘{category_name}’ saved ✔")
 
-        # After creating, show the parent view so the user can confirm the new
-        # category appears in the correct place. If top-level, show top-level
-        # categories; otherwise show the parent's children list.
         try:
-            # Return to the page the user was browsing when they clicked create
             last_page = context.user_data.pop("createcat_last_page", 1)
             if not parent:
-                # Show top-level categories using the same paginated view as `/categories`
-                # so newly-created parents behave like the categories listing.
                 await categories_page(update.message, context, page=last_page)
             else:
-                # Show paginated children of the parent including the newly created category
                 await children_page(update.message, context, parent, page=last_page)
         except Exception:
-            # Non-fatal; ignore errors when trying to display the view
             pass
 
         return ConversationHandler.END
@@ -4487,8 +3796,8 @@ async def handle_category_name(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
 
+# ----------  category selection  ----------
 async def handle_category_selection(update: Update, context: CallbackContext):
-    """List courses in the chosen category – each course button is a direct URL."""
     query = update.callback_query
     await safe_answer(query)
     data = query.data
@@ -4500,9 +3809,6 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         cat_path = urllib.parse.unquote_plus(encoded)
     cat_name = cat_path
     db = await get_db()
-    # Lazy-load first page of courses for this category instead of pulling
-    # the entire `courses` array into memory. This behaves like an AJAX
-    # page load: only the accessed slice is returned.
     page = 1
     page_size = PAGE_SIZE
     try:
@@ -4526,7 +3832,6 @@ async def handle_category_selection(update: Update, context: CallbackContext):
         except Exception:
             continue
 
-    # Pagination / Back button: compute parent path if present
     try:
         pdoc = await db.categories.find_one({"name": cat_path}, projection={"parent": 1})
         parent = pdoc.get("parent") if pdoc else None
@@ -4542,7 +3847,6 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     else:
         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
 
-    # Add quick Next button if more pages exist
     try:
         total_items = await _get_courses_count(db, cat_path)
         total_pages = math.ceil(total_items / page_size) if total_items > 0 else 1
@@ -4566,20 +3870,18 @@ async def handle_category_selection(update: Update, context: CallbackContext):
     )
 
 
+# ----------  course selection  ----------
 async def handle_course_selection(update: Update, context: CallbackContext):
-    """Handle the selection of a course from the buttons."""
     query = update.callback_query
     await safe_answer(query)
 
     data = query.data
-    # Support short refs: course_ref::<key> -> lookup payload in CALLBACK_MAP
     origin_type = None
     origin_page = 1
     cat_name = None
     course_name = None
 
     if data.startswith("course_ref::"):
-        # Support appended back token: course_ref::<key>::back::<encoded_back_cb>
         rest = data[len("course_ref::") :]
         appended_back = None
         if "::back::" in rest:
@@ -4602,7 +3904,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             )
             return
 
-        # Debug tracing: show raw data, resolved key, appended back token and payload summary
         try:
             logger.debug(
                 "handle_course_selection: raw_query_data=%s key=%s appended_back=%s payload_back=%s payload_keys=%s origin_type=%s origin_page=%s",
@@ -4632,11 +3933,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
         except Exception:
             origin_context_page = None
         search_ref = payload.get("search_ref") or None
-        # Prefer an explicit appended back token, otherwise fall back to saved payload
         saved_back_cb = appended_back or payload.get("back_cb")
     else:
-        # Legacy inline `course::` callback format has been removed.
-        # All current course selections use persisted `course_ref::` references.
         await safe_edit_message(
             query,
             "This action used a legacy callback format which has been removed. Please reopen the list and try again.",
@@ -4656,11 +3954,9 @@ async def handle_course_selection(update: Update, context: CallbackContext):
     try:
         course = None
         if cat_name:
-            # Resolve by name OR path to handle mixed payloads
             category_doc = await db.categories.find_one({"$or": [{"name": cat_name}, {"path": cat_name}]})
             if category_doc:
                 for crs in category_doc.get("courses", []):
-                    # Prefer id-based match when available
                     if course_id and crs.get("id") == course_id:
                         course = {
                             "id": crs.get("id"),
@@ -4678,9 +3974,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         }
                         break
             else:
-                # If we couldn't resolve the category by name/path, fall back
-                # to searching across all categories for the course so Details
-                # still open even when payload carried a different token.
                 try:
                     if course_id:
                         category_doc = await db.categories.find_one(
@@ -4714,11 +4007,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                     break
                 except Exception:
                     category_doc = None
-        # Nested isolation policy: do NOT resolve course names across
-        # categories. Only allow lookup by explicit course `id` (unique
-        # identifier) when no category context is provided. This enforces
-        # that course names are namespaced to their category and avoids
-        # ambiguous cross-category matches.
         elif course_id:
             category_doc = await db.categories.find_one(
                 {"courses.id": course_id},
@@ -4735,19 +4023,14 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         }
                         break
         else:
-            # Ambiguous name without category context — refuse to resolve
-            # across categories. Prompt the user to open the course from
-            # its category listing so the Details view is unambiguous.
             await safe_edit_message(
                 query,
                 "Course name is ambiguous. Open the course from its category list to view details.",
                 action_key=getattr(query, "data", None),
             )
             return
-            # no outer loop to break from here; continue processing
 
         if course:
-            # Determine canonical category for this course (prefer explicit field)
             course_category = course.get("category") if isinstance(course, dict) else None
             logger.debug(
                 "handle_course_selection: origin_type=%s origin_page=%s course_category=%s cat_name=%s courses_in_doc=%s",
@@ -4760,11 +4043,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             if not course_category:
                 course_category = cat_name
 
-            # If the payload didn't include an origin_type but the handler
-            # has a category context (e.g. user opened Details from a
-            # category view or just added a course into a category), treat
-            # it as a category-origin so we show the Coaches / All Categories
-            # row instead of the global Back which can be confusing.
             if not origin_type and course_category:
                 origin_type = "category"
                 origin_page = origin_page or 1
@@ -4773,28 +4051,13 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     course_category,
                 )
 
-            # Build Back callback: for category-origin details, always return
-            # to the category view (coaches list) so users see the main coach
-            # menu rather than a single-course listing. For other origins,
-            # prefer saved_back_cb when present, otherwise compute a sensible
-            # fallback.
             if origin_type == "category":
-                # Always route back to the category's courses listing page
-                # (not the broader coach/parent view). Preserve the
-                # originating page when available and clamp to available
-                # pages; still fall back to top-level categories if the
-                # target category can't be resolved.
                 back_target = course_category or cat_name or None
-                # Normalize any saved_back_cb that might point to a coach
-                # or parent view — prefer returning to the courses listing
-                # for the course's category.
                 if saved_back_cb:
                     try:
                         sb = str(saved_back_cb)
                         if sb.startswith("courses::category::"):
-                            # Use saved category pagination if present
                             back_cb = sb
-                        # Map coach/showcat/back_to_cats to category courses
                         elif (
                             sb.startswith("courses::coach::")
                             or sb.startswith("showcat")
@@ -4807,7 +4070,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                 ppath = pdoc.get("path") if pdoc and pdoc.get("path") else back_target
                             except Exception:
                                 ppath = back_target
-                            # try extract a page from saved token if present
                             page_to_use = None
                             try:
                                 parts = sb.split("::")
@@ -4817,7 +4079,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                 page_to_use = None
                             page_to_use = page_to_use or origin_page or 1
                             back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
-                        # Unknown saved token: prefer courses listing if we have a target
                         elif back_target:
                             try:
                                 pdoc = await db.categories.find_one(
@@ -4834,10 +4095,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         back_cb = None
 
                 if not back_cb:
-                    # Compute page count and clamp even when the category has
-                    # zero courses — we still route to the category courses
-                    # page (which may display "empty") rather than the
-                    # parent/coach listing.
                     back_target = back_target or "categories"
                     try:
                         pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
@@ -4859,8 +4116,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{clamped_page}"
                 logger.debug("handle_course_selection: computed category back_cb=%s", back_cb)
                 try:
-                    # Verify and reconcile the computed back callback to avoid
-                    # routing users to empty/invalid pages (auto-fix Option C).
                     back_cb = await _reconcile_back_cb(
                         db,
                         back_cb,
@@ -4871,13 +4126,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 except Exception:
                     pass
             elif saved_back_cb:
-                # Preserve saved back token for coach-origin details so
-                # Back returns to the same coach listing the user came
-                # from. Do not remap coach callbacks to category lists.
                 back_cb = str(saved_back_cb)
             elif origin_type == "coach" and origin_page:
-                # Route coach-origin details back to the same coach
-                # listing page the user came from (preserve page).
                 coach_slug = origin_context or course_category or cat_name or ""
                 coach_slug_enc = urllib.parse.quote_plus(str(coach_slug))
                 back_cb = f"courses::coach::{coach_slug_enc}::{origin_page}"
@@ -4885,15 +4135,8 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             elif origin_type == "global" and origin_page:
                 back_cb = f"courses::global::{origin_page}"
             else:
-                # default fallback: global page 1
                 back_cb = "courses::global::1"
 
-            # Defensive normalization: if we know this course belongs to a
-            # category, ensure the Back callback routes to that category's
-            # courses listing (preserving page). This protects against
-            # malformed or legacy saved_back_cb values that point to the
-            # outer coach/parent view. Overwrite any showcat-style token so
-            # users always return to the category's courses listing.
             try:
                 if course_category:
                     try:
@@ -4907,15 +4150,9 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                         page_to_use = 1
                     back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{page_to_use}"
             except Exception:
-                # If normalization fails, keep whatever back_cb was computed
                 pass
 
-            # Verify the computed `back_cb` actually leads to a page that
-            # contains this course. If not, search the DB for the course's
-            # true category and compute the page where it appears so Back
-            # returns the user to a list that includes the course.
             try:
-                # Only validate category-style back targets
                 if (
                     back_cb
                     and isinstance(back_cb, str)
@@ -4927,9 +4164,7 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     if len(parts) >= 4:
                         target_cat = urllib.parse.unquote_plus(parts[2])
                         target_page = int(parts[3]) if parts[3].isdigit() else 1
-                        # Check whether the target category actually contains this course
                         try:
-                            # Use aggregation to build an ordered list of course names (server-side sort)
                             pipeline = [
                                 {"$match": {"$or": [{"name": target_cat}, {"path": target_cat}]}},
                                 {"$unwind": "$courses"},
@@ -4951,7 +4186,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             if found_index is not None:
                                 computed_page = (found_index // PAGE_SIZE) + 1
                                 if computed_page != target_page:
-                                    # Update back_cb to the page where the course actually appears
                                     pdoc = await db.categories.find_one(
                                         {"$or": [{"name": target_cat}, {"path": target_cat}]},
                                         projection={"path": 1},
@@ -4965,7 +4199,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                         back_cb,
                                     )
                             else:
-                                # Course not found in the computed category — try locating it anywhere
                                 try:
                                     if course.get("id"):
                                         found = await db.categories.find_one(
@@ -4979,7 +4212,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                         )
                                     if found:
                                         true_cat = found.get("name")
-                                        # compute page by enumerating sorted course names for true_cat
                                         pipeline2 = [
                                             {"$match": {"name": true_cat}},
                                             {"$unwind": "$courses"},
@@ -5017,7 +4249,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
             except Exception:
                 pass
 
-            # Prepare persisted short ref for delete action (await the store helper)
             delete_payload = {
                 "category": course_category,
                 "id": course.get("id"),
@@ -5034,31 +4265,14 @@ async def handle_course_selection(update: Update, context: CallbackContext):
 
             delete_cb = f"delete_ref::{delete_key}" if delete_key else "delete_ref::"
 
-            # Build detail navigation. If opened from a category, remove the
-            # Back button (it previously routed to the global /courses GUI)
-            # and instead show a row with Coaches + All Categories.
             if origin_type == "category":
-                # Compute a back callback that returns to the category's main
-                # view (coaches / subcategories) so users see the coach menu
-                # rather than a single-course listing. Prefer any saved_back_cb
-                # from the payload; otherwise compute a showcat callback and
-                # clamp the page to the available range.
                 try:
                     if saved_back_cb:
                         sb = str(saved_back_cb)
-                        # Prefer returning to the category's courses listing
-                        # rather than the top-level `showcat` view. If the
-                        # saved token points to a showcat/categories view,
-                        # translate it into the corresponding courses::category
-                        # callback so Details->Back returns to the expected
-                        # course listing context.
                         try:
                             if sb.startswith("courses::category::"):
                                 back_cb = sb
                             else:
-                                # Map showcat/ref/categories/coach tokens to the
-                                # category courses listing using the course's
-                                # category name/path and preserve origin_page.
                                 try:
                                     pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
                                     ppath = pdoc.get("path") if pdoc and pdoc.get("path") else back_target
@@ -5074,14 +4288,9 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 if not back_cb:
                     back_target = course.get("category") or cat_name or "1"
                     try:
-                        # Determine the display path for the target category
                         try:
-                            # Fetch only the path and compute the courses array length
-                            # via aggregation so we don't transfer the entire array
-                            # payload into memory (which can be slow for large arrays).
                             pdoc = await db.categories.find_one({"name": back_target}, projection={"path": 1})
                             ppath = pdoc.get("path") if pdoc and pdoc.get("path") else back_target
-                            # Aggregation to compute size of courses array efficiently
                             pipeline = [
                                 {"$match": {"name": back_target}},
                                 {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
@@ -5098,9 +4307,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                             clamped_page = max(1, min(int(origin_page or 1), max(1, int(total_pages))))
                         except Exception:
                             clamped_page = origin_page or 1
-                        # Prefer returning to the category main `showcat` view
-                        # Return to the category's course listing page so the
-                        # user remains in the same context they were browsing.
                         try:
                             back_cb = f"courses::category::{urllib.parse.quote_plus(str(ppath))}::{clamped_page}"
                         except Exception:
@@ -5108,7 +4314,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     except Exception:
                         back_cb = f"courses::global::{origin_page}"
 
-                # Reconcile computed back callback before building navigation
                 try:
                     back_cb = await _reconcile_back_cb(
                         db,
@@ -5119,9 +4324,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 except Exception:
                     pass
 
-                # Enforce category-listing Back for category-origin details.
-                # This guarantees the Back button returns the user to the
-                # course listing for the course's category (Option C).
                 try:
                     if course.get("category"):
                         try:
@@ -5145,7 +4347,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 except Exception:
                     pass
 
-                # Show Delete Course only to the configured owner (if set)
                 try:
                     user_id = getattr(query.from_user, "id", None)
                     owner_env = os.getenv("BOT_OWNER_ID")
@@ -5167,9 +4368,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                     ]
                 extra_row = []
                 try:
-                    # Coaches are represented as child categories under the
-                    # parent/topic. If this course's category is a coach (i.e.
-                    # a child), link to its parent so the user sees all coaches.
                     if course_category:
                         parent_doc = await db.categories.find_one({"name": course_category})
                         if parent_doc:
@@ -5188,15 +4386,11 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                                     parent,
                                     ppath,
                                 )
-                    # Always include All Categories button next to Coaches (or alone)
                     extra_row.append(InlineKeyboardButton("📚 All Categories", callback_data="back_to_cats"))
                 except Exception:
-                    # Fallback: show only All Categories
                     extra_row = [InlineKeyboardButton("All Categories", callback_data="back_to_cats")]
-                # ensure extra_row is a single keyboard row
                 keyboard = [nav_row, extra_row]
             else:
-                # default behavior: show Back + Delete and an optional home/parent row
                 try:
                     user_id = getattr(query.from_user, "id", None)
                     owner_env = os.getenv("BOT_OWNER_ID")
@@ -5243,7 +4437,6 @@ async def handle_course_selection(update: Update, context: CallbackContext):
                 keyboard = [nav_row]
                 if extra_row:
                     keyboard.append(extra_row)
-            # Back to search results when this course was opened from search results
             try:
                 results_row = _back_to_results_row(context, search_ref)
                 if results_row:
@@ -5286,21 +4479,15 @@ async def handle_course_selection(update: Update, context: CallbackContext):
         )
 
 
-# Main entry point for your bot (add handlers as needed)
+# ----------  course list fetch  ----------
 async def get_courses_by_category(user_id, category, page: int = 1, page_size: int = 20):
-    """Fetch courses by category with pagination."""
     db = await get_db()
     if db is None:
         return []
 
     try:
-        # Fast path: use projection + $slice to pull only the requested
-        # window of the embedded `courses` array. This avoids an
-        # expensive `$unwind` over the whole array and is much faster for
-        # large arrays when sorting by course name is not required.
         start = (page - 1) * page_size
         cache_key = f"page:category:{urllib.parse.quote_plus(str(category))}:{page}:{page_size}"
-        # First check in-memory short cache
         cached = _get_cached_page(cache_key)
         logger.debug(
             "get_courses_by_category: category=%s page=%s page_size=%s cache_key=%s cached_mem=%s",
@@ -5316,14 +4503,12 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
                 len(cached) if hasattr(cached, "__len__") else 0,
             )
             return cached
-        # Try Redis-backed page cache (best-effort) to avoid DB read
         try:
             if _redis is not None:
                 val = await _redis.get(cache_key)
                 if val is not None:
                     try:
                         items = json.loads(val)
-                        # warm in-memory cache and return
                         _set_cached_page(cache_key, items, ttl=PAGE_CACHE_TTL)
                         logger.debug(
                             "get_courses_by_category: returning cached page len=%d (redis)",
@@ -5337,13 +4522,9 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
 
         async with _db_timing(f"get_courses_by_category:{category}:{page}"):
             try:
-                # Try find_one with $slice projection (fast, single-doc read).
-                # Match by either `name` or `path` because callbacks sometimes
-                # encode the category `path` while other places use `name`.
                 proj = {"courses": {"$slice": [start, page_size]}, "name": 1, "path": 1}
                 doc = await db.categories.find_one({"$or": [{"name": category}, {"path": category}]}, projection=proj)
                 if doc and isinstance(doc.get("courses"), list):
-                    # Include the embedded course `id` (when present) and optional coach
                     items = [
                         {
                             "id": (c.get("id") if isinstance(c, dict) else None),
@@ -5365,8 +4546,6 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
             except Exception:
                 items = []
 
-        # Fallback: if we couldn't get items via $slice (e.g., need server-side
-        # sort by course name), fall back to the unwind/skip/limit pipeline.
         if not items:
             try:
                 items_pipeline = [
@@ -5397,7 +4576,6 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
             except Exception:
                 items = []
 
-        # Cache the page payload short-term to speed up rapid navigation.
         try:
             _set_cached_page(cache_key, items, ttl=PAGE_CACHE_TTL)
         except Exception:
@@ -5414,8 +4592,135 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
         return []
 
 
+CATEGORY_COUNT_FALLBACK_TTL = 15
+
+
+# ----------  pagination helpers  ----------
+async def _category_courses_count(db, category: str, ttl: int = 0):
+    key = None
+    if ttl > 0:
+        key = f"count:category_courses_np:{category}"
+        now = time.time()
+        entry = _COUNT_CACHE.get(key)
+        if entry and entry[1] > now:
+            return entry[0]
+        try:
+            if _redis is not None:
+                val = await _redis.get(key)
+                if val is not None:
+                    try:
+                        cnt = int(val)
+                    except Exception:
+                        cnt = None
+                    if cnt is not None:
+                        _COUNT_CACHE[key] = (cnt, now + ttl)
+                        _prune_count_cache()
+                        return cnt
+        except Exception:
+            pass
+    try:
+        cnt_doc = await db.categories.aggregate(
+            [
+                {"$match": {"$or": [{"name": category}, {"path": category}]}},
+                {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
+                {"$group": {"_id": None, "count": {"$sum": "$n"}}},
+            ],
+        ).to_list(length=1)
+        cnt = int(cnt_doc[0].get("count")) if cnt_doc else 0
+    except Exception:
+        cnt = None
+    if cnt is not None and key:
+        _COUNT_CACHE[key] = (cnt, time.time() + ttl)
+        _prune_count_cache()
+        try:
+            if _redis is not None:
+                _bg_task(_redis.set(key, str(cnt), ex=ttl))
+        except Exception:
+            pass
+    return cnt
+
+
+async def _courses_origin_total(db, origin_type: str, category: str = None, fresh: bool = False):
+    try:
+        if origin_type == "global":
+            cnt_doc = await db.categories.aggregate(
+                [
+                    {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
+                    {"$group": {"_id": None, "count": {"$sum": "$n"}}},
+                ],
+            ).to_list(length=1)
+            return int(cnt_doc[0].get("count")) if cnt_doc else 0
+        if origin_type == "category" and category:
+            if fresh:
+                return await _category_courses_count(db, category)
+            try:
+                cached = await _get_courses_count(db, category, ttl=60)
+            except Exception:
+                cached = None
+            if cached:
+                return cached
+            return await _category_courses_count(db, category, ttl=CATEGORY_COUNT_FALLBACK_TTL)
+        if origin_type == "coach" and category:
+            cnt_doc = await db.categories.aggregate(
+                [
+                    {"$match": {"courses.coach": category}},
+                    {"$unwind": "$courses"},
+                    {"$match": {"courses.coach": category}},
+                    {"$group": {"_id": None, "count": {"$sum": 1}}},
+                ],
+            ).to_list(length=1)
+            return int(cnt_doc[0].get("count")) if cnt_doc else 0
+    except Exception:
+        return None
+    return None
+
+
+def _clamp_courses_page(page: int, total, page_size: int):
+    if total is None:
+        return page
+    total_pages = max(1, math.ceil(total / page_size)) if total else 1
+    if page < 1:
+        return 1
+    if page > total_pages:
+        return total_pages
+    return page
+
+
+async def _fetch_category_courses_page(db, category, page: int, page_size: int):
+    for _attempt in range(2):
+        start = (page - 1) * page_size
+        items_pipeline = [
+            {"$match": {"$or": [{"name": category}, {"path": category}]}},
+            {"$unwind": "$courses"},
+            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+            {"$sort": {"name": 1}},
+            {"$skip": start},
+            {"$limit": page_size + 1},
+        ]
+        try:
+            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
+        except Exception:
+            items = []
+        has_more = len(items) > page_size
+        slice_items = items[:page_size]
+        slice_items = sorted(slice_items, key=lambda c: (c.get("name") or "").lower())
+        if slice_items or page == 1:
+            return slice_items, has_more, page
+        try:
+            fresh = await _courses_origin_total(db, "category", category, fresh=True)
+        except Exception:
+            fresh = None
+        if fresh is None:
+            return slice_items, has_more, page
+        new_page = _clamp_courses_page(page, fresh, page_size)
+        if new_page == page:
+            return slice_items, has_more, page
+        page = new_page
+    return slice_items, has_more, page
+
+
+# ----------  courses callback  ----------
 async def courses_callback(update: Update, context: CallbackContext):
-    """Handle the courses callback and display courses based on pagination."""
     query = update.callback_query
     await safe_answer(query)
     data = query.data
@@ -5428,11 +4733,9 @@ async def courses_callback(update: Update, context: CallbackContext):
             action_key=getattr(query, "data", None),
         )
         return
-    # pagination page size
     page_size = PAGE_SIZE
 
     try:
-        # Support stored page refs: courses_ref::<key>
         if data.startswith("courses_ref::"):
             key = data.split("::", 1)[1]
             payload = await _resolve_callback_payload(key)
@@ -5443,7 +4746,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                     action_key=getattr(query, "data", None),
                 )
                 return
-            # payload expected: type='courses_page', items, page, origin_type, category, origin_context, origin_context_page, total_count
             if payload.get("type") == "courses_page":
                 items = payload.get("items") or []
                 page = int(payload.get("page", 1) or 1)
@@ -5453,11 +4755,11 @@ async def courses_callback(update: Update, context: CallbackContext):
                 origin_ctx_page = payload.get("origin_context_page")
                 total_count = int(payload.get("total_count")) if payload.get("total_count") is not None else None
 
-                # If the stored payload didn't include concrete page items, fetch them
-                # server-side so the stored ref still works after restarts.
                 if not items:
                     try:
                         if origin_type == "global":
+                            total_count = await _courses_origin_total(db, "global")
+                            page = _clamp_courses_page(page, total_count, page_size)
                             start = (page - 1) * page_size
                             items_pipeline = [
                                 {"$unwind": "$courses"},
@@ -5475,52 +4777,29 @@ async def courses_callback(update: Update, context: CallbackContext):
                             has_more = len(items_result) > page_size
                             items = items_result[:page_size]
                             items = sorted(items, key=lambda c: (c.get("name") or "").lower())
-                            # Compute accurate total count for global listing where possible
-                            try:
-                                cnt_doc = await db.categories.aggregate(
-                                    [
-                                        {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
-                                        {"$group": {"_id": None, "count": {"$sum": "$n"}}},
-                                    ],
-                                ).to_list(length=1)
-                                total_count = (
-                                    int(cnt_doc[0].get("count"))
-                                    if cnt_doc
-                                    else (page * page_size + 1 if has_more else ((page - 1) * page_size + len(items)))
-                                )
-                            except Exception:
+                            if total_count is None:
                                 total_count = (
                                     page * page_size + 1 if has_more else ((page - 1) * page_size + len(items))
                                 )
 
                         elif origin_type == "category":
-                            start = (page - 1) * page_size
-                            items_pipeline = [
-                                {"$match": {"$or": [{"name": category}, {"path": category}]}},
-                                {"$unwind": "$courses"},
-                                {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
-                                {"$sort": {"name": 1}},
-                                {"$skip": start},
-                                {"$limit": page_size + 1},
-                            ]
-                            try:
-                                items_result = await db.categories.aggregate(items_pipeline).to_list(
-                                    length=page_size + 1,
-                                )
-                            except Exception:
-                                items_result = []
-                            has_more = len(items_result) > page_size
-                            items = items_result[:page_size]
-                            items = sorted(items, key=lambda c: (c.get("name") or "").lower())
-                            try:
-                                total_count = await _get_courses_count(db, category, ttl=60)
-                            except Exception:
+                            total_count = await _courses_origin_total(db, "category", category)
+                            page = _clamp_courses_page(page, total_count, page_size)
+                            items, has_more, page = await _fetch_category_courses_page(
+                                db,
+                                category,
+                                page,
+                                page_size,
+                            )
+                            if total_count is None:
                                 total_count = (
                                     page * page_size + 1 if has_more else ((page - 1) * page_size + len(items))
                                 )
 
                         elif origin_type == "coach":
                             coach_name = category
+                            total_count = await _courses_origin_total(db, "coach", coach_name)
+                            page = _clamp_courses_page(page, total_count, page_size)
                             start = (page - 1) * page_size
                             items_pipeline = [
                                 {"$match": {"courses.coach": coach_name}},
@@ -5547,31 +4826,14 @@ async def courses_callback(update: Update, context: CallbackContext):
                             has_more = len(items_result) > page_size
                             items = items_result[:page_size]
                             items = sorted(items, key=lambda c: (c.get("name") or "").lower())
-                            try:
-                                cnt_doc = await db.categories.aggregate(
-                                    [
-                                        {"$match": {"courses.coach": coach_name}},
-                                        {"$unwind": "$courses"},
-                                        {"$match": {"courses.coach": coach_name}},
-                                        {"$group": {"_id": None, "count": {"$sum": 1}}},
-                                    ],
-                                ).to_list(length=1)
-                                total_count = (
-                                    int(cnt_doc[0].get("count"))
-                                    if cnt_doc
-                                    else (page * page_size + 1 if has_more else ((page - 1) * page_size + len(items)))
-                                )
-                            except Exception:
+                            if total_count is None:
                                 total_count = (
                                     page * page_size + 1 if has_more else ((page - 1) * page_size + len(items))
                                 )
 
                     except Exception:
-                        # If server-side fetch fails, fall back to empty items so a helpful
-                        # message is shown to the user rather than crashing.
                         items = []
 
-                # rebuild the page; items are now the page slice
                 text, reply_markup = build_courses_page(
                     items,
                     page=page,
@@ -5586,7 +4848,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                 if not text:
                     await safe_edit_message(query, "No courses found.", action_key=getattr(query, "data", None))
                     return
-                # Add Search button
                 try:
                     kb = list(reply_markup.inline_keyboard)
                     if origin_type == "category" and category:
@@ -5599,9 +4860,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                             ],
                         )
                     elif origin_type == "coach" and category:
-                        # Carry the coach name (it lives in `category` here) so
-                        # the search stays scoped to this coach instead of
-                        # degrading to a name-less global search.
                         kb.append(
                             [
                                 InlineKeyboardButton(
@@ -5630,21 +4888,17 @@ async def courses_callback(update: Update, context: CallbackContext):
                 )
                 return
 
-        # New format supports: courses::{category}::{page} or courses::{page} for global
         if data.startswith("courses::"):
             payload = data.replace("courses::", "", 1)
             parts = payload.split("::")
 
-            # New explicit formats:
-            #  - courses::global::<page>
-            #  - courses::category::<category>::<page>
-            #  - courses::coach::<coach_slug>::<page>
-            # Legacy fallback: courses::<page> or courses::<category>::<page>
             try:
                 if parts[0] in ("global", "category", "coach"):
                     kind = parts[0]
                     if kind == "global":
                         page = int(parts[1])
+                        total_courses = await _courses_origin_total(db, "global")
+                        page = _clamp_courses_page(page, total_courses, page_size)
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$unwind": "$courses"},
@@ -5669,20 +4923,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         has_more = len(items) > page_size
                         all_courses = items[:page_size]
                         all_courses = sorted(all_courses, key=lambda c: (c.get("name") or "").lower())
-                        # Compute accurate total count for global listing when possible
-                        try:
-                            cnt_doc = await db.categories.aggregate(
-                                [
-                                    {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
-                                    {"$group": {"_id": None, "count": {"$sum": "$n"}}},
-                                ],
-                            ).to_list(length=1)
-                            total_courses = (
-                                int(cnt_doc[0].get("count"))
-                                if cnt_doc
-                                else (page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses)))
-                            )
-                        except Exception:
+                        if total_courses is None:
                             total_courses = (
                                 page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
                             )
@@ -5700,7 +4941,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 action_key=getattr(query, "data", None),
                             )
                             return
-                        # Add Search button for all courses
                         try:
                             kb = list(reply_markup.inline_keyboard)
                             kb.append(
@@ -5725,7 +4965,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                     if kind == "category":
                         category = urllib.parse.unquote_plus(parts[1])
                         page = int(parts[2])
-                        # optional origin context suffix: ::from_parent::<origin_ctx>::<origin_page>
                         origin_ctx = None
                         origin_ctx_page = None
                         if len(parts) > 3:
@@ -5738,30 +4977,16 @@ async def courses_callback(update: Update, context: CallbackContext):
                                         origin_ctx_page = None
                             except Exception:
                                 origin_ctx = None
-                        # Use aggregation to avoid loading the full category document
-                        start = (page - 1) * page_size
-                        # Match by either category `name` or `path` so stored
-                        # callbacks that use full paths (e.g. "Sex/Kenneth Play")
-                        # still resolve to the correct category document.
-                        items_pipeline = [
-                            {"$match": {"$or": [{"name": category}, {"path": category}]}},
-                            {"$unwind": "$courses"},
-                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
-                            {"$sort": {"name": 1}},
-                            {"$skip": start},
-                            {"$limit": page_size + 1},
-                        ]
-                        try:
-                            items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
-                        except Exception:
-                            items = []
-                        has_more = len(items) > page_size
-                        courses = items[:page_size]
-                        courses = sorted(courses, key=lambda c: (c.get("name") or "").lower())
-                        # compute origin_context (parent path) — fetch parent path if we don't already have origin_ctx
+                        total_courses = await _courses_origin_total(db, "category", category)
+                        page = _clamp_courses_page(page, total_courses, page_size)
+                        courses, has_more, page = await _fetch_category_courses_page(
+                            db,
+                            category,
+                            page,
+                            page_size,
+                        )
                         if origin_ctx is None:
                             try:
-                                # Resolve parent by matching name or path
                                 pdoc = await db.categories.find_one(
                                     {"$or": [{"name": category}, {"path": category}]},
                                     projection={"parent": 1},
@@ -5775,10 +5000,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                                     origin_ctx = pp.get("path") if pp and pp.get("path") else parent
                             except Exception:
                                 origin_ctx = None
-                        # Try cached count for the category when possible (faster and accurate)
-                        try:
-                            total_courses = await _get_courses_count(db, category, ttl=60)
-                        except Exception:
+                        if total_courses is None:
                             total_courses = (
                                 page * page_size + 1 if has_more else ((page - 1) * page_size + len(courses))
                             )
@@ -5800,7 +5022,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 action_key=getattr(query, "data", None),
                             )
                             return
-                        # Add Search button for courses in this category
                         try:
                             kb = list(reply_markup.inline_keyboard)
                             kb.append(
@@ -5825,11 +5046,9 @@ async def courses_callback(update: Update, context: CallbackContext):
                     if kind == "coach":
                         coach_slug = urllib.parse.unquote_plus(parts[1])
                         page = int(parts[2])
-                        # derive coach courses using aggregation (server-side
-                        # unwind + match) to avoid iterating over all categories
-                        # in Python.
                         coach_name = coach_slug
-                        # Fetch coach results with a small overfetch to detect Next page
+                        total_courses = await _courses_origin_total(db, "coach", coach_name)
+                        page = _clamp_courses_page(page, total_courses, page_size)
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$match": {"courses.coach": coach_name}},
@@ -5854,24 +5073,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         has_more = len(items) > page_size
                         coach_courses = items[:page_size]
                         coach_courses = sorted(coach_courses, key=lambda c: (c.get("name") or "").lower())
-                        # Compute accurate total for coach by aggregating when possible
-                        try:
-                            cnt_doc = await db.categories.aggregate(
-                                [
-                                    {"$match": {"courses.coach": coach_name}},
-                                    {"$unwind": "$courses"},
-                                    {"$match": {"courses.coach": coach_name}},
-                                    {"$group": {"_id": None, "count": {"$sum": 1}}},
-                                ],
-                            ).to_list(length=1)
-                            total_courses = (
-                                int(cnt_doc[0].get("count"))
-                                if cnt_doc
-                                else (
-                                    page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
-                                )
-                            )
-                        except Exception:
+                        if total_courses is None:
                             total_courses = (
                                 page * page_size + 1 if has_more else ((page - 1) * page_size + len(coach_courses))
                             )
@@ -5892,7 +5094,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 action_key=getattr(query, "data", None),
                             )
                             return
-                        # Add Search button for courses by this coach
                         try:
                             kb = list(reply_markup.inline_keyboard)
                             kb.append(
@@ -5914,10 +5115,10 @@ async def courses_callback(update: Update, context: CallbackContext):
                         )
                         return
                 else:
-                    # legacy fallback handling
                     if len(parts) == 1:
                         page = int(parts[0])
-                        # Legacy global fallback: fetch page_size+1 items to detect Next
+                        total_courses = await _courses_origin_total(db, "global")
+                        page = _clamp_courses_page(page, total_courses, page_size)
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$unwind": "$courses"},
@@ -5933,20 +5134,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         has_more = len(items) > page_size
                         all_courses = items[:page_size]
                         all_courses = sorted(all_courses, key=lambda c: (c.get("name") or "").lower())
-                        # Compute accurate total count for legacy global fallback when possible
-                        try:
-                            cnt_doc = await db.categories.aggregate(
-                                [
-                                    {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
-                                    {"$group": {"_id": None, "count": {"$sum": "$n"}}},
-                                ],
-                            ).to_list(length=1)
-                            total_courses = (
-                                int(cnt_doc[0].get("count"))
-                                if cnt_doc
-                                else (page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses)))
-                            )
-                        except Exception:
+                        if total_courses is None:
                             total_courses = (
                                 page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
                             )
@@ -5965,7 +5153,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                                 action_key=getattr(query, "data", None),
                             )
                             return
-                        # Add Search button for all courses
                         try:
                             kb = list(reply_markup.inline_keyboard)
                             kb.append(
@@ -5986,19 +5173,15 @@ async def courses_callback(update: Update, context: CallbackContext):
                             action_key=getattr(query, "data", None),
                         )
                         return
-                    # legacy category + page
                     category = urllib.parse.unquote_plus(parts[0])
                     try:
                         page = int(parts[1])
                     except Exception:
                         await safe_edit_message(query, "Invalid page number.", action_key=getattr(query, "data", None))
                         return
-                    # legacy category pagination may not include origin; but
-                    # support optional ::from_parent::<origin_ctx>::<origin_page>
                     origin_ctx = None
                     origin_ctx_page = None
                     if len(parts) > 2:
-                        # parts[2] might be 'from_parent' in legacy fallback
                         try:
                             if parts[2] == "from_parent" and len(parts) >= 5:
                                 origin_ctx = urllib.parse.unquote_plus(parts[3])
@@ -6018,7 +5201,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         return
                     courses = category_doc.get("courses", [])
                     courses = sorted(courses, key=lambda c: (c.get("name") or "").lower())
-                    # If origin_ctx not provided by callback, resolve parent path
+                    page = _clamp_courses_page(page, len(courses), page_size)
                     if origin_ctx is None:
                         try:
                             parent = category_doc.get("parent")
@@ -6042,7 +5225,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                             action_key=getattr(query, "data", None),
                         )
                         return
-                    # Add Search button for courses in this category
                     try:
                         kb = list(reply_markup.inline_keyboard)
                         kb.append(
@@ -6068,7 +5250,6 @@ async def courses_callback(update: Update, context: CallbackContext):
                 await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
                 return
 
-        # legacy underscore format removed. Only `courses::` callbacks are supported.
         await safe_edit_message(query, "Invalid pagination callback.", action_key=getattr(query, "data", None))
         return
     except Exception:

@@ -1,8 +1,4 @@
-# conversation_states.py
 # ---------------  /add  ---------------
-# States for the add-course flow. Keep existing values stable and
-# introduce ADD_PARENT and ADD_COACH so the flow can ask for a parent
-# category, then a coach, then the course name and link.
 ADD_NAME, ADD_LINK, ADD_CATEGORY, ADD_PARENT, ADD_COACH = range(5)
 # ---------------  /start  ---------------
 START_AWAIT_NAME = 7

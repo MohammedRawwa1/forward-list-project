@@ -6,10 +6,12 @@ from motor.motor_asyncio import AsyncIOMotorClient
 logger = logging.getLogger(__name__)
 
 
+# ----------  errors  ----------
 class MongoConnectionError(Exception):
-    """Custom exception for MongoDB connection errors."""
+    pass
 
 
+# ----------  async client  ----------
 class MongoDB:
     _client = None
     _db = None
@@ -18,7 +20,6 @@ class MongoDB:
 
     @classmethod
     async def initialize(cls, mongo_uri: str, db_name: str):
-        """Initialize the MongoDB client."""
         if cls._client is not None:
             logger.warning("MongoDB is already initialized.")
             return
@@ -35,7 +36,6 @@ class MongoDB:
             )
             cls._db = cls._client[db_name]
             logger.info("MongoDB initialized successfully with database: %s (pool=50)", db_name)
-            # NOTE: index creation was disabled (rollback to previous behavior)
         except Exception as e:
             logger.exception("Failed to initialize MongoDB")
             msg = f"Failed to initialize MongoDB: {e}"
@@ -43,7 +43,6 @@ class MongoDB:
 
     @classmethod
     async def get_db(cls):
-        """Get the MongoDB database instance."""
         if cls._db is None:
             msg = "MongoDB instance is not initialized."
             raise MongoConnectionError(msg)
@@ -51,7 +50,6 @@ class MongoDB:
 
     @classmethod
     async def close(cls):
-        """Properly close the MongoDB connection."""
         if cls._client:
             cls._client.close()
             cls._client = None
@@ -59,7 +57,6 @@ class MongoDB:
             logger.info("MongoDB connection closed.")
         else:
             logger.warning("MongoDB connection is not initialized, nothing to close.")
-        # Close synchronous client if present
         try:
             if cls._sync_client:
                 try:
@@ -72,13 +69,9 @@ class MongoDB:
         except Exception:
             logger.exception("Error while closing sync MongoDB client")
 
+    # ----------  sync client  ----------
     @classmethod
     def initialize_sync(cls, mongo_uri: str, db_name: str):
-        """Initialize a synchronous pymongo client for blocking writes.
-
-        This is useful for performing strong-durability writes from
-        synchronous code paths when Redis isn't configured.
-        """
         if cls._sync_client is not None:
             logger.debug("Sync MongoDB client already initialized")
             return

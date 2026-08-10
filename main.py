@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, CallbackContext, TypeHandler
 
-import logging_config  # noqa: F401 — configures root logger (console + file) on import
+import logging_config  # noqa: F401
 from bot import create_application, setup_handlers
 from database.mongo_handler import MongoDB
 from handlers.base_handlers import _bg_task, start_cache_cleanup_worker, start_redis_retry_worker
@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 application: Application = None
 bot_token = os.getenv("BOT_TOKEN")
 
-# Optional token for an authenticated liveness probe. If set, the health
-# endpoint requires the header `X-LIVENESS-TOKEN: <token>`.
 LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
 
 if not bot_token:
@@ -37,13 +35,6 @@ if not bot_token:
 
 
 def _resolve_webhook_url() -> Optional[str]:
-    """Determine the public webhook URL the bot should register with Telegram.
-
-    Priority:
-    1. ``WEBHOOK_URL`` env var (fully custom)
-    2. ``RENDER_EXTERNAL_URL`` (set by Render platform) + ``/<bot_token>/``
-    3. Fall back to ``None`` (skip auto-registration)
-    """
     explicit = os.getenv("WEBHOOK_URL")
     if explicit:
         return explicit.rstrip("/") + "/"
@@ -57,11 +48,8 @@ def _resolve_webhook_url() -> Optional[str]:
 
 
 async def _register_webhook(url: str) -> bool:
-    """Call Telegram ``setWebhook`` with *url* and log the result."""
     api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
     payload: dict = {"url": url, "max_connections": 100}
-    # If a secret token is configured, include it so Telegram sends it back
-    # in the X-Telegram-Bot-Api-Secret-Token header with every update.
     secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
     if secret_token:
         payload["secret_token"] = secret_token
@@ -69,8 +57,6 @@ async def _register_webhook(url: str) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(api_url, json=payload)
             data = resp.json()
-            # The webhook URL contains the bot token in its path — never log it
-            # verbatim to avoid leaking the token into log files/shippers.
             redacted_url = url.replace(bot_token, "<token>") if bot_token else url
             if data.get("ok"):
                 logger.info("Webhook successfully registered -> %s", redacted_url)
@@ -113,22 +99,14 @@ async def echo_update(update: Update, context: CallbackContext):
 
 
 async def _process_telegram_update(request: Request) -> dict:
-    """Deserialize a Telegram ``Update`` from *request* and pass it through
-    the application handler chain.  Returns a JSON-serialisable dict.
-    """
     if application is None:
-        # Startup hasn't finished yet — Render cold start. Return a
-        # transient error so Telegram retries after a short delay.
         raise HTTPException(status_code=503, detail="Bot still starting up")
     json_str = await request.body()
-    # Reject oversized bodies early (Telegram updates are tiny; a huge body
-    # is almost certainly an attacker probing the endpoint).
     if len(json_str) > 1_000_000:
         raise HTTPException(status_code=413, detail="Payload too large")
     try:
         payload = json.loads(json_str)
     except (ValueError, TypeError) as e:
-        # Malformed JSON — return 4xx so Telegram does not retry forever.
         raise HTTPException(status_code=400, detail="Invalid JSON") from e
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
@@ -142,16 +120,10 @@ async def _process_telegram_update(request: Request) -> dict:
 # ---------- lifespan (startup + shutdown) ----------
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Application lifecycle: initialize the bot on startup, tear it down on shutdown.
-
-    Replaces the deprecated ``@app.on_event("startup"/"shutdown")`` hooks.
-    """
     global application
 
     # ---------------------------- startup ----------------------------
     await initialize_db()
-    # Rehydrate any persisted callback refs so inline buttons keep working
-    # across restarts when Redis is not configured.
     try:
         from handlers.base_handlers import _rehydrate_callback_map
 
@@ -160,10 +132,7 @@ async def lifespan(_app: FastAPI):
         except Exception:
             logger.exception("Failed to rehydrate callback refs on startup")
     except Exception:
-        # best-effort: skip if import fails
         logger.debug("Rehydrate helper not available; skipping")
-    # If Redis is not configured, initialize a synchronous pymongo client
-    # so synchronous code paths can perform blocking durable writes.
     try:
         if not os.getenv("REDIS_URL"):
             from bot import init_sync_mongo
@@ -174,13 +143,8 @@ async def lifespan(_app: FastAPI):
                 logger.exception("Failed to initialize sync mongo client on startup")
     except Exception:
         logger.exception("Error while attempting sync mongo init check")
-    # Index creation is managed manually; the coaches.topics index below is created explicitly.
     logger.info("Index creation is managed manually")
 
-    # Unconditionally create the coaches.topics index since coaches are
-    # queried by this field (see base_handlers.py line ~2723) and the
-    # index is critical for performance. Best-effort: ignore if the
-    # collection doesn't exist yet or MongoDB is unavailable.
     try:
         db = await MongoDB.get_db()
         await db.coaches.create_index("topics")
@@ -195,20 +159,16 @@ async def lifespan(_app: FastAPI):
     application.add_error_handler(global_error_handler)
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
 
-    # Start background cache cleanup worker (always runs)
     try:
         _bg_task(start_cache_cleanup_worker())
     except Exception:
         logger.exception("Failed to start cache cleanup worker")
 
-    # Start Redis-backed retry worker (if Redis configured)
     try:
         _bg_task(start_redis_retry_worker(application))
     except Exception:
         logger.exception("Failed to start redis retry worker")
 
-    # Auto-register webhook with Telegram so the correct URL is always set
-    # after a deploy or restart.
     wh_url = _resolve_webhook_url()
     if wh_url:
         try:
@@ -222,10 +182,8 @@ async def lifespan(_app: FastAPI):
             "Set WEBHOOK_URL or RENDER_EXTERNAL_URL env vars.",
         )
 
-    # Reconfigure uvicorn loggers after uvicorn has set up its default config on run().
     configure_uvicorn_loggers()
 
-    # Register signal handlers to log shutdown signals (helps debug platform-initiated stops)
     loop = asyncio.get_running_loop()
 
     def _log_signal(sig):
@@ -235,7 +193,6 @@ async def lifespan(_app: FastAPI):
         loop.add_signal_handler(signal.SIGTERM, lambda: _log_signal("SIGTERM"))
         loop.add_signal_handler(signal.SIGINT, lambda: _log_signal("SIGINT"))
     except NotImplementedError:
-        # add_signal_handler may not be available on all platforms (e.g., Windows)
         logger.info("Signal handlers not supported on this platform; skipping registration.")
 
     yield
@@ -264,22 +221,11 @@ app = FastAPI(lifespan=lifespan)
 
 
 # ---------- webhook endpoints ----------
-# NOTE: /webhook fallback routes must be defined BEFORE /{token}/ so they
-# take priority.  If defined after, FastAPI would match /webhook/ against
-# /{token}/ first (with token="webhook") and reject it with 400.
 
 
 @app.post("/webhook")
 @app.post("/webhook/")
 async def webhook_fallback(request: Request):
-    """Secondary webhook endpoint at the plain ``/webhook`` path.
-
-    Some deployments use a reverse-proxy or platform-level routing that
-    forwards Telegram updates to ``/webhook`` instead of ``/<token>/``.
-    This endpoint accepts those requests and processes them identically.
-    Both ``/webhook`` and ``/webhook/`` are handled to avoid redirect issues.
-    """
-    # Optional: verify via X-Telegram-Bot-Api-Secret-Token header if configured.
     secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
     if secret_token:
         hdr = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
@@ -290,7 +236,6 @@ async def webhook_fallback(request: Request):
 
 @app.post("/{token}/")
 async def webhook(token: str, request: Request):
-    """Primary webhook endpoint — path includes the bot token for verification."""
     if token != bot_token:
         raise HTTPException(status_code=400, detail="Invalid token")
     return await _process_telegram_update(request)
@@ -303,10 +248,6 @@ async def root():
 
 @app.get("/health")
 async def health(request: Request):
-    """Liveness endpoint. If `LIVENESS_TOKEN` is set, caller must provide
-    header `X-LIVENESS-TOKEN` with the same value.
-    Also checks MongoDB connectivity for operational awareness.
-    """
     if LIVENESS_TOKEN:
         hdr = request.headers.get("X-LIVENESS-TOKEN")
         if hdr != LIVENESS_TOKEN:

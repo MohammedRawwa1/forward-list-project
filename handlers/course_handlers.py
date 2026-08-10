@@ -25,7 +25,6 @@ from handlers.base_handlers import (
 )
 from handlers.db_connection import get_db
 
-# Page size used only by course-related handlers (coaches/categories/courses in add flow)
 COURSE_PAGE_SIZE = 50
 
 
@@ -33,7 +32,6 @@ COURSE_PAGE_SIZE = 50
 
 
 def _addcoach_cb(name) -> str:
-    """Compact callback for the coach-selection button (long Arabic names)."""
     return _fit_cb(
         "addcoach",
         f"addcoach::{urllib.parse.quote_plus(str(name))}",
@@ -42,7 +40,6 @@ def _addcoach_cb(name) -> str:
 
 
 def _addcoach_page_cb(parent, page: int) -> str:
-    """Compact callback for coach-selection pagination (parent may be '')."""
     p = parent or ""
     return _fit_cb(
         "addcoach_page",
@@ -52,7 +49,6 @@ def _addcoach_page_cb(parent, page: int) -> str:
 
 
 def _addparent_cb(name, page: int) -> str:
-    """Compact callback for the parent-selection button."""
     return _fit_cb(
         "addparent",
         f"addparent::{urllib.parse.quote_plus(str(name))}::{page}",
@@ -61,7 +57,6 @@ def _addparent_cb(name, page: int) -> str:
 
 
 def _addcat_cb(name, page: int) -> str:
-    """Compact callback for the final category-selection button."""
     return _fit_cb(
         "addcat",
         f"addcat::{urllib.parse.quote_plus(str(name))}::{page}",
@@ -71,44 +66,33 @@ def _addcat_cb(name, page: int) -> str:
 
 logger = logging.getLogger(__name__)
 
-# Conversation states are defined in conversation_states.py
 
-
+# ----------  registration  ----------
 async def setup_course_handlers(application):
-    # /start: simple welcome message using the user's Telegram name
     application.add_handler(CommandHandler("start", start))
     application.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("add", add_course_start)],
             states={
-                # First: pick a parent/top-level category
                 ADD_PARENT: [
                     CallbackQueryHandler(parent_selected, pattern=r"^addparent::"),
-                    # Compact ref form (long Arabic parent names)
                     CallbackQueryHandler(parent_selected, pattern=r"^addparent_ref::"),
                     CallbackQueryHandler(addparent_page, pattern=r"^addparent_page::"),
                 ],
-                # Then: pick a coach (buttons) or enter one manually (text)
                 ADD_COACH: [
                     CallbackQueryHandler(coach_selected, pattern=r"^addcoach::"),
-                    # Compact ref form (long Arabic coach names)
                     CallbackQueryHandler(coach_selected, pattern=r"^addcoach_ref::"),
                     CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page::"),
-                    # Compact ref form (long Arabic parent names)
                     CallbackQueryHandler(addcoach_page, pattern=r"^addcoach_page_ref::"),
-                    # Allow navigating back to parent pages while in the coach-selection state
                     CallbackQueryHandler(addparent_page, pattern=r"^addparent_page::"),
                     MessageHandler(filters.TEXT & ~filters.COMMAND, coach_manual_entry),
                 ],
-                # Then: course name (text) — include explicit cancel matcher so /cancel always works
                 ADD_NAME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_name),
                 ],
-                # Then: course link (text)
                 ADD_LINK: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, add_course_link),
                 ],
-                # Legacy: allow selecting an arbitrary category at the end if needed
                 ADD_CATEGORY: [CallbackQueryHandler(category_selected, pattern=r"^addcat")],
             },
             fallbacks=[CommandHandler("cancel", cancel)],
@@ -118,8 +102,8 @@ async def setup_course_handlers(application):
     )
 
 
+# ----------  entry commands  ----------
 async def start(update: Update, context: CallbackContext):
-    """Handler for the /start command — welcomes the user with their Telegram name."""
     user = update.message.from_user
     name = user.first_name or "there"
     await update.message.reply_text(
@@ -133,15 +117,8 @@ async def start(update: Update, context: CallbackContext):
     )
 
 
-# course_handlers.py
 async def add_course_start(update: Update, context: CallbackContext):
-    """Start add flow: prompt the user to pick a parent/top-level category.
-
-    If no top-level parents exist, fall back to asking for the course name.
-    SECURITY: Owner-only — uses fail-closed is_owner() helper.
-    """
-    keyboard = []  # ensure keyboard is always initialized (fixes UnboundLocalError)
-    # Owner-only: restrict /add to configured bot owner
+    keyboard = []
     user_id = None
     try:
         user_id = (
@@ -163,28 +140,22 @@ async def add_course_start(update: Update, context: CallbackContext):
     except Exception:
         db = None
 
-    # If the user recently viewed a category (or coach), preselect it as the parent for /add.
     last_viewed = None
     try:
         last_viewed = context.user_data.pop("last_viewed_category", None)
         if not last_viewed:
-            # fall back to stored id if available
             last_viewed = context.user_data.pop("last_viewed_category_id", None)
     except Exception:
         last_viewed = None
 
     if last_viewed and db is not None:
         try:
-            # Resolve by name/path/id to get the canonical category doc
             query_q = {"$or": [{"name": last_viewed}, {"path": last_viewed}, {"id": last_viewed}]}
             parent_doc = await db.categories.find_one(query_q)
             if parent_doc:
-                # If the resolved doc has a parent, it is a child category (coach)
                 if parent_doc.get("parent"):
-                    # The user is viewing a coach child — preselect the parent and coach
                     context.user_data["course_parent"] = parent_doc.get("parent")
                     context.user_data["course_coach"] = parent_doc.get("name")
-                    # Mention the coach and its parent in plain text (not breadcrumb)
                     coach_name = parent_doc.get("name")
                     coach_parent = parent_doc.get("parent")
                     if coach_parent:
@@ -196,7 +167,6 @@ async def add_course_start(update: Update, context: CallbackContext):
                             f"Adding a course inside '{coach_name}' (coach).\nEnter the course name:",
                         )
                     return ADD_NAME
-                # It's a top-level parent — preselect it and show coach-selection UI
                 parent_name = parent_doc.get("name")
                 context.user_data["course_parent"] = parent_name
                 try:
@@ -224,7 +194,6 @@ async def add_course_start(update: Update, context: CallbackContext):
                             [InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")],
                         )
                         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
-                        # Back button returns to categories listing
                         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
                         await update.message.reply_text(
                             f"Choose a coach for new course under '{parent_name}':",
@@ -234,15 +203,11 @@ async def add_course_start(update: Update, context: CallbackContext):
                 except Exception:
                     context.user_data.pop("course_parent", None)
             else:
-                # resolved doc not found — fall back to default UI
                 pass
         except Exception:
-            # ignore and continue to default add flow
             context.user_data.pop("course_parent", None)
 
-    # Default behavior: list top-level parents for selection
     try:
-        # Use server-side pagination for top-level parents
         total = (
             await get_total_count(
                 db,
@@ -270,27 +235,22 @@ async def add_course_start(update: Update, context: CallbackContext):
         parents = []
 
     if not parents:
-        # No parents to choose from — continue with legacy flow (ask name)
         await update.message.reply_text("Enter the name of the course:")
         return ADD_NAME
 
     keyboard = []
-    # Allow top-level (no parent) explicitly
     keyboard.append([InlineKeyboardButton("(Add to top-level)", callback_data="addparent::")])
     for p in parents:
-        # Keep the add flow fast: do not check emptiness here to avoid extra DB calls.
         display = f"{p.get('name')}"
         keyboard.append(
             [InlineKeyboardButton(display, callback_data=_addparent_cb(p.get("name"), 1))],
         )
 
-    # Navigation row
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
     if page > 1:
         nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page - 1}"))
-    # Home for add flow: go to first page (only show on later pages)
     if page > 1:
         nav.append(InlineKeyboardButton("🏠 Home", callback_data="addparent_page::1"))
     if page < last_page:
@@ -324,7 +284,6 @@ async def add_course_name(update: Update, context: CallbackContext):
 async def add_course_link(update: Update, context: CallbackContext):
     link = update.message.text.strip()
 
-    # Validate URL strictly (allow only http/https)
     if not is_valid_url(link):
         await update.message.reply_text("❗️ Invalid URL. Please provide a valid link (http:// or https://).")
         return ADD_LINK
@@ -332,7 +291,6 @@ async def add_course_link(update: Update, context: CallbackContext):
     context.user_data["course_link"] = link
     logger.info("[ADD] Course link received: %s", link)
 
-    # Determine where to save the course: prefer an explicit parent chosen earlier
     parent = context.user_data.get("course_parent")
     coach = context.user_data.get("course_coach")
 
@@ -343,16 +301,11 @@ async def add_course_link(update: Update, context: CallbackContext):
             return ConversationHandler.END
         categories_coll = db["categories"]
         view_cat = None
-        # If a parent was selected, save into that parent category
         if parent is not None:
-            # If a coach was selected and there exists a child category for that coach,
-            # save the course inside that child (coach) category document. Otherwise
-            # save into the parent and tag with the coach field.
             if coach:
                 child_doc = await db["categories"].find_one({"name": coach, "parent": parent})
                 if child_doc:
                     course_doc = {"id": str(uuid.uuid4()), "name": context.user_data.get("course_name"), "link": link}
-                    # child coach category: push course into coach's document
                     update_result = await categories_coll.update_one(
                         {"name": coach, "parent": parent},
                         {"$push": {"courses": course_doc}},
@@ -364,7 +317,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                         getattr(update_result, "raw_result", update_result),
                     )
                 else:
-                    # parent category: include coach field on the course
                     course_doc = {
                         "id": str(uuid.uuid4()),
                         "name": context.user_data.get("course_name"),
@@ -376,7 +328,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                         {"$push": {"courses": course_doc}},
                     )
 
-                    # Fetch and log updated category for debugging: ensure new course appears
                     try:
                         updated_cat = await categories_coll.find_one({"name": parent})
                         logger.info(
@@ -388,7 +339,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                     except Exception:
                         logger.debug("[ADD-COURSE] unable to fetch updated category %s for logging", parent)
             else:
-                # parent without coach: push course_doc without coach field
                 course_doc = {"id": str(uuid.uuid4()), "name": context.user_data.get("course_name"), "link": link}
                 update_result = await categories_coll.update_one({"name": parent}, {"$push": {"courses": course_doc}})
             logger.info(
@@ -400,7 +350,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                 await update.message.reply_text(f"Error: Parent category '{parent}' not found. Create it first.")
                 return ConversationHandler.END
 
-            # Offer a quick button to view the category where the course was added
             if coach:
                 child_doc = await db["categories"].find_one({"name": coach, "parent": parent})
             else:
@@ -413,9 +362,7 @@ async def add_course_link(update: Update, context: CallbackContext):
         if view_cat:
             current_page = context.user_data.get("last_category_page", 1)
 
-            # Show navigation buttons after adding course
             kb_buttons = []
-            # Button to view where the course was added (coach or parent)
             kb_buttons.append(
                 InlineKeyboardButton(
                     f'View "{view_cat}"',
@@ -427,7 +374,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                     ),
                 ),
             )
-            # If we added inside a coach (child category), also offer a quick button to the parent
             if coach and child_doc:
                 try:
                     kb_buttons.append(
@@ -443,7 +389,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                     )
                 except Exception:
                     pass
-            # Arrange buttons in rows of up to 2
             kb_rows = []
             for i in range(0, len(kb_buttons), 2):
                 kb_rows.append(kb_buttons[i : i + 2])
@@ -460,7 +405,6 @@ async def add_course_link(update: Update, context: CallbackContext):
         return ConversationHandler.END
     except Exception:
         logger.exception("Error saving course link")
-        # Provide a clearer message to the user and include a short hint to check logs
         try:
             await update.message.reply_text("An error occurred while saving the course. Check bot logs for details.")
         except Exception:
@@ -468,14 +412,10 @@ async def add_course_link(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
 
+# ----------  pickers  ----------
 async def parent_selected(update: Update, context: CallbackContext):
-    """Callback when a parent is chosen. Presents coach choices next.
-
-    SECURITY: Owner-only — uses fail-closed is_owner() helper.
-    """
     query = update.callback_query
     await safe_answer(query)
-    # Owner-only guard for add flow callbacks (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -488,7 +428,6 @@ async def parent_selected(update: Update, context: CallbackContext):
     parent = None
     origin_page = None
     if raw.startswith("addparent_ref::"):
-        # Resolve stored payload reference (compact form for long names)
         key = raw.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
         if not payload:
@@ -506,7 +445,6 @@ async def parent_selected(update: Update, context: CallbackContext):
             origin_page = None
     elif raw.startswith("addparent::"):
         parts = raw.split("::")
-        # parts -> ['addparent', '<name>' (optional), '<page>' (optional)]
         if len(parts) >= 2 and parts[1] != "":
             parent = urllib.parse.unquote_plus(parts[1])
         if len(parts) >= 3:
@@ -515,24 +453,16 @@ async def parent_selected(update: Update, context: CallbackContext):
             except Exception:
                 origin_page = None
     else:
-        # fallback
         encoded = query.data.split("::", 1)[1] if "::" in query.data else ""
         parent = urllib.parse.unquote_plus(encoded) if encoded else None
 
-    # store chosen parent (None means add to top-level)
     context.user_data["course_parent"] = parent
-    # remember the page we came from to allow returning later
     if origin_page:
         context.user_data["last_category_page"] = origin_page
 
-    # Prefer showing child categories as coach options when coaches are
-    # modeled as category documents. This matches the user's workflow where
-    # `/create_category` creates coaches.
     try:
         db = await get_db()
-        # find child categories of the selected parent
         if parent:
-            # Use server-side pagination: count + sort + skip/limit
             child_count = await get_total_count(db, "categories", {"parent": parent}, ttl=15)
             page_size = COURSE_PAGE_SIZE
             start = (1 - 1) * page_size
@@ -553,14 +483,11 @@ async def parent_selected(update: Update, context: CallbackContext):
 
     keyboard = []
     if child_cats:
-        # Paginate child categories (coaches) when many
         sorted_children = sorted(child_cats, key=lambda c: (c.get("name") or "").lower())
         page = 1
         page_size = COURSE_PAGE_SIZE
-        # Use DB-provided page slice (already limited)
         page_children = sorted_children
         for child in page_children:
-            # Skip emptiness checks to keep pagination responsive in the add flow.
             display = f"{child.get('name')}"
             keyboard.append(
                 [
@@ -569,13 +496,11 @@ async def parent_selected(update: Update, context: CallbackContext):
                     )
                 ],
             )
-        # Navigation row — follow desired ordering rules
         nav = []
         total_pages = (child_count - 1) // page_size + 1 if child_count else 1
         last_page = max(1, total_pages)
         if total_pages > 1:
             if page == 1:
-                # First page: Next, End (if there are more pages)
                 if page < last_page:
                     nav.append(
                         InlineKeyboardButton(
@@ -590,7 +515,6 @@ async def parent_selected(update: Update, context: CallbackContext):
                         ),
                     )
             elif page < last_page:
-                # Middle pages: Prev, Home, End, Next
                 nav.append(
                     InlineKeyboardButton(
                         "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
@@ -613,7 +537,6 @@ async def parent_selected(update: Update, context: CallbackContext):
                         callback_data=_addcoach_page_cb(parent, page + 1),
                     ),
                 )
-            # Last page: Previous and Home only
             elif page > 1:
                 nav.append(
                     InlineKeyboardButton(
@@ -627,19 +550,15 @@ async def parent_selected(update: Update, context: CallbackContext):
                 )
         if nav:
             keyboard.append(nav)
-        # Also allow manual entry or no coach
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
     else:
-        # Fallback: derive coaches from existing course 'coach' fields using DB-side
-        # aggregation to avoid pulling a huge distinct list into memory.
         page = 1
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
         try:
             filter_q = {"$or": [{"name": parent}, {"parent": parent}]} if parent else {}
 
-            # Count distinct coaches
             count_pipeline = [
                 {"$match": filter_q},
                 {"$unwind": "$courses"},
@@ -647,7 +566,6 @@ async def parent_selected(update: Update, context: CallbackContext):
                 {"$group": {"_id": "$courses.coach"}},
                 {"$count": "count"},
             ]
-            # Try Redis cache for coach-distinct count (keyed by parent)
             try:
                 from handlers.base_handlers import _redis
 
@@ -665,7 +583,6 @@ async def parent_selected(update: Update, context: CallbackContext):
                 else:
                     cnt_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
                     total_coaches = int(cnt_res[0].get("count")) if cnt_res else 0
-                    # Cache for 30 seconds (coach lists are stable)
                     if _redis is not None:
                         try:
                             await _redis.setex(coach_cache_key, 30, str(total_coaches))
@@ -675,7 +592,6 @@ async def parent_selected(update: Update, context: CallbackContext):
                 cnt_res = await db.categories.aggregate(count_pipeline).to_list(length=1)
                 total_coaches = int(cnt_res[0].get("count")) if cnt_res else 0
 
-            # Fetch one page of distinct coach names (sorted A→Z)
             pipeline = [
                 {"$match": filter_q},
                 {"$unwind": "$courses"},
@@ -750,7 +666,6 @@ async def parent_selected(update: Update, context: CallbackContext):
             keyboard.append(nav)
         keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
         keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
-    # Ensure Back button is present immediately (so page 1 shows it too)
     try:
         if parent:
             parent_page = context.user_data.get("last_category_page", 1)
@@ -768,15 +683,8 @@ async def parent_selected(update: Update, context: CallbackContext):
 
 
 async def addcoach_page(update: Update, context: CallbackContext):
-    """Paginated view for coach selection inside the add flow.
-
-    Callback format: addcoach_page::{parent}::{page}
-    parent may be empty string for top-level.
-    SECURITY: Owner-only — uses fail-closed is_owner() helper.
-    """
     query = update.callback_query
     await safe_answer(query)
-    # Owner guard for add flow pagination (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -789,7 +697,6 @@ async def addcoach_page(update: Update, context: CallbackContext):
     parent = None
     page = 1
     if data.startswith("addcoach_page_ref::"):
-        # Compact ref form used when the parent name exceeds 64 bytes
         try:
             payload = await _resolve_callback_payload(data.split("::", 1)[1])
             if payload:
@@ -835,14 +742,11 @@ async def addcoach_page(update: Update, context: CallbackContext):
 
     keyboard = []
     if children:
-        # `children` is already a DB-side page (skip/limit). Sort locally to be deterministic
         sorted_children = sorted(children, key=lambda c: (c.get("name") or "").lower())
-        # Use the DB count for total pages (not the length of this page)
         page_size = COURSE_PAGE_SIZE
         total_pages = (total_children - 1) // page_size + 1 if total_children else 1
         last_page = max(1, total_pages)
 
-        # Build coach rows from the current DB page
         for child in sorted_children:
             keyboard.append(
                 [
@@ -854,7 +758,6 @@ async def addcoach_page(update: Update, context: CallbackContext):
             )
 
         nav = []
-        # Prev
         if page > 1:
             nav.append(
                 InlineKeyboardButton(
@@ -862,7 +765,6 @@ async def addcoach_page(update: Update, context: CallbackContext):
                     callback_data=_addcoach_page_cb(parent, page - 1),
                 ),
             )
-        # Home (center) — show only when not on first page
         if page > 1:
             nav.append(
                 InlineKeyboardButton(
@@ -870,7 +772,6 @@ async def addcoach_page(update: Update, context: CallbackContext):
                     callback_data=_addcoach_page_cb(parent, 1),
                 ),
             )
-        # Next
         if page < last_page:
             nav.append(
                 InlineKeyboardButton(
@@ -878,7 +779,6 @@ async def addcoach_page(update: Update, context: CallbackContext):
                     callback_data=_addcoach_page_cb(parent, page + 1),
                 ),
             )
-        # End
         if total_pages > 1 and page < last_page:
             nav.append(
                 InlineKeyboardButton(
@@ -889,11 +789,9 @@ async def addcoach_page(update: Update, context: CallbackContext):
         if nav:
             keyboard.append(nav)
 
-    # Always include manual/no-coach options
     keyboard.append([InlineKeyboardButton("(Enter coach name)", callback_data="addcoach::__manual__")])
     keyboard.append([InlineKeyboardButton("(No coach)", callback_data="addcoach::")])
 
-    # Append a Back button (bottom-most) when a parent context exists
     try:
         if parent:
             parent_page = context.user_data.get("last_category_page", 1)
@@ -911,13 +809,8 @@ async def addcoach_page(update: Update, context: CallbackContext):
 
 
 async def addparent_page(update: Update, context: CallbackContext):
-    """Paginated view for top-level parent selection inside the add flow.
-
-    Callback format: addparent_page::{page}
-    """
     query = update.callback_query
     await safe_answer(query)
-    # Owner guard for add parent pagination (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -973,17 +866,14 @@ async def addparent_page(update: Update, context: CallbackContext):
     last_page = max(1, total_pages)
     if total_pages > 1:
         if page == 1:
-            # First page: Next, End
             if page < last_page:
                 nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page + 1}"))
                 nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
         elif page < last_page:
-            # Middle pages: Prev, Home, End, Next
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page - 1}"))
             nav.append(InlineKeyboardButton("🏠 Home", callback_data="addparent_page::1"))
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addparent_page::{last_page}"))
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addparent_page::{page + 1}"))
-        # Last page: Previous and Home only
         elif page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addparent_page::{page - 1}"))
             nav.append(InlineKeyboardButton("🏠 Home", callback_data="addparent_page::1"))
@@ -1000,18 +890,10 @@ async def addparent_page(update: Update, context: CallbackContext):
 
 
 async def addcat_page(update_or_message, context: CallbackContext, *, page: int = 1):
-    """Paginated categories selection for the add-course fallback.
-
-    This function supports being called with a CallbackQuery (update.callback_query)
-    where `update_or_message.data` contains `addcat_page::{page}` or with
-    a Message context (initial call) where we pass page param explicitly.
-    """
-    # Normalize to callback query if present
     query = getattr(update_or_message, "callback_query", None)
     is_query = query is not None
     if is_query:
         await safe_answer(query)
-        # Owner guard for add cat pagination (fail-closed)
         user_id = getattr(query.from_user, "id", None)
         if not is_owner(user_id):
             await safe_edit_message(
@@ -1030,7 +912,6 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
 
     try:
         db = await get_db()
-        # Use server-side pagination: get total count and fetch only the page slice
         total = await get_total_count(db, "categories", {}, ttl=15)
         page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
@@ -1041,7 +922,6 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
 
     page_cats = cats
 
-    # Batch-check which categories on this page have children to avoid N queries
     keyboard = []
     for c in page_cats:
         display = c.get("name")
@@ -1052,20 +932,16 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     nav = []
     total_pages = (total - 1) // page_size + 1 if total else 1
     last_page = max(1, total_pages)
-    # Layout: Prev (left), Home (center), Next (right); End always at the end.
     if total_pages > 1:
         if page == 1:
-            # First page: Next, End
             if page < last_page:
                 nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page + 1}"))
                 nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
         elif page < last_page:
-            # Middle pages: Prev, Home, End, Next
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page - 1}"))
             nav.append(InlineKeyboardButton("🏠 Home", callback_data="addcat_page::1"))
             nav.append(InlineKeyboardButton("⏭️ End", callback_data=f"addcat_page::{last_page}"))
             nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"addcat_page::{page + 1}"))
-        # Last page: Previous and Home only
         elif page > 1:
             nav.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"addcat_page::{page - 1}"))
             nav.append(InlineKeyboardButton("🏠 Home", callback_data="addcat_page::1"))
@@ -1082,7 +958,6 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
             action_key=getattr(query, "data", None),
         )
     else:
-        # called from a Message flow (initial display)
         await update_or_message.reply_text(
             f"Pick a category for the course (page {page}/{last_page}):",
             reply_markup=reply_markup,
@@ -1090,10 +965,10 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     return None
 
 
+# ----------  selections  ----------
 async def coach_selected(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
-    # Owner guard for coach selection inside add flow (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -1105,7 +980,6 @@ async def coach_selected(update: Update, context: CallbackContext):
     raw = query.data
     coach = None
     if raw.startswith("addcoach_ref::"):
-        # Compact ref form used when the coach name exceeds 64 bytes
         try:
             payload = await _resolve_callback_payload(raw.split("::", 1)[1])
             if payload:
@@ -1115,12 +989,10 @@ async def coach_selected(update: Update, context: CallbackContext):
     else:
         encoded = raw.split("::", 1)[1] if "::" in raw else ""
         if encoded == "__manual__":
-            # Ask for manual entry
             await query.message.reply_text("Send the coach name (text):")
             return ADD_COACH
         coach = urllib.parse.unquote_plus(encoded) if encoded else None
     context.user_data["course_coach"] = coach
-    # Proceed to ask for course name
     await query.message.reply_text("Enter the name of the course:")
     return ADD_NAME
 
@@ -1136,10 +1008,8 @@ async def coach_manual_entry(update: Update, context: CallbackContext):
 
 
 async def category_selected(update: Update, context: CallbackContext):
-    """Save the selected category and add the course to the database."""
     query = update.callback_query
     await safe_answer(query)
-    # Owner guard for final category selection in add flow (fail-closed)
     user_id = getattr(query.from_user, "id", None)
     if not is_owner(user_id):
         await safe_edit_message(
@@ -1149,12 +1019,10 @@ async def category_selected(update: Update, context: CallbackContext):
         )
         return ConversationHandler.END
 
-    # Support compact ref, new `addcat::<name>::<page>`, and legacy `addcat_<name>` formats
     raw = query.data
     category_name = None
     origin_page = None
     if raw.startswith("addcat_ref::"):
-        # Compact ref form used when the category name exceeds 64 bytes
         try:
             payload = await _resolve_callback_payload(raw.split("::", 1)[1])
             if payload:
@@ -1168,7 +1036,6 @@ async def category_selected(update: Update, context: CallbackContext):
             origin_page = None
     elif raw.startswith("addcat::"):
         parts = raw.split("::")
-        # parts -> ['addcat', '<name>', '<page>' (optional)]
         if len(parts) >= 2:
             category_name = urllib.parse.unquote_plus(parts[1])
         if len(parts) >= 3:
@@ -1177,14 +1044,12 @@ async def category_selected(update: Update, context: CallbackContext):
             except Exception:
                 origin_page = None
     else:
-        # legacy underscore format
         encoded = query.data.split("_", 1)
         if len(encoded) < 2:
             await safe_edit_message(query, "Invalid category callback format.", action_key=getattr(query, "data", None))
             return ConversationHandler.END
         category_name = urllib.parse.unquote_plus(encoded[1])
 
-    # Get course data from user context
     course_name = context.user_data.get("course_name")
     course_link = context.user_data.get("course_link")
 
@@ -1196,7 +1061,6 @@ async def category_selected(update: Update, context: CallbackContext):
         )
         return ConversationHandler.END
 
-    # Connect to the database
     db = await get_db()
     if db is None:
         await safe_edit_message(
@@ -1207,18 +1071,15 @@ async def category_selected(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
     try:
-        # Save course inside the category document (push into categories.courses array)
         categories_coll = db["categories"]
         coach = context.user_data.get("course_coach")
         course_doc = {"id": str(uuid.uuid4()), "name": course_name, "link": course_link}
         if coach:
             course_doc["coach"] = coach
         update_result = await categories_coll.update_one({"name": category_name}, {"$push": {"courses": course_doc}})
-        # Log the update result for debugging
         logger.info("[ADD-COURSE] update_result=%s", getattr(update_result, "raw_result", update_result))
 
         if update_result.modified_count == 0:
-            # Category not found
             logger.warning("[ADD-COURSE] Category not found: %s", category_name)
             await safe_edit_message(
                 query,
@@ -1227,14 +1088,11 @@ async def category_selected(update: Update, context: CallbackContext):
             )
             return ConversationHandler.END
 
-        # Send a confirmation message
         msg = (
             f"Course '{course_name}' added successfully to the '{category_name}' category. 🎉\n"
             f"Course Link: {course_link}"
         )
-        # Add a button so the user can view the updated category immediately
         try:
-            # If we know the originating categories page, open that page; otherwise default to 1
             view_page = origin_page or 1
             try:
                 payload = {
@@ -1263,12 +1121,10 @@ async def category_selected(update: Update, context: CallbackContext):
         return ConversationHandler.END
 
 
+# ----------  conversation end  ----------
 async def cancel(update: Update, context: CallbackContext) -> int:
-    """Cancel the current operation."""
     try:
         if getattr(update, "message", None) is not None:
-            # If the user issued /cancel as a reply to a bot message (e.g., an inline confirm),
-            # prefer editing that message to remove buttons and show the cancellation.
             reply_to = getattr(update.message, "reply_to_message", None)
             if reply_to is not None and getattr(reply_to, "message_id", None) is not None:
                 try:
@@ -1292,7 +1148,6 @@ async def cancel(update: Update, context: CallbackContext) -> int:
                     pass
     except Exception:
         pass
-    # Clear any stored conversation data
     try:
         if context and getattr(context, "user_data", None) is not None:
             context.user_data.clear()
@@ -1301,17 +1156,10 @@ async def cancel(update: Update, context: CallbackContext) -> int:
     return ConversationHandler.END
 
 
-# Utility function to check valid URL format
+# ----------  validation & errors  ----------
 def is_valid_url(url: str):
-    """Check if the URL is a valid http(s) link.
-
-    Uses urllib.parse so legit URLs with query strings, fragments, ports,
-    underscores, or Unicode hosts are accepted (the old regex rejected
-    query-only URLs like ``https://example.com?x=1``).
-    """
     if not url or len(url) > 2048:
         return False
-    # Reject whitespace/control characters outright (they break Telegram buttons)
     if any(c.isspace() or ord(c) < 32 for c in url):
         return False
     try:
@@ -1321,19 +1169,14 @@ def is_valid_url(url: str):
         return False
 
 
-# Global error handler
 async def course_error_handler(update, context):
-    """Global error handler — safe when update or update.message is None."""
     try:
         err = getattr(context, "error", context)
         logger.error("Error: %s", err)
-        # Try to reply to user if possible
         if update is None:
             return
-        # Message-based update
         if getattr(update, "message", None) is not None:
             await update.message.reply_text("An unexpected error occurred. Please try again later.")
-        # CallbackQuery-based update
         elif getattr(update, "callback_query", None) is not None:
             cq = update.callback_query
             try:
