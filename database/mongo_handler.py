@@ -1,4 +1,5 @@
 import logging
+import uuid
 
 import pymongo
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -49,6 +50,51 @@ class MongoDB:
         return cls._db
 
     @classmethod
+    async def _backfill_course_uuids(cls, batch_size: int = 500):
+        """Assign a uuid to every embedded course missing one.
+
+        The unique index on courses.id is multikey over the embedded array, so a
+        category mixing uuid'd and legacy (id-less) courses would index the
+        legacy entries as `courses.id: null` and the build would fail on the
+        first pair of nulls. Backfilling every id-less course once at startup
+        makes those null keys impossible and lets the index build succeed.
+        """
+        db = cls._db
+        cursor = (
+            db["categories"]
+            .find(
+                {"courses": {"$elemMatch": {"id": {"$not": {"$type": "string"}}}}},
+                {"courses": 1},
+            )
+            .batch_size(batch_size)
+        )
+        backfilled = 0
+        async for doc in cursor:
+            courses = doc.get("courses") or []
+            updates = {}
+            for idx, course in enumerate(courses):
+                if not isinstance(course, dict):
+                    # Non-dict elements cannot take an `id` field; normalize them
+                    # to the standard course shape so the index never sees null.
+                    updates[f"courses.{idx}"] = {"name": str(course), "id": str(uuid.uuid4())}
+                    continue
+                cid = course.get("id")
+                if not isinstance(cid, str):
+                    updates[f"courses.{idx}.id"] = str(uuid.uuid4())
+            if not updates:
+                continue
+            try:
+                await db["categories"].update_one(
+                    {"_id": doc["_id"]},
+                    [{"$set": updates}],
+                )
+                backfilled += len(updates)
+            except Exception:
+                logger.exception("Failed to backfill course uuids for category _id=%s", doc.get("_id"))
+        if backfilled:
+            logger.info("Backfilled missing course uuids: %d embedded courses updated", backfilled)
+
+    @classmethod
     async def ensure_uuid_indexes(cls):
         """Create unique indexes that make duplicate uuids impossible.
 
@@ -56,14 +102,20 @@ class MongoDB:
         - categories.courses.id: one uuid per embedded course (multikey over the
           embedded array).
 
-        Both are partial indexes matching only existing string values, so legacy
-        docs without uuids (or with other types) never collide on null/missing.
-        Creation is idempotent and safe to run on every startup. If duplicates
-        already exist in the data, creation fails and is logged (best-effort)
-        rather than crashing startup.
+        The courses.id index is a partial index matching only documents that
+        contain a string-valued course id; every id-less embedded course is
+        backfilled to a fresh uuid first (see _backfill_course_uuids) so no
+        `courses.id: null` keys can collide during the build. Creation is
+        idempotent and safe to run on every startup. If duplicates still exist
+        in the data, creation fails and is logged (best-effort) rather than
+        crashing startup.
         """
         if cls._db is None:
             raise MongoConnectionError("MongoDB instance is not initialized.")
+        try:
+            await cls._backfill_course_uuids()
+        except Exception:
+            logger.exception("Failed to backfill missing course uuids (best-effort)")
         try:
             await cls._db["categories"].create_index(
                 "id",
