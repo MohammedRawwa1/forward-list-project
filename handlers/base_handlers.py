@@ -46,6 +46,94 @@ async def _resolve_callback_ref_key(db, key: str) -> dict | None:
     return CALLBACK_MAP.get(key)
 
 
+def _course_uuid(course) -> str | None:
+    """Return a valid uuid string for an embedded course, generating and using it when missing."""
+    try:
+        if not isinstance(course, dict):
+            return None
+        cid = course.get("id")
+        if isinstance(cid, str) and UUID_RE.match(cid.strip()):
+            return cid.strip()
+        new_id = str(uuid.uuid4())
+        course["id"] = new_id
+        return new_id
+    except Exception:
+        return None
+
+
+async def ensure_course_uuids(db, category_name: str, batch_limit: int = 500):
+    """Ensure every embedded course in the given category doc(s) has a stable uuid.
+
+    Mirrors the id backfill that categories/parents already get: existing uuids are
+    never touched, missing ones are generated once and persisted by the course's
+    _id so identical names keep distinct identities.
+    """
+    try:
+        docs = (
+            await db["categories"]
+            .find({"$or": [{"name": category_name}, {"path": category_name}]}, {"_id": 1, "courses": 1})
+            .to_list(length=batch_limit)
+        )
+    except Exception:
+        logger.exception("ensure_course_uuids: failed to load category '%s'", category_name)
+        return
+    for doc in docs:
+        doc_id = doc.get("_id")
+        courses = doc.get("courses") or []
+        updates = {}
+        for idx, course in enumerate(courses):
+            if not isinstance(course, dict):
+                continue
+            cid = course.get("id")
+            if isinstance(cid, str) and cid.strip() and UUID_RE.match(cid.strip()):
+                continue
+            new_id = str(uuid.uuid4())
+            updates[f"courses.{idx}.id"] = new_id
+            try:
+                course["id"] = new_id
+            except Exception:
+                pass
+        if updates:
+            try:
+                await db["categories"].update_one({"_id": doc_id}, {"$set": updates})
+            except Exception:
+                logger.exception("ensure_course_uuids: failed to persist uuids for doc %s", doc_id)
+
+
+async def invalidate_course_caches(category: str = None, coach: str = None):
+    """Drop in-memory and redis page/count caches so deleted courses vanish from lists."""
+    keys = []
+    try:
+        if category:
+            quoted = urllib.parse.quote_plus(str(category))
+            keys.extend(
+                [
+                    f"page:category:{quoted}:1:{PAGE_SIZE}",
+                    f"count:category_courses:{category}",
+                    f"count:category_courses_np:{category}",
+                ],
+            )
+        if coach:
+            keys.append(f"page:coach:{coach}:1")
+        keys.append("page:global:1")
+    except Exception:
+        return
+    for key in keys:
+        try:
+            _PAGE_CACHE.pop(key, None)
+        except Exception:
+            pass
+        try:
+            _COUNT_CACHE.pop(key, None)
+        except Exception:
+            pass
+        try:
+            if _redis is not None:
+                _bg_task(_redis.delete(key))
+        except Exception:
+            pass
+
+
 async def collect_subtree_names(
     db,
     root_name: str,
@@ -2392,6 +2480,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
                     "link": "$courses.link",
                     "category": "$name",
                     "coach": "$courses.coach",
+                    "id": {"$ifNull": ["$courses.id", None]},
                 },
             },
             {"$match": {"$or": [{"coach": coach_name}, {"category": coach_name}]}},
@@ -4522,12 +4611,16 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
 
         async with _db_timing(f"get_courses_by_category:{category}:{page}"):
             try:
+                await ensure_course_uuids(db, category)
+            except Exception:
+                pass
+            try:
                 proj = {"courses": {"$slice": [start, page_size]}, "name": 1, "path": 1}
                 doc = await db.categories.find_one({"$or": [{"name": category}, {"path": category}]}, projection=proj)
                 if doc and isinstance(doc.get("courses"), list):
                     items = [
                         {
-                            "id": (c.get("id") if isinstance(c, dict) else None),
+                            "id": str(c.get("id")) if isinstance(c, dict) and c.get("id") is not None else None,
                             "name": (c.get("name") if isinstance(c, dict) else None),
                             "link": (c.get("link") if isinstance(c, dict) else None),
                             "category": (doc.get("name") or doc.get("path")),
@@ -4556,7 +4649,7 @@ async def get_courses_by_category(user_id, category, page: int = 1, page_size: i
                             "name": "$courses.name",
                             "link": "$courses.link",
                             "category": "$name",
-                            "id": "$courses.id",
+                            "id": {"$ifNull": ["$courses.id", None]},
                             "coach": "$courses.coach",
                         },
                     },
@@ -4688,11 +4781,22 @@ def _clamp_courses_page(page: int, total, page_size: int):
 
 async def _fetch_category_courses_page(db, category, page: int, page_size: int):
     for _attempt in range(2):
+        try:
+            await ensure_course_uuids(db, category)
+        except Exception:
+            pass
         start = (page - 1) * page_size
         items_pipeline = [
             {"$match": {"$or": [{"name": category}, {"path": category}]}},
             {"$unwind": "$courses"},
-            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+            {
+                "$project": {
+                    "name": "$courses.name",
+                    "link": "$courses.link",
+                    "category": "$name",
+                    "id": {"$ifNull": ["$courses.id", None]},
+                },
+            },
             {"$sort": {"name": 1}},
             {"$skip": start},
             {"$limit": page_size + 1},
@@ -4763,7 +4867,14 @@ async def courses_callback(update: Update, context: CallbackContext):
                             start = (page - 1) * page_size
                             items_pipeline = [
                                 {"$unwind": "$courses"},
-                                {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                                {
+                                    "$project": {
+                                        "name": "$courses.name",
+                                        "link": "$courses.link",
+                                        "category": "$name",
+                                        "id": {"$ifNull": ["$courses.id", None]},
+                                    },
+                                },
                                 {"$sort": {"name": 1}},
                                 {"$skip": start},
                                 {"$limit": page_size + 1},
@@ -4810,6 +4921,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                                         "link": "$courses.link",
                                         "category": "$name",
                                         "coach": "$courses.coach",
+                                        "id": {"$ifNull": ["$courses.id", None]},
                                     },
                                 },
                                 {"$match": {"coach": coach_name}},
@@ -4902,7 +5014,14 @@ async def courses_callback(update: Update, context: CallbackContext):
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$unwind": "$courses"},
-                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                            {
+                                "$project": {
+                                    "name": "$courses.name",
+                                    "link": "$courses.link",
+                                    "category": "$name",
+                                    "id": {"$ifNull": ["$courses.id", None]},
+                                },
+                            },
                             {"$sort": {"name": 1}},
                             {"$skip": start},
                             {"$limit": page_size + 1},
@@ -5059,6 +5178,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                                     "link": "$courses.link",
                                     "category": "$name",
                                     "coach": "$courses.coach",
+                                    "id": {"$ifNull": ["$courses.id", None]},
                                 },
                             },
                             {"$match": {"coach": coach_name}},
@@ -5122,7 +5242,14 @@ async def courses_callback(update: Update, context: CallbackContext):
                         start = (page - 1) * page_size
                         items_pipeline = [
                             {"$unwind": "$courses"},
-                            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name"}},
+                            {
+                                "$project": {
+                                    "name": "$courses.name",
+                                    "link": "$courses.link",
+                                    "category": "$name",
+                                    "id": {"$ifNull": ["$courses.id", None]},
+                                },
+                            },
                             {"$sort": {"name": 1}},
                             {"$skip": start},
                             {"$limit": page_size + 1},
@@ -5191,6 +5318,10 @@ async def courses_callback(update: Update, context: CallbackContext):
                                     origin_ctx_page = None
                         except Exception:
                             origin_ctx = None
+                    try:
+                        await ensure_course_uuids(db, category)
+                    except Exception:
+                        pass
                     category_doc = await db.categories.find_one({"name": category})
                     if not category_doc or not category_doc.get("courses"):
                         await safe_edit_message(

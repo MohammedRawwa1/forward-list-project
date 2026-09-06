@@ -49,6 +49,49 @@ class MongoDB:
         return cls._db
 
     @classmethod
+    async def ensure_uuid_indexes(cls):
+        """Create unique indexes that make duplicate uuids impossible.
+
+        - categories.id: one uuid per parent/category document.
+        - categories.courses.id: one uuid per embedded course (multikey over the
+          embedded array).
+
+        Both are partial indexes matching only existing string values, so legacy
+        docs without uuids (or with other types) never collide on null/missing.
+        Creation is idempotent and safe to run on every startup. If duplicates
+        already exist in the data, creation fails and is logged (best-effort)
+        rather than crashing startup.
+        """
+        if cls._db is None:
+            raise MongoConnectionError("MongoDB instance is not initialized.")
+        try:
+            await cls._db["categories"].create_index(
+                "id",
+                unique=True,
+                name="uniq_categories_id",
+                partialFilterExpression={"id": {"$type": "string"}},
+            )
+            logger.info("Unique index on categories.id ensured")
+        except Exception:
+            logger.exception(
+                "Failed to create unique index on categories.id "
+                "(duplicate category uuids likely exist in the data)",
+            )
+        try:
+            await cls._db["categories"].create_index(
+                "courses.id",
+                unique=True,
+                name="uniq_categories_courses_id",
+                partialFilterExpression={"courses.id": {"$type": "string"}},
+            )
+            logger.info("Unique index on categories.courses.id ensured")
+        except Exception:
+            logger.exception(
+                "Failed to create unique index on categories.courses.id "
+                "(duplicate course uuids likely exist in the data)",
+            )
+
+    @classmethod
     async def close(cls):
         if cls._client:
             cls._client.close()

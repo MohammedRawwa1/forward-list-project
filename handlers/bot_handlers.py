@@ -230,7 +230,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         total = await base_handlers.get_total_count(db, "categories", base_handlers.TOP_LEVEL_FILTER, ttl=15)
         cats = (
             await db["categories"]
-            .find(base_handlers.TOP_LEVEL_FILTER, {"name": 1, "parent": 1})
+            .find(base_handlers.TOP_LEVEL_FILTER, {"_id": 1, "name": 1, "parent": 1, "id": 1})
             .sort("name", 1)
             .skip(start)
             .limit(page_size)
@@ -244,6 +244,13 @@ async def delete_parent_start(update: Update, context: CallbackContext):
         keyboard = []
 
         for cat in cats:
+            if not cat.get("id"):
+                try:
+                    new_id = str(uuid.uuid4())
+                    await db["categories"].update_one({"_id": cat.get("_id")}, {"$set": {"id": new_id}})
+                    cat["id"] = new_id
+                except Exception:
+                    pass
             name = (cat.get("name") or "").strip()
             parent = cat.get("parent")
 
@@ -253,7 +260,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
                 display_name = f"{name} (parent)"
 
             try:
-                payload = {"category": name, "parent": parent}
+                payload = {"category": name, "parent": parent, "id": cat.get("id")}
                 key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_summary::category::{key}"
             except Exception:
@@ -312,7 +319,7 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
         total = await base_handlers.get_total_count(db, "categories", base_handlers.TOP_LEVEL_FILTER, ttl=15)
         cats = (
             await db["categories"]
-            .find(base_handlers.TOP_LEVEL_FILTER, {"name": 1, "parent": 1})
+            .find(base_handlers.TOP_LEVEL_FILTER, {"_id": 1, "name": 1, "parent": 1, "id": 1})
             .sort("name", 1)
             .skip(start)
             .limit(page_size)
@@ -325,6 +332,13 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
 
         keyboard = []
         for cat in cats:
+            if not cat.get("id"):
+                try:
+                    new_id = str(uuid.uuid4())
+                    await db["categories"].update_one({"_id": cat.get("_id")}, {"$set": {"id": new_id}})
+                    cat["id"] = new_id
+                except Exception:
+                    pass
             name = (cat.get("name") or "").strip()
             parent = cat.get("parent")
             if parent:
@@ -332,7 +346,7 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
             else:
                 display_name = f"{name} (parent)"
             try:
-                payload = {"category": name, "parent": parent}
+                payload = {"category": name, "parent": parent, "id": cat.get("id")}
                 key = base_handlers._store_callback_payload(payload)
                 cb = f"delete_summary::category::{key}"
             except Exception:

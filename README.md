@@ -18,6 +18,7 @@ Key Architectural Features
 - Callback refs: short callback payloads are persisted using an in-memory map, Redis (preferred), and MongoDB (fallback). TTLs are configurable via `CALLBACK_REF_TTL` and refs are rehydrated at startup so inline keyboards survive restarts.
 - Retry/backoff worker: edits that hit Telegram's `RetryAfter` are queued into a Redis sorted-set and executed later by the background `start_redis_retry_worker` which implements best-effort backoff scheduling.
 - UUID-safe deletions: courses are created with `id: str(uuid.uuid4())`. Delete flows use embedded `courses.id` where available to avoid ambiguous name-based deletions. Parent/category deletions are performed using _id-aware subtree deletion (avoids accidentally deleting multiple docs with identical `name`).
+- Unique uuid indexes: on startup `MongoDB.ensure_uuid_indexes()` creates two unique partial indexes on `categories` — `id` (one uuid per category/parent doc) and `courses.id` (one uuid per embedded course, multikey) — both scoped to string values so legacy docs without uuids never collide. If duplicates already exist, index creation fails and is logged rather than crashing startup; deduplicate the data and the index will be created on the next boot.
 
 Quick Setup (local)
 1. Create virtualenv and install deps
@@ -59,7 +60,9 @@ Running in production
 
 How deletion works (safety & UUIDs)
 - Course creation: when a course is added, the handler assigns `id = str(uuid.uuid4())` and pushes it into the category document. This enables deterministic deletion by `courses.id`.
-- Course deletion (Details view): the Details view stores a short callback ref that includes the course `id` (when present). The Delete flow resolves that payload and prefers deleting by `courses.id` (UUID) — falling back to name-based deletion only for legacy entries.
+- Course deletion (Details view): the Details view stores a short callback ref that includes the course `id` (when present). The Delete flow resolves that payload and prefers deleting by `courses.id` (UUID) — falling back to name-based deletion only for legacy entries, and only when the name is unambiguous in the target category (guarded fallback refuses to fire on duplicate-named courses).
+- Legacy uuid backfill: when a category's course list is rendered, `ensure_course_uuids()` assigns a distinct uuid to any embedded course missing one (persisted positionally by the category doc's `_id`), so legacy duplicates become individually deletable the first time their category is opened.
+- Cache invalidation: after every successful course deletion, `invalidate_course_caches()` clears the in-memory and Redis page/count caches so deleted courses do not reappear from stale cached pages.
 - Category / Parent deletion: deletion of categories and parents is performed in an _id-aware way to avoid deleting unintended documents when multiple category documents share the same `name`. The code uses a subtree collection approach and deletes only the exact `_id` documents that belong to the subtree.
 
 Caching & Redis Backoff

@@ -152,6 +152,11 @@ async def lifespan(_app: FastAPI):
     except Exception:
         logger.debug("Could not create coaches.topics index (best-effort)")
 
+    try:
+        await MongoDB.ensure_uuid_indexes()
+    except Exception:
+        logger.exception("ensure_uuid_indexes failed (best-effort)")
+
     application = await create_application()
     await application.initialize()
     await setup_handlers(application)

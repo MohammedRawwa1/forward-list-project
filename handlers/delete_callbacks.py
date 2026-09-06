@@ -16,6 +16,83 @@ from handlers.base_handlers import (
     safe_edit_message,
 )
 
+
+def _parse_origin_page(value, default: int = 1) -> int:
+    try:
+        page = int(value)
+        return page if page >= 1 else default
+    except Exception:
+        return default
+
+
+async def _course_doc_by_id(db, course_id: str, projection=None):
+    """Locate the single category doc holding the course with this uuid."""
+    try:
+        return await db["categories"].find_one({"courses.id": course_id}, projection)
+    except Exception:
+        logger.exception("_course_doc_by_id failed for course_id=%s", course_id)
+        return None
+
+
+async def _delete_course_by_id(db, course_id: str):
+    """Delete exactly the course matching this uuid, wherever it lives."""
+    return await db["categories"].update_one(
+        {"courses.id": course_id},
+        {"$pull": {"courses": {"id": course_id}}},
+    )
+
+
+class _NoopResult:
+    modified_count = 0
+
+
+async def _delete_course_guarded(db, category: str, item: str):
+    """Name-based fallback for legacy courses without a uuid.
+
+    Only deletes when exactly one course in the target doc has that name —
+    refuses to fire when duplicate-named courses exist (that's the bug this
+    guards against, since $pull would remove every match at once).
+    Returns (result, deleted_doc_name).
+    """
+    holder = None
+    try:
+        holder = await db["categories"].find_one({"name": category}, projection={"name": 1, "courses": 1})
+    except Exception:
+        holder = None
+    if not holder:
+        try:
+            holder = await db["categories"].find_one({"courses.name": item}, projection={"name": 1, "courses": 1})
+        except Exception:
+            holder = None
+    if not holder:
+        return _NoopResult(), None
+    matches = [c for c in (holder.get("courses") or []) if isinstance(c, dict) and c.get("name") == item]
+    if len(matches) != 1:
+        logger.warning(
+            "[DEL] refusing ambiguous name-based delete: %d courses named '%s' in '%s'",
+            len(matches),
+            item,
+            holder.get("name"),
+        )
+        return _NoopResult(), None
+    holder_name = holder.get("name")
+    res = await db["categories"].update_one(
+        {"name": holder_name},
+        {"$pull": {"courses": {"name": item}}},
+    )
+    if getattr(res, "modified_count", 0):
+        return res, holder_name
+    return res, None
+
+
+async def _after_course_delete(category: str = None, coach: str = None):
+    try:
+        from handlers.base_handlers import invalidate_course_caches
+
+        await invalidate_course_caches(category=category, coach=coach)
+    except Exception:
+        logger.debug("invalidate_course_caches unavailable", exc_info=True)
+
 logger = logging.getLogger(__name__)
 BATCH_LIMIT = 500
 
@@ -49,28 +126,43 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
     try:
         payload = None
         try:
-            payload = await _resolve_callback_ref_key(db, cat)
+            payload = await _resolve_callback_payload(cat)
         except Exception:
             payload = None
+        if not payload:
+            try:
+                payload = await _resolve_callback_ref_key(db, cat)
+            except Exception:
+                payload = None
 
         cat_doc = None
-        if payload and isinstance(payload, dict) and payload.get("category"):
-            try:
-                cat_id = payload.get("category_id") or payload.get("id")
-                if cat_id:
+        if isinstance(payload, dict):
+            payload_cat_id = payload.get("category_id") or payload.get("id")
+            if payload_cat_id and is_uuid(str(payload_cat_id)):
+                try:
                     cat_doc = await db["categories"].find_one(
-                        {"id": cat_id},
+                        {"id": str(payload_cat_id)},
                         projection={"path": 1, "id": 1, "name": 1},
                     )
-            except Exception:
-                cat_doc = None
+                except Exception:
+                    cat_doc = None
+            if not cat_doc and payload.get("category"):
+                try:
+                    cat_doc = await db["categories"].find_one(
+                        {"$or": [{"path": payload.get("category")}, {"name": payload.get("category")}]},
+                        projection={"path": 1, "id": 1, "name": 1},
+                    )
+                except Exception:
+                    cat_doc = None
 
         if not cat_doc:
             cat_doc = await db["categories"].find_one(
                 {"$or": [{"path": cat}, {"name": cat}]},
-                projection={"path": 1, "id": 1, "name": 1},
+                projection={"_id": 1, "path": 1, "id": 1, "name": 1},
             )
 
+        if cat_doc and cat_doc.get("name"):
+            cat = cat_doc.get("name")
         if cat_doc and cat_doc.get("path"):
             base_path = cat_doc.get("path")
             docs = (
@@ -101,6 +193,7 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
             else:
                 await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, "data", None))
         else:
+            root_id = cat_doc.get("_id") if cat_doc else None
             to_delete = await collect_subtree_names(
                 db,
                 cat,
@@ -113,6 +206,8 @@ async def handle_category_deletion(update: Update, context: CallbackContext):
                     .to_list(length=len(to_delete) * BATCH_LIMIT)
                 )
                 ids_to_remove = set()
+                if root_id:
+                    ids_to_remove.add(root_id)
                 for d in all_docs:
                     parent = d.get("parent")
                     if d.get("name") == cat or parent in to_delete:
@@ -173,19 +268,14 @@ async def handle_delete_ref(update: Update, context: CallbackContext):
             await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=data)
             return
         if course_id:
-            res = await db["categories"].update_one(
-                {"courses.id": course_id},
-                {"$pull": {"courses": {"id": course_id}}},
-            )
+            res = await _delete_course_by_id(db, course_id)
         elif cat and item:
-            res = await db["categories"].update_one(
-                {"name": cat},
-                {"$pull": {"courses": {"name": item}}},
-            )
+            res, _deleted_cat = await _delete_course_guarded(db, cat, item)
         else:
             await safe_edit_message(query, "Cannot determine course to delete.", action_key=data)
             return
         if getattr(res, "modified_count", 0):
+            await _after_course_delete(category=cat)
             await safe_edit_message(
                 query,
                 f"Course '\u2018{item}\u2019 deleted from category '\u2018{cat}\u2019. \u2705",
@@ -227,11 +317,16 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         cat = payload.get("category")
         item = payload.get("name")
         cat_id = payload.get("category_id")
-        if cat_id:
-            res = await db["categories"].update_one({"id": cat_id}, {"$pull": {"courses": {"name": item}}})
+        item_id = payload.get("id")
+        cat_filter = {"id": cat_id} if cat_id else {"name": cat}
+        if item_id:
+            res = await _delete_course_by_id(db, item_id)
+            if not getattr(res, "modified_count", 0):
+                res = await db["categories"].update_one(cat_filter, {"$pull": {"courses": {"name": item}}})
         else:
-            res = await db["categories"].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+            res = await db["categories"].update_one(cat_filter, {"$pull": {"courses": {"name": item}}})
         if res.modified_count:
+            await _after_course_delete(category=cat)
             await safe_edit_message(
                 query,
                 f"Course ‘{item}’ deleted from category ‘{cat}’. ✅",
@@ -247,11 +342,10 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
         if len(parts) == 2:
             cat_raw = urllib.parse.unquote_plus(parts[0])
             item = urllib.parse.unquote_plus(parts[1])
-            if is_uuid(cat_raw):
-                res = await db["categories"].update_one({"id": cat_raw}, {"$pull": {"courses": {"name": item}}})
-            else:
-                res = await db["categories"].update_one({"name": cat_raw}, {"$pull": {"courses": {"name": item}}})
+            cat_filter = {"id": cat_raw} if is_uuid(cat_raw) else {"name": cat_raw}
+            res = await db["categories"].update_one(cat_filter, {"$pull": {"courses": {"name": item}}})
             if res.modified_count:
+                await _after_course_delete(category=cat_raw)
                 await safe_edit_message(
                     query,
                     f"Course ‘{item}’ deleted from category ‘{cat_raw}’. ✅",
@@ -263,8 +357,21 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
 
     item = data.split("_", 2)[2] if "_" in data else data
     item = urllib.parse.unquote_plus(item)
-    res = await db["categories"].update_one({"courses.name": item}, {"$pull": {"courses": {"name": item}}})
+    holder = await db["categories"].find_one({"courses.name": item}, projection={"name": 1, "courses": 1})
+    if not holder:
+        await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, "data", None))
+        return
+    matches = [c for c in (holder.get("courses") or []) if isinstance(c, dict) and c.get("name") == item]
+    if len(matches) != 1:
+        await safe_edit_message(
+            query,
+            f"Multiple courses named ‘{item}’ exist. Delete each from its category list instead. ❌",
+            action_key=getattr(query, "data", None),
+        )
+        return
+    res = await db["categories"].update_one({"name": holder.get("name")}, {"$pull": {"courses": {"name": item}}})
     if res.modified_count:
+        await _after_course_delete(category=holder.get("name"))
         await safe_edit_message(query, f"Course ‘{item}’ deleted. ✅", action_key=getattr(query, "data", None))
     else:
         await safe_edit_message(query, "Course not found. ❌", action_key=getattr(query, "data", None))
@@ -299,6 +406,18 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
 
     cat = payload.get("category")
     item = payload.get("name")
+    payload_id = payload.get("category_id") or payload.get("id")
+
+    async def _resolve_cat_filter():
+        """Resolve a category filter by uuid first, falling back to name + _id anchor."""
+        if payload_id and is_uuid(str(payload_id)):
+            doc = await db["categories"].find_one({"id": str(payload_id)}, projection={"_id": 1, "name": 1})
+            if doc:
+                return {"_id": doc.get("_id")}, doc.get("name") or cat
+        doc = await db["categories"].find_one({"name": cat}, projection={"_id": 1, "name": 1})
+        if doc:
+            return {"_id": doc.get("_id")}, doc.get("name") or cat
+        return {"name": cat}, cat
 
     try:
         db = await MongoDB.get_db()
@@ -328,18 +447,25 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                 return
             course_id = payload.get("id")
             if course_id:
-                res = await db["categories"].update_one(
-                    {"courses.id": course_id},
-                    {"$pull": {"courses": {"id": course_id}}},
-                )
+                res = await _delete_course_by_id(db, course_id)
             else:
-                res = await db["categories"].update_one({"name": cat}, {"$pull": {"courses": {"name": item}}})
+                res, _ = await _delete_course_guarded(db, cat, item)
 
             if res.modified_count:
+                await _after_course_delete(category=cat)
                 try:
                     cat_doc = await db["categories"].find_one({"name": cat})
                     courses = cat_doc.get("courses", []) if cat_doc else []
-                    all_courses = [{"name": c.get("name"), "link": c.get("link"), "category": cat} for c in courses]
+                    all_courses = [
+                        {
+                            "name": c.get("name"),
+                            "link": c.get("link"),
+                            "category": cat,
+                            "id": str(c.get("id")) if c.get("id") is not None else None,
+                        }
+                        for c in courses
+                        if isinstance(c, dict)
+                    ]
                     all_courses = sorted(all_courses, key=lambda c: (c.get("name") or "").lower())
                     from handlers.base_handlers import build_courses_page
 
@@ -393,11 +519,15 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
             if not cat:
                 await safe_edit_message(
                     query,
-                    "Cannot determine category to delete. Aborting.",
+                    "Cannot determine category to delete. Its reference may have expired. ❌",
                     action_key=getattr(query, "data", None),
                 )
                 return
             try:
+                cat_filter, cat_name = await _resolve_cat_filter()
+                cat = cat_name
+                root_doc = await db["categories"].find_one(cat_filter, projection={"_id": 1, "name": 1})
+                root_id = root_doc.get("_id") if root_doc else None
                 to_delete = await collect_subtree_names(
                     db,
                     cat,
@@ -410,6 +540,8 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                         .to_list(length=len(to_delete) * BATCH_LIMIT)
                     )
                     ids_to_remove = set()
+                    if root_id:
+                        ids_to_remove.add(root_id)
                     for d in all_docs:
                         parent = d.get("parent")
                         if d.get("name") == cat or parent in to_delete:
@@ -444,16 +576,23 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
             if not cat:
                 await safe_edit_message(
                     query,
-                    "Cannot determine parent to delete. Aborting.",
+                    "Cannot determine parent to delete. Its reference may have expired. ❌",
                     action_key=getattr(query, "data", None),
                 )
                 return
-            cat_doc = await db["categories"].find_one({"name": cat})
+            cat_filter, cat_name = await _resolve_cat_filter()
+            cat = cat_name
+            cat_doc = await db["categories"].find_one(cat_filter)
             parent_name = cat_doc.get("parent") if cat_doc else None
             if not parent_name:
                 await safe_edit_message(query, "Parent not found. ❌", action_key=getattr(query, "data", None))
                 return
             try:
+                parent_doc = await db["categories"].find_one(
+                    {"name": parent_name},
+                    projection={"_id": 1, "name": 1},
+                )
+                parent_root_id = parent_doc.get("_id") if parent_doc else None
                 to_delete = await collect_subtree_names(
                     db,
                     parent_name,
@@ -466,6 +605,8 @@ async def handle_delete_confirm(update: Update, context: CallbackContext):
                         .to_list(length=len(to_delete) * BATCH_LIMIT)
                     )
                     ids_to_remove = set()
+                    if parent_root_id:
+                        ids_to_remove.add(parent_root_id)
                     for d in all_docs:
                         parent = d.get("parent")
                         if d.get("name") == parent_name or parent in to_delete:
@@ -534,6 +675,7 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
         return
 
     cat = payload.get("category")
+    payload_id = payload.get("category_id") or payload.get("id")
     try:
         db = await MongoDB.get_db()
     except Exception:
@@ -548,7 +690,10 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             )
             return
         try:
-            cat_doc = await db["categories"].find_one({"name": cat}, projection={"courses": 1})
+            cat_filter = {"id": str(payload_id)} if payload_id and is_uuid(str(payload_id)) else {"name": cat}
+            cat_doc = await db["categories"].find_one(cat_filter, projection={"courses": 1, "name": 1})
+            if cat_doc and cat_doc.get("name"):
+                cat = cat_doc.get("name")
             if cat_doc is None:
                 await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, "data", None))
                 return
@@ -642,7 +787,13 @@ async def handle_delete_summary(update: Update, context: CallbackContext):
             )
             return
         try:
-            cat_doc = await db["categories"].find_one({"name": cat})
+            cat_filter = {"id": str(payload_id)} if payload_id and is_uuid(str(payload_id)) else {"name": cat}
+            cat_doc = await db["categories"].find_one(cat_filter)
+            if cat_doc is None:
+                await safe_edit_message(query, "Category not found. ❌", action_key=getattr(query, "data", None))
+                return
+            if cat_doc and cat_doc.get("name"):
+                cat = cat_doc.get("name")
             parent_name = cat_doc.get("parent") if cat_doc else None
             if not parent_name:
                 await safe_edit_message(query, "Parent not found. ❌", action_key=getattr(query, "data", None))
