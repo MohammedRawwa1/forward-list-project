@@ -51,26 +51,25 @@ class MongoDB:
 
     @classmethod
     async def _backfill_course_uuids(cls, batch_size: int = 500):
-        """Assign a uuid to every embedded course missing one.
+        """Assign a uuid to EVERY embedded course that lacks a string one.
 
         The unique index on courses.id is multikey over the embedded array, so a
         category mixing uuid'd and legacy (id-less) courses would index the
         legacy entries as `courses.id: null` and the build would fail on the
         first pair of nulls. Backfilling every id-less course once at startup
         makes those null keys impossible and lets the index build succeed.
+
+        Uses a full collection scan rather than an $elemMatch filter so exotic
+        element types (regex, binary, nested arrays, nulls, non-dict entries)
+        are also caught and normalized.
         """
         db = cls._db
-        cursor = (
-            db["categories"]
-            .find(
-                {"courses": {"$elemMatch": {"id": {"$not": {"$type": "string"}}}}},
-                {"courses": 1},
-            )
-            .batch_size(batch_size)
-        )
+        cursor = db["categories"].find({}, {"courses": 1}).batch_size(batch_size)
         backfilled = 0
         async for doc in cursor:
             courses = doc.get("courses") or []
+            if not isinstance(courses, list):
+                courses = []
             updates = {}
             for idx, course in enumerate(courses):
                 if not isinstance(course, dict):
@@ -95,6 +94,18 @@ class MongoDB:
             logger.info("Backfilled missing course uuids: %d embedded courses updated", backfilled)
 
     @classmethod
+    async def _find_courses_without_uuid(cls) -> list[dict]:
+        """Return name/_id of docs that still contain a non-string course id."""
+        offenders = []
+        cursor = cls._db["categories"].find(
+            {"courses": {"$elemMatch": {"id": {"$not": {"$type": "string"}}}}},
+            {"courses": 1, "name": 1},
+        )
+        async for doc in cursor:
+            offenders.append({"_id": str(doc.get("_id")), "name": doc.get("name")})
+        return offenders
+
+    @classmethod
     async def ensure_uuid_indexes(cls):
         """Create unique indexes that make duplicate uuids impossible.
 
@@ -116,6 +127,19 @@ class MongoDB:
             await cls._backfill_course_uuids()
         except Exception:
             logger.exception("Failed to backfill missing course uuids (best-effort)")
+        try:
+            remaining = await cls._find_courses_without_uuid()
+            if remaining:
+                logger.warning(
+                    "Course uuid backfill incomplete; %d categories still contain non-string "
+                    "course ids (index build may fail): %s",
+                    len(remaining),
+                    remaining[:10],
+                )
+            else:
+                logger.info("Verified: no non-string course ids remain in categories")
+        except Exception:
+            logger.debug("Could not verify course uuid backfill status")
         try:
             await cls._db["categories"].create_index(
                 "id",
