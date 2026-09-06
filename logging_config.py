@@ -3,6 +3,7 @@ import json as _json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 from queue import Queue
 from traceback import format_exception
@@ -17,6 +18,36 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 LOG_QUEUE_MAXSIZE = int(os.getenv("LOG_QUEUE_MAXSIZE", "10000"))
 
 TEXT_LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s - %(message)s"
+
+# Matches Telegram bot tokens in any URL shape: "bot<id>:<secret>" (API URLs),
+# "<id>:<secret>" in webhook paths, and %-encoded variants of both.
+_TOKEN_RE = re.compile(r"(?:bot)?\d{6,}:[A-Za-z0-9_-]{30,}")
+_TOKEN_ENCODED_RE = re.compile(r"(?:bot)?\d{6,}%3A[A-Za-z0-9_-]{30,}")
+
+
+def redact_tokens(text: str) -> str:
+    """Replace any bot-token-shaped string in `text` with '<token>'.
+
+    Installed as a logging.Filter on every handler so ALL loggers — app,
+    httpx, uvicorn.access, third-party — emit token-free output.
+    """
+    if not isinstance(text, str):
+        return text
+    text = _TOKEN_ENCODED_RE.sub("<token>", text)
+    return _TOKEN_RE.sub("<token>", text)
+
+
+class TokenRedactionFilter(logging.Filter):
+    """Sanitize bot tokens out of every record before it is emitted."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.msg = redact_tokens(str(record.msg))
+            if record.args:
+                record.args = tuple(redact_tokens(str(a)) for a in record.args)
+        except Exception:
+            logging.getLogger(__name__).debug("Token redaction skipped a record", exc_info=True)
+        return True
 
 
 class ColoredConsoleFormatter(logging.Formatter):
@@ -131,6 +162,12 @@ if not any(isinstance(h, logging.handlers.QueueHandler) for h in _logger.handler
     )
     _file_handler.setLevel(LOG_LEVEL)
     _file_handler.setFormatter(_file_formatter)
+
+    # Single midpoint: every record from every logger passes through this
+    # filter before either handler formats it, so no token can leak.
+    _redaction = TokenRedactionFilter()
+    _console_handler.addFilter(_redaction)
+    _file_handler.addFilter(_redaction)
 
     _real_handlers = [_console_handler, _file_handler]
 

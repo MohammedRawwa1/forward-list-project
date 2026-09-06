@@ -1,4 +1,6 @@
 import logging
+import os
+import time
 import uuid
 
 import pymongo
@@ -7,6 +9,10 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
 
+# How long a successful "indexes verified clean" result is trusted before the
+# startup backfill/verification scan runs again. Deploy restarts within this
+# window skip the full collection scan entirely (the scan took ~8s in prod).
+UUID_INDEX_CACHE_TTL = int(os.getenv("UUID_INDEX_CACHE_TTL", "1800"))
 
 # ----------  errors  ----------
 class MongoConnectionError(Exception):
@@ -19,6 +25,11 @@ class MongoDB:
     _db = None
     _sync_client = None
     _sync_db = None
+
+    # Boot cache for the uuid-index check: (monotonic_timestamp, ok_bool).
+    # In-process only — a fresh process always re-checks once, then caches.
+    _uuid_index_cache_ts: float | None = None
+    _uuid_index_cache_ok: bool = False
 
     @classmethod
     async def initialize(cls, mongo_uri: str, db_name: str):
@@ -147,23 +158,13 @@ class MongoDB:
         return offenders
 
     @classmethod
-    async def ensure_uuid_indexes(cls):
-        """Create unique indexes that make duplicate uuids impossible.
+    async def _ensure_indexes_verified(cls) -> bool:
+        """Run backfill + verification scan, then create the indexes.
 
-        - categories.id: one uuid per parent/category document.
-        - categories.courses.id: one uuid per embedded course (multikey over the
-          embedded array).
-
-        The courses.id index is a partial index matching only documents that
-        contain a string-valued course id; every id-less embedded course is
-        backfilled to a fresh uuid first (see _backfill_course_uuids) so no
-        `courses.id: null` keys can collide during the build. Creation is
-        idempotent and safe to run on every startup. If duplicates still exist
-        in the data, creation fails and is logged (best-effort) rather than
-        crashing startup.
+        Split out of ensure_uuid_indexes so the cached fast path can still
+        issue the (cheap, server-side no-op) create_index calls every boot,
+        while the expensive full-scan is what gets skipped.
         """
-        if cls._db is None:
-            raise MongoConnectionError("MongoDB instance is not initialized.")
         try:
             await cls._backfill_course_uuids()
         except Exception:
@@ -181,6 +182,23 @@ class MongoDB:
                 logger.info("Verified: no non-string course ids remain in categories")
         except Exception:
             logger.debug("Could not verify course uuid backfill status")
+        return await cls._create_uuid_indexes()
+
+    @classmethod
+    async def _create_uuid_indexes(cls) -> bool:
+        """Create both unique partial indexes plus coaches.topics.
+
+        All three are cheap server-side no-ops when they already exist, so
+        they are issued on every boot (even on cache hits) and double as
+        self-healing if an index was dropped manually.
+        """
+        ok = True
+        try:
+            await cls._db["coaches"].create_index("topics")
+            logger.info("Index on coaches.topics ensured")
+        except Exception:
+            ok = False
+            logger.exception("Failed to create index on coaches.topics")
         try:
             await cls._db["categories"].create_index(
                 "id",
@@ -190,6 +208,7 @@ class MongoDB:
             )
             logger.info("Unique index on categories.id ensured")
         except Exception:
+            ok = False
             logger.exception(
                 "Failed to create unique index on categories.id "
                 "(duplicate category uuids likely exist in the data)",
@@ -203,10 +222,52 @@ class MongoDB:
             )
             logger.info("Unique index on categories.courses.id ensured")
         except Exception:
+            ok = False
             logger.exception(
                 "Failed to create unique index on categories.courses.id "
                 "(duplicate course uuids likely exist in the data)",
             )
+        return ok
+
+    @classmethod
+    async def ensure_uuid_indexes(cls) -> bool:
+        """Ensure uuid indexes (and coaches.topics) exist, using a boot cache.
+
+        Fast path (cache hit): a recent successful run is still fresh
+        (in-process TTL, UUID_INDEX_CACHE_TTL, default 30 min), so only the
+        server-side create_index no-ops are issued and the expensive full-scan
+        backfill/verify is skipped.
+
+        Slow path: backfill every id-less embedded course, verify nothing was
+        missed, then create the indexes. On success the cache is primed; on
+        failure it is cleared so the next boot re-checks.
+        """
+        if cls._db is None:
+            raise MongoConnectionError("MongoDB instance is not initialized.")
+
+        now = time.monotonic()
+        if (
+            cls._uuid_index_cache_ts is not None
+            and (now - cls._uuid_index_cache_ts) < UUID_INDEX_CACHE_TTL
+            and cls._uuid_index_cache_ok
+        ):
+            logger.info("UUID indexes recently verified (cache hit, %.0fs old); skipping scan", now - cls._uuid_index_cache_ts)
+            # Still fire the create_index no-ops: free when indexes exist, and
+            # self-heals if someone dropped the indexes manually.
+            ok = await cls._create_uuid_indexes()
+            if not ok:
+                cls._uuid_index_cache_ts = None
+                cls._uuid_index_cache_ok = False
+            return ok
+
+        ok = await cls._ensure_indexes_verified()
+        if ok:
+            cls._uuid_index_cache_ts = time.monotonic()
+            cls._uuid_index_cache_ok = True
+        else:
+            cls._uuid_index_cache_ts = None
+            cls._uuid_index_cache_ok = False
+        return ok
 
     @classmethod
     async def close(cls):

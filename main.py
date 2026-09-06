@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import signal
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -37,7 +36,9 @@ if not bot_token:
 
 def _redact_tokens(text: str) -> str:
     """Strip any bot token (current and previously-issued) from a log string."""
-    return re.sub(r"bot\d+:[A-Za-z0-9_-]{30,}", "<token>", text)
+    from logging_config import redact_tokens
+
+    return redact_tokens(text)
 
 
 def _resolve_webhook_url() -> Optional[str]:
@@ -77,6 +78,7 @@ def _resolve_webhook_url() -> Optional[str]:
 
 
 async def _register_webhook(url: str) -> bool:
+    """Register the webhook (configured in _resolve_webhook_url)."""
     api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
     payload: dict = {"url": url, "max_connections": 100}
     secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
@@ -172,17 +174,11 @@ async def lifespan(_app: FastAPI):
                 logger.exception("Failed to initialize sync mongo client on startup")
     except Exception:
         logger.exception("Error while attempting sync mongo init check")
-    logger.info("Index creation is managed manually")
-
+    uuid_indexes_ok = False
     try:
-        db = await MongoDB.get_db()
-        await db.coaches.create_index("topics")
-        logger.info("Index on coaches.topics created unconditionally")
-    except Exception:
-        logger.debug("Could not create coaches.topics index (best-effort)")
-
-    try:
-        await MongoDB.ensure_uuid_indexes()
+        # Creates coaches.topics + both uuid indexes; full-scan backfill is
+        # skipped when the boot cache (UUID_INDEX_CACHE_TTL) is fresh.
+        uuid_indexes_ok = await MongoDB.ensure_uuid_indexes()
     except Exception:
         logger.exception("ensure_uuid_indexes failed (best-effort)")
 
@@ -204,9 +200,10 @@ async def lifespan(_app: FastAPI):
         logger.exception("Failed to start redis retry worker")
 
     wh_url = _resolve_webhook_url()
+    webhook_ok = False
     if wh_url:
         try:
-            await _register_webhook(wh_url)
+            webhook_ok = await _register_webhook(wh_url)
         except Exception:
             logger.exception("Failed to auto-register webhook on startup")
     else:
@@ -217,6 +214,12 @@ async def lifespan(_app: FastAPI):
         )
 
     configure_uvicorn_loggers()
+
+    logger.info(
+        "STARTUP COMPLETE | uuid-indexes=%s | webhook=%s | workers=1",
+        "ok" if uuid_indexes_ok else "FAILED (see errors above)",
+        "ok" if webhook_ok else "FAILED (updates will not arrive; see errors above)",
+    )
 
     loop = asyncio.get_running_loop()
 

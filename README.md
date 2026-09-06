@@ -18,7 +18,7 @@ Key Architectural Features
 - Callback refs: short callback payloads are persisted using an in-memory map, Redis (preferred), and MongoDB (fallback). TTLs are configurable via `CALLBACK_REF_TTL` and refs are rehydrated at startup so inline keyboards survive restarts.
 - Retry/backoff worker: edits that hit Telegram's `RetryAfter` are queued into a Redis sorted-set and executed later by the background `start_redis_retry_worker` which implements best-effort backoff scheduling.
 - UUID-safe deletions: courses are created with `id: str(uuid.uuid4())`. Delete flows use embedded `courses.id` where available to avoid ambiguous name-based deletions. Parent/category deletions are performed using _id-aware subtree deletion (avoids accidentally deleting multiple docs with identical `name`).
-- Unique uuid indexes: on startup `MongoDB.ensure_uuid_indexes()` creates two unique partial indexes on `categories` — `id` (one uuid per category/parent doc) and `courses.id` (one uuid per embedded course, multikey). Before the index build, a full-scan backfill (`_backfill_course_uuids`) assigns a fresh uuid to every embedded course lacking a string `id` and normalizes non-dict array entries, so legacy data cannot collide on `courses.id: null`. A verification pass logs any remaining offenders by name if backfill couldn't complete. If genuine uuid duplicates still exist, index creation fails and is logged rather than crashing startup; deduplicate the data and the index will be created on the next boot.
+- Unique uuid indexes: on startup `MongoDB.ensure_uuid_indexes()` creates two unique partial indexes on `categories` — `id` (one uuid per category/parent doc) and `courses.id` (one uuid per embedded course, multikey) — plus a `topics` index on `coaches`. Before the index build, a full-scan backfill (`_backfill_course_uuids`) assigns a fresh uuid to every embedded course lacking a string `id` and normalizes non-dict array entries, so legacy data cannot collide on `courses.id: null`. A verification pass logs any remaining offenders by name if backfill couldn't complete. The scan result is boot-cached (`UUID_INDEX_CACHE_TTL`, default 30 min): within the TTL only the free `create_index` no-ops run, keeping boots fast; a failed index build clears the cache and forces a full re-check on next boot. If genuine uuid duplicates still exist, index creation fails and is logged rather than crashing startup; deduplicate the data and the index will be created on the next boot.
 
 Quick Setup (local)
 1. Create virtualenv and install deps
@@ -45,6 +45,7 @@ Optional:
 - `LOG_FORMAT` — `text` (coloured human-readable console + plain-text file) or `json` (machine-parsable JSON lines for log shippers like Logstash, Datadog, CloudWatch). Default: `text`.
 - `LOG_LEVEL` — `DEBUG`, `INFO`, `WARNING`, `ERROR`. Default: `INFO`.
 - `LOG_QUEUE_MAXSIZE` — maximum queued log records before the async handler falls back to stderr. Default: `10000`. Set to `0` for unbounded (risk: OOM under extreme load).
+- `UUID_INDEX_CACHE_TTL` — seconds a successful uuid-index verification is trusted. While fresh, boot skips the full-scan backfill/verify (the slow ~8s part) and only issues cheap server-side `create_index` no-ops. Default: `1800` (30 min).
 
 3. Run locally with a public webhook (ngrok example):
 

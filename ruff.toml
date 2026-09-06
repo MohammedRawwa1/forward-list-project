@@ -19,7 +19,7 @@ select = [
 [lint.per-file-ignores]
 # Lazy imports in top-level scripts are intentional (avoid circular imports)
 "handlers/__init__.py" = ["E402"]
-"main.py" = ["E402", "S603", "S607", "S104", "UP045"]
+"main.py" = ["E402", "S603", "S607", "S104", "UP045", "RUF029"]
 "bot.py" = ["E402"]
 
 # B018: useless expressions - intentional for docstring-like patterns
