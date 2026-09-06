@@ -37,6 +37,7 @@ pip install -r requirements.txt
 Optional:
 - `REDIS_URL` — Redis connection URI (if present, caching and callback persistence use Redis)
 - `BOT_OWNER_ID` — numeric Telegram user id for admin-only commands
+- `WEBHOOK_URL` — full webhook URL including the token path, e.g. `https://myapp.example.com/<BOT_TOKEN>/`. Must be updated together with `BOT_TOKEN` whenever the token is rotated: startup fails fast if `WEBHOOK_URL` does not contain the current `BOT_TOKEN` (otherwise the bot would be silently deaf). Leave unset on Render to auto-derive the URL from `RENDER_EXTERNAL_URL` + `BOT_TOKEN`, which is always in sync.
 - `CALLBACK_REF_TTL` — seconds to persist callback refs (default ~7 days)
 - `PAGE_CACHE_TTL` — short TTL for page cache (default 30s)
 - `GUI_SESSION_TTL` — inline session TTL for auto-close (default 300s)

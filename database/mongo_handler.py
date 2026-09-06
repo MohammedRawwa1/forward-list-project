@@ -2,6 +2,7 @@ import logging
 import uuid
 
 import pymongo
+from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
 
 logger = logging.getLogger(__name__)
@@ -83,15 +84,55 @@ class MongoDB:
             if not updates:
                 continue
             try:
-                await db["categories"].update_one(
+                # Classic operator update: numeric path components address array
+                # positions (courses.0.id). An aggregation-pipeline update does
+                # NOT expand numeric path components to array elements — it
+                # silently writes nothing — which is why the first attempt
+                # reported success while changing nothing.
+                res = await db["categories"].update_one(
                     {"_id": doc["_id"]},
-                    [{"$set": updates}],
+                    {"$set": updates},
                 )
-                backfilled += len(updates)
+                backfilled += res.modified_count or 0
             except Exception:
                 logger.exception("Failed to backfill course uuids for category _id=%s", doc.get("_id"))
         if backfilled:
             logger.info("Backfilled missing course uuids: %d embedded courses updated", backfilled)
+
+        # Second pass: catch anything the first pass could not address (deeply
+        # nested or exotic shapes), using per-element updates by matched index.
+        remaining = await cls._find_courses_without_uuid()
+        if remaining:
+            fixed = 0
+            for off in remaining:
+                try:
+                    doc = await db["categories"].find_one(
+                        {"_id": ObjectId(off["_id"])},
+                        {"courses": 1},
+                    )
+                except Exception:
+                    logger.exception("Second backfill pass: cannot load _id=%s", off["_id"])
+                    continue
+                courses = doc.get("courses") if doc else None
+                if not isinstance(courses, list):
+                    continue
+                updates2 = {}
+                for idx, course in enumerate(courses):
+                    if not isinstance(course, dict):
+                        updates2[f"courses.{idx}"] = {"name": str(course), "id": str(uuid.uuid4())}
+                    elif not isinstance(course.get("id"), str):
+                        updates2[f"courses.{idx}.id"] = str(uuid.uuid4())
+                if updates2:
+                    try:
+                        await db["categories"].update_one(
+                            {"_id": doc["_id"]},
+                            {"$set": updates2},
+                        )
+                        fixed += len(updates2)
+                    except Exception:
+                        logger.exception("Second pass backfill failed for _id=%s", off["_id"])
+            if fixed:
+                logger.info("Second backfill pass updated %d additional courses", fixed)
 
     @classmethod
     async def _find_courses_without_uuid(cls) -> list[dict]:

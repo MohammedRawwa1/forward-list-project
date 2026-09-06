@@ -171,6 +171,11 @@ if not any(isinstance(h, logging.handlers.QueueHandler) for h in _logger.handler
 
 
 def configure_uvicorn_loggers():
+    # httpx logs full request URLs at INFO; for the Telegram Bot API these
+    # contain the bot token (https://api.telegram.org/bot<token>/...), which
+    # has already leaked into logs twice. Silence the logger and rely on
+    # application-level logs instead.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
         uvi_logger = logging.getLogger(name)
         uvi_logger.handlers.clear()

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -34,10 +35,38 @@ if not bot_token:
 # ---------- helpers ----------
 
 
+def _redact_tokens(text: str) -> str:
+    """Strip any bot token (current and previously-issued) from a log string."""
+    return re.sub(r"bot\d+:[A-Za-z0-9_-]{30,}", "<token>", text)
+
+
 def _resolve_webhook_url() -> Optional[str]:
+    """Resolve the webhook URL, enforcing that WEBHOOK_URL and BOT_TOKEN match.
+
+    Both env vars must be updated together whenever the token is rotated:
+    if WEBHOOK_URL is set but does not contain the current BOT_TOKEN, startup
+    fails fast with a clear error — Telegram would keep posting updates to the
+    OLD token path and this deployment would never receive any updates (the
+    bot would be silently deaf).
+
+    When WEBHOOK_URL is not set, RENDER_EXTERNAL_URL + BOT_TOKEN is used,
+    which is always in sync automatically.
+    """
     explicit = os.getenv("WEBHOOK_URL")
     if explicit:
-        return explicit.rstrip("/") + "/"
+        url = explicit.rstrip("/") + "/"
+        if bot_token not in url:
+            msg = (
+                "WEBHOOK_URL does not contain the current BOT_TOKEN. Both env "
+                "vars must be updated together after a token rotation: Telegram "
+                "would keep posting updates to the OLD token path and this "
+                "deployment would never receive updates. Update WEBHOOK_URL to "
+                "end with the path of the current BOT_TOKEN, or unset WEBHOOK_URL "
+                "to auto-derive the URL from RENDER_EXTERNAL_URL."
+            )
+            logger.error(msg)
+            raise ValueError(msg)
+        return url
 
     render_url = os.getenv("RENDER_EXTERNAL_URL")
     if render_url:
@@ -57,7 +86,7 @@ async def _register_webhook(url: str) -> bool:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(api_url, json=payload)
             data = resp.json()
-            redacted_url = url.replace(bot_token, "<token>") if bot_token else url
+            redacted_url = _redact_tokens(url)
             if data.get("ok"):
                 logger.info("Webhook successfully registered -> %s", redacted_url)
                 return True
