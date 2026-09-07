@@ -610,14 +610,22 @@ def _store_callback_payload(payload: dict) -> str:
     return key
 
 
-def _shorten_showcat_cb(path: str, page: int, from_parent: str | None = None, parent_page: int | None = None):
+def _shorten_showcat_cb(
+    path: str,
+    page: int,
+    from_parent: str | None = None,
+    parent_page: int | None = None,
+    cat_id: str | None = None,
+):
     try:
-        if from_parent is not None or parent_page is not None:
+        if from_parent is not None or parent_page is not None or cat_id is not None:
             payload = {"type": "showcat", "path": path, "page": page}
             if from_parent is not None:
                 payload["from_parent"] = from_parent
             if parent_page is not None:
                 payload["parent_page"] = parent_page
+            if cat_id is not None:
+                payload["id"] = cat_id
             try:
                 key = _store_callback_payload(payload)
                 return f"showcat_ref::{key}"
@@ -1448,6 +1456,7 @@ async def safe_edit_message(
     reply_markup=None,
     action_key: str = None,
     debounce_interval: float = None,
+    keep_photo: bool = False,
 ):
     try:
         user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
@@ -1472,6 +1481,18 @@ async def safe_edit_message(
 
         _msg = getattr(query, "message", None)
         if _msg and getattr(_msg, "photo", None):
+            if not keep_photo:
+                # A text view must never keep a leftover design banner. Telegram
+                # cannot remove media via edit, so rebuild the message as plain text.
+                try:
+                    await _msg.delete()
+                    await _msg.reply_text(text, reply_markup=reply_markup)
+                    return True
+                except Exception:
+                    logger.debug(
+                        "safe_edit_message: photo strip failed, falling back to caption edit",
+                        exc_info=True,
+                    )
             await _msg.edit_caption(caption=text, reply_markup=reply_markup)
         else:
             await query.edit_message_text(text, reply_markup=reply_markup)
@@ -2909,52 +2930,82 @@ def _back_to_results_row(context, search_ref: str = None):
 
 
 async def _send_design_photo(query, context, text, reply_markup):
+    """Render a category view, showing its own design photo when one exists.
+
+    The design must never leak from one category to another: when the view has a
+    design we show exactly that photo (replacing any other photo already on the
+    message), and when the view has no design we fall back to a plain text message
+    so a stale banner from a previously-viewed category does not persist.
+    """
     try:
         pending_design = context.user_data.pop("_pending_design", None)
 
-        if pending_design and query.message:
-            # --- Rate limiting (matches safe_edit_message) ---
+        if query.message:
+            current_photo = None
             try:
-                user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
-                key = getattr(query, "data", None) or "send_photo"
-                if user_id and _is_debounced(user_id, key):
-                    context.user_data["_pending_design"] = pending_design
+                if getattr(query.message, "photo", None):
+                    current_photo = query.message.photo[-1].file_id
+            except Exception:
+                current_photo = None
+
+            wants_photo = pending_design is not None
+            photo_matches = wants_photo and current_photo == pending_design
+            # Media must be rebuilt when moving text->photo, photo->different
+            # photo, or photo->text. edit_caption can only keep the current media.
+            needs_rebuild = (wants_photo and not photo_matches) or (not wants_photo and current_photo is not None)
+
+            if needs_rebuild:
+                # --- Rate limiting (matches safe_edit_message) ---
+                try:
+                    user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
+                    key = getattr(query, "data", None) or "send_photo"
+                    if user_id and _is_debounced(user_id, key):
+                        context.user_data["_pending_design"] = pending_design
+                        try:
+                            await safe_answer(query)
+                        except Exception:
+                            pass
+                        return
+
+                    uid = user_id or 0
+                    ok, wait = await _consume_token(uid)
+                    if not ok:
+                        context.user_data["_pending_design"] = pending_design
+                        await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
+                        try:
+                            await safe_answer(query, text=f"Too many requests. Retrying in {wait}s.")
+                        except Exception:
+                            pass
+                        return
+
                     try:
-                        await safe_answer(query)
+                        await query.message.delete()
+                        if wants_photo:
+                            await context.bot.send_photo(
+                                chat_id=query.message.chat_id,
+                                photo=pending_design,
+                                caption=text,
+                                reply_markup=reply_markup,
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=query.message.chat_id,
+                                text=text,
+                                reply_markup=reply_markup,
+                            )
+                        return
                     except Exception:
                         pass
-                    return
+                except Exception:
+                    pass
 
-                uid = user_id or 0
-                ok, wait = await _consume_token(uid)
-                if not ok:
-                    context.user_data["_pending_design"] = pending_design
-                    await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
-                    try:
-                        await safe_answer(query, text=f"Too many requests. Retrying in {wait}s.")
-                    except Exception:
-                        pass
-                    return
-
+            if photo_matches:
                 try:
                     await query.message.edit_caption(caption=text, reply_markup=reply_markup)
                     return
                 except Exception:
                     pass
 
-                try:
-                    await query.message.delete()
-                    await context.bot.send_photo(
-                        chat_id=query.message.chat_id,
-                        photo=pending_design,
-                        caption=text,
-                        reply_markup=reply_markup,
-                    )
-                    return
-                except Exception:
-                    pass
-            except Exception:
-                pass
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
     except Exception:
         try:
@@ -2983,6 +3034,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     parent_origin_page = None
     encoded = ""
     search_ref = None
+    cat_id = None
     if raw.startswith("showcat_ref::"):
         key = raw.split("::", 1)[1]
         payload = await _resolve_callback_payload(key)
@@ -2995,6 +3047,11 @@ async def showcat_handler(update: Update, context: CallbackContext):
             )
             return
         cat_path = payload.get("path")
+        try:
+            if payload.get("id"):
+                cat_id = str(payload.get("id"))
+        except Exception:
+            cat_id = None
         search_ref = payload.get("search_ref") or None
         parent_origin = payload.get("from_parent")
         parent_origin_page = None
@@ -3121,7 +3178,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
     db = await get_db()
     category_doc = None
     try:
-        category_doc = await db.categories.find_one({"path": cat_path})
+        if cat_id and is_uuid(cat_id):
+            try:
+                category_doc = await db.categories.find_one({"id": cat_id})
+            except Exception:
+                category_doc = None
+        if not category_doc:
+            category_doc = await db.categories.find_one({"path": cat_path})
         if not category_doc:
             category_doc = await db.categories.find_one({"name": cat_path})
         if not category_doc and encoded and encoded != cat_path:
@@ -3167,11 +3230,15 @@ async def showcat_handler(update: Update, context: CallbackContext):
         design_file_id = await get_category_design(db, cat_name)
         if design_file_id:
             context.user_data["_pending_design"] = design_file_id
+        else:
+            _clear_design_pending(context)
     except Exception:
         pass
 
     try:
         context.user_data["last_viewed_category"] = cat_path
+        if category_doc.get("id"):
+            context.user_data["last_viewed_category_id"] = category_doc.get("id")
     except Exception:
         pass
     if not category_doc:

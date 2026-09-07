@@ -31,12 +31,13 @@ COURSE_PAGE_SIZE = 50
 # ---------------  compact callbacks (keep callback_data <= 64 bytes)  ---------------
 
 
-def _addcoach_cb(name) -> str:
-    return _fit_cb(
-        "addcoach",
-        f"addcoach::{urllib.parse.quote_plus(str(name))}",
-        {"type": "addcoach", "coach": str(name)},
-    )
+def _addcoach_cb(name, cat_id: str = None) -> str:
+    inline = f"addcoach::{urllib.parse.quote_plus(str(name))}"
+    payload = {"type": "addcoach", "coach": str(name)}
+    if cat_id:
+        inline = f"{inline}::{cat_id}"
+        payload["id"] = str(cat_id)
+    return _fit_cb("addcoach", inline, payload)
 
 
 def _addcoach_page_cb(parent, page: int) -> str:
@@ -48,20 +49,22 @@ def _addcoach_page_cb(parent, page: int) -> str:
     )
 
 
-def _addparent_cb(name, page: int) -> str:
-    return _fit_cb(
-        "addparent",
-        f"addparent::{urllib.parse.quote_plus(str(name))}::{page}",
-        {"type": "addparent", "category": str(name), "category_name": str(name), "page": page},
-    )
+def _addparent_cb(name, page: int, cat_id: str = None) -> str:
+    inline = f"addparent::{urllib.parse.quote_plus(str(name))}::{page}"
+    payload = {"type": "addparent", "category": str(name), "category_name": str(name), "page": page}
+    if cat_id:
+        inline = f"{inline}::{cat_id}"
+        payload["id"] = str(cat_id)
+    return _fit_cb("addparent", inline, payload)
 
 
-def _addcat_cb(name, page: int) -> str:
-    return _fit_cb(
-        "addcat",
-        f"addcat::{urllib.parse.quote_plus(str(name))}::{page}",
-        {"type": "addcat", "category": str(name), "page": page},
-    )
+def _addcat_cb(name, page: int, cat_id: str = None) -> str:
+    inline = f"addcat::{urllib.parse.quote_plus(str(name))}::{page}"
+    payload = {"type": "addcat", "category": str(name), "category_name": str(name), "page": page}
+    if cat_id:
+        inline = f"{inline}::{cat_id}"
+        payload["id"] = str(cat_id)
+    return _fit_cb("addcat", inline, payload)
 
 
 logger = logging.getLogger(__name__)
@@ -140,22 +143,32 @@ async def add_course_start(update: Update, context: CallbackContext):
     except Exception:
         db = None
 
+    last_viewed_id = None
     last_viewed = None
     try:
+        last_viewed_id = context.user_data.pop("last_viewed_category_id", None)
         last_viewed = context.user_data.pop("last_viewed_category", None)
-        if not last_viewed:
-            last_viewed = context.user_data.pop("last_viewed_category_id", None)
     except Exception:
+        last_viewed_id = None
         last_viewed = None
 
-    if last_viewed and db is not None:
+    if (last_viewed_id or last_viewed) and db is not None:
         try:
-            query_q = {"$or": [{"name": last_viewed}, {"path": last_viewed}, {"id": last_viewed}]}
-            parent_doc = await db.categories.find_one(query_q)
+            parent_doc = None
+            if last_viewed_id:
+                try:
+                    parent_doc = await db.categories.find_one({"id": last_viewed_id})
+                except Exception:
+                    parent_doc = None
+            if not parent_doc and last_viewed:
+                query_q = {"$or": [{"name": last_viewed}, {"path": last_viewed}]}
+                parent_doc = await db.categories.find_one(query_q)
             if parent_doc:
                 if parent_doc.get("parent"):
                     context.user_data["course_parent"] = parent_doc.get("parent")
                     context.user_data["course_coach"] = parent_doc.get("name")
+                    context.user_data["course_coach_id"] = parent_doc.get("id")
+                    context.user_data.pop("course_parent_id", None)
                     coach_name = parent_doc.get("name")
                     coach_parent = parent_doc.get("parent")
                     if coach_parent:
@@ -169,6 +182,8 @@ async def add_course_start(update: Update, context: CallbackContext):
                     return ADD_NAME
                 parent_name = parent_doc.get("name")
                 context.user_data["course_parent"] = parent_name
+                context.user_data["course_parent_id"] = parent_doc.get("id")
+                context.user_data.pop("course_coach_id", None)
                 try:
                     page_size = COURSE_PAGE_SIZE
                     start = 0
@@ -186,7 +201,7 @@ async def add_course_start(update: Update, context: CallbackContext):
                                 [
                                     InlineKeyboardButton(
                                         child.get("name"),
-                                        callback_data=_addcoach_cb(child.get("name")),
+                                        callback_data=_addcoach_cb(child.get("name"), child.get("id")),
                                     ),
                                 ],
                             )
@@ -243,7 +258,7 @@ async def add_course_start(update: Update, context: CallbackContext):
     for p in parents:
         display = f"{p.get('name')}"
         keyboard.append(
-            [InlineKeyboardButton(display, callback_data=_addparent_cb(p.get("name"), 1))],
+            [InlineKeyboardButton(display, callback_data=_addparent_cb(p.get("name"), 1, p.get("id")))],
         )
 
     nav = []
@@ -301,35 +316,65 @@ async def add_course_link(update: Update, context: CallbackContext):
             return ConversationHandler.END
         categories_coll = db["categories"]
         view_cat = None
+        parent_id = context.user_data.get("course_parent_id")
+        coach_id = context.user_data.get("course_coach_id")
         if parent is not None:
-            if coach:
-                child_doc = await db["categories"].find_one({"name": coach, "parent": parent})
-                if child_doc:
-                    course_doc = {"id": str(uuid.uuid4()), "name": context.user_data.get("course_name"), "link": link}
-                    update_result = await categories_coll.update_one(
-                        {"name": coach, "parent": parent},
-                        {"$push": {"courses": course_doc}},
-                    )
-                    logger.info(
-                        "[ADD-COURSE] saved to child coach=%s under parent=%s result=%s",
-                        coach,
-                        parent,
-                        getattr(update_result, "raw_result", update_result),
-                    )
-                else:
-                    course_doc = {
-                        "id": str(uuid.uuid4()),
-                        "name": context.user_data.get("course_name"),
-                        "link": link,
-                        "coach": coach,
-                    }
-                    update_result = await categories_coll.update_one(
-                        {"name": parent},
-                        {"$push": {"courses": course_doc}},
-                    )
+            # Resolve the exact parent doc by uuid first; names can repeat across sections.
+            parent_doc = None
+            if parent_id:
+                try:
+                    parent_doc = await categories_coll.find_one({"id": parent_id})
+                except Exception:
+                    parent_doc = None
+            if not parent_doc:
+                try:
+                    parent_doc = await categories_coll.find_one({"name": parent})
+                except Exception:
+                    parent_doc = None
+            if parent_doc:
+                parent_name = parent_doc.get("name") or parent
+                parent_filter = {"_id": parent_doc.get("_id")}
+            else:
+                parent_name = parent
+                parent_filter = {"name": parent}
 
+            child_doc = None
+            if coach:
+                if coach_id:
                     try:
-                        updated_cat = await categories_coll.find_one({"name": parent})
+                        child_doc = await categories_coll.find_one({"id": coach_id})
+                    except Exception:
+                        child_doc = None
+                if not child_doc:
+                    try:
+                        child_doc = await categories_coll.find_one({"name": coach, "parent": parent_name})
+                    except Exception:
+                        child_doc = None
+
+            if coach and child_doc:
+                course_doc = {"id": str(uuid.uuid4()), "name": context.user_data.get("course_name"), "link": link}
+                update_result = await categories_coll.update_one(
+                    {"_id": child_doc.get("_id")},
+                    {"$push": {"courses": course_doc}},
+                )
+                logger.info(
+                    "[ADD-COURSE] saved to child coach=%s under parent=%s result=%s",
+                    coach,
+                    parent,
+                    getattr(update_result, "raw_result", update_result),
+                )
+            else:
+                course_doc = {"id": str(uuid.uuid4()), "name": context.user_data.get("course_name"), "link": link}
+                if coach:
+                    course_doc["coach"] = coach
+                update_result = await categories_coll.update_one(
+                    parent_filter,
+                    {"$push": {"courses": course_doc}},
+                )
+
+                if coach:
+                    try:
+                        updated_cat = await categories_coll.find_one(parent_filter)
                         logger.info(
                             "[ADD-COURSE] parent=%s now has %d courses: %s",
                             parent,
@@ -338,9 +383,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                         )
                     except Exception:
                         logger.debug("[ADD-COURSE] unable to fetch updated category %s for logging", parent)
-            else:
-                course_doc = {"id": str(uuid.uuid4()), "name": context.user_data.get("course_name"), "link": link}
-                update_result = await categories_coll.update_one({"name": parent}, {"$push": {"courses": course_doc}})
             logger.info(
                 "[ADD-COURSE] saved to parent=%s result=%s",
                 parent,
@@ -350,11 +392,6 @@ async def add_course_link(update: Update, context: CallbackContext):
                 await update.message.reply_text(f"Error: Parent category '{parent}' not found. Create it first.")
                 return ConversationHandler.END
 
-            if coach:
-                child_doc = await db["categories"].find_one({"name": coach, "parent": parent})
-            else:
-                child_doc = None
-
             if coach and child_doc:
                 view_cat = coach
             else:
@@ -362,28 +399,47 @@ async def add_course_link(update: Update, context: CallbackContext):
         if view_cat:
             current_page = context.user_data.get("last_category_page", 1)
 
+            view_path = view_cat
+            view_id = None
+            if child_doc:
+                view_path = child_doc.get("path") or child_doc.get("name") or view_cat
+                view_id = child_doc.get("id")
+
             kb_buttons = []
             kb_buttons.append(
                 InlineKeyboardButton(
                     f'View "{view_cat}"',
                     callback_data=_shorten_showcat_cb(
-                        view_cat,
+                        view_path,
                         current_page,
                         from_parent="categories",
                         parent_page=current_page,
+                        cat_id=view_id,
                     ),
                 ),
             )
             if coach and child_doc:
                 try:
+                    parent_path = parent
+                    parent_disp_id = None
+                    pd = parent_doc
+                    if not pd:
+                        pd = await db["categories"].find_one(
+                            {"name": parent},
+                            projection={"path": 1, "id": 1},
+                        )
+                    if pd:
+                        parent_path = pd.get("path") or parent
+                        parent_disp_id = pd.get("id")
                     kb_buttons.append(
                         InlineKeyboardButton(
                             f'View Parent "{parent}"',
                             callback_data=_shorten_showcat_cb(
-                                parent,
+                                parent_path,
                                 current_page,
                                 from_parent="categories",
                                 parent_page=current_page,
+                                cat_id=parent_disp_id,
                             ),
                         ),
                     )
@@ -426,6 +482,7 @@ async def parent_selected(update: Update, context: CallbackContext):
         return ConversationHandler.END
     raw = query.data
     parent = None
+    parent_id = None
     origin_page = None
     if raw.startswith("addparent_ref::"):
         key = raw.split("::", 1)[1]
@@ -438,6 +495,7 @@ async def parent_selected(update: Update, context: CallbackContext):
             )
             return ConversationHandler.END
         parent = payload.get("category") or payload.get("category_name")
+        parent_id = payload.get("id")
         try:
             if payload.get("page"):
                 origin_page = int(payload.get("page"))
@@ -452,11 +510,17 @@ async def parent_selected(update: Update, context: CallbackContext):
                 origin_page = int(parts[2])
             except Exception:
                 origin_page = None
+        if len(parts) >= 4 and parts[3]:
+            parent_id = urllib.parse.unquote_plus(parts[3])
     else:
         encoded = query.data.split("::", 1)[1] if "::" in query.data else ""
         parent = urllib.parse.unquote_plus(encoded) if encoded else None
 
     context.user_data["course_parent"] = parent
+    if parent_id:
+        context.user_data["course_parent_id"] = parent_id
+    else:
+        context.user_data.pop("course_parent_id", None)
     if origin_page:
         context.user_data["last_category_page"] = origin_page
 
@@ -492,7 +556,7 @@ async def parent_selected(update: Update, context: CallbackContext):
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        display, callback_data=_addcoach_cb(child.get("name"))
+                        display, callback_data=_addcoach_cb(child.get("name"), child.get("id"))
                     )
                 ],
             )
@@ -752,7 +816,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
                 [
                     InlineKeyboardButton(
                         child.get("name"),
-                        callback_data=_addcoach_cb(child.get("name")),
+                        callback_data=_addcoach_cb(child.get("name"), child.get("id")),
                     ),
                 ],
             )
@@ -856,7 +920,7 @@ async def addparent_page(update: Update, context: CallbackContext):
             [
                 InlineKeyboardButton(
                     display,
-                    callback_data=_addparent_cb(p.get("name"), page),
+                    callback_data=_addparent_cb(p.get("name"), page, p.get("id")),
                 ),
             ],
         )
@@ -979,11 +1043,13 @@ async def coach_selected(update: Update, context: CallbackContext):
         return ConversationHandler.END
     raw = query.data
     coach = None
+    coach_id = None
     if raw.startswith("addcoach_ref::"):
         try:
             payload = await _resolve_callback_payload(raw.split("::", 1)[1])
             if payload:
                 coach = payload.get("coach") or payload.get("category")
+                coach_id = payload.get("id")
         except Exception:
             coach = None
     else:
@@ -991,8 +1057,15 @@ async def coach_selected(update: Update, context: CallbackContext):
         if encoded == "__manual__":
             await query.message.reply_text("Send the coach name (text):")
             return ADD_COACH
-        coach = urllib.parse.unquote_plus(encoded) if encoded else None
+        parts = encoded.split("::")
+        coach = urllib.parse.unquote_plus(parts[0]) if parts and parts[0] else None
+        if len(parts) >= 2 and parts[1]:
+            coach_id = urllib.parse.unquote_plus(parts[1])
     context.user_data["course_coach"] = coach
+    if coach_id:
+        context.user_data["course_coach_id"] = coach_id
+    else:
+        context.user_data.pop("course_coach_id", None)
     await query.message.reply_text("Enter the name of the course:")
     return ADD_NAME
 
@@ -1003,6 +1076,7 @@ async def coach_manual_entry(update: Update, context: CallbackContext):
         await update.message.reply_text("Coach name cannot be empty — try again.")
         return ADD_COACH
     context.user_data["course_coach"] = coach
+    context.user_data.pop("course_coach_id", None)
     await update.message.reply_text("Enter the name of the course:")
     return ADD_NAME
 
@@ -1021,12 +1095,14 @@ async def category_selected(update: Update, context: CallbackContext):
 
     raw = query.data
     category_name = None
+    category_id = None
     origin_page = None
     if raw.startswith("addcat_ref::"):
         try:
             payload = await _resolve_callback_payload(raw.split("::", 1)[1])
             if payload:
                 category_name = payload.get("category") or payload.get("category_name")
+                category_id = payload.get("id")
                 try:
                     origin_page = int(payload.get("page")) if payload.get("page") else None
                 except Exception:
@@ -1043,6 +1119,8 @@ async def category_selected(update: Update, context: CallbackContext):
                 origin_page = int(parts[2])
             except Exception:
                 origin_page = None
+        if len(parts) >= 4 and parts[3]:
+            category_id = urllib.parse.unquote_plus(parts[3])
     else:
         encoded = query.data.split("_", 1)
         if len(encoded) < 2:
@@ -1073,10 +1151,32 @@ async def category_selected(update: Update, context: CallbackContext):
     try:
         categories_coll = db["categories"]
         coach = context.user_data.get("course_coach")
+        cat_doc = None
+        if category_id:
+            try:
+                cat_doc = await categories_coll.find_one(
+                    {"id": category_id},
+                    projection={"_id": 1, "name": 1, "path": 1},
+                )
+            except Exception:
+                cat_doc = None
+        if not cat_doc:
+            try:
+                cat_doc = await categories_coll.find_one(
+                    {"name": category_name},
+                    projection={"_id": 1, "name": 1, "path": 1},
+                )
+            except Exception:
+                cat_doc = None
+        if cat_doc:
+            category_name = cat_doc.get("name") or category_name
+            cat_filter = {"_id": cat_doc.get("_id")}
+        else:
+            cat_filter = {"name": category_name}
         course_doc = {"id": str(uuid.uuid4()), "name": course_name, "link": course_link}
         if coach:
             course_doc["coach"] = coach
-        update_result = await categories_coll.update_one({"name": category_name}, {"$push": {"courses": course_doc}})
+        update_result = await categories_coll.update_one(cat_filter, {"$push": {"courses": course_doc}})
         logger.info("[ADD-COURSE] update_result=%s", getattr(update_result, "raw_result", update_result))
 
         if update_result.modified_count == 0:
@@ -1095,12 +1195,28 @@ async def category_selected(update: Update, context: CallbackContext):
         try:
             view_page = origin_page or 1
             try:
+                view_doc = None
+                try:
+                    if category_id:
+                        view_doc = await db["categories"].find_one(
+                            {"id": category_id},
+                            projection={"path": 1, "id": 1},
+                        )
+                    if not view_doc:
+                        view_doc = await db["categories"].find_one(
+                            {"name": category_name},
+                            projection={"path": 1, "id": 1},
+                        )
+                except Exception:
+                    view_doc = None
                 payload = {
                     "type": "showcat",
-                    "path": category_name,
+                    "path": view_doc.get("path") if view_doc and view_doc.get("path") else category_name,
                     "from_parent": "categories",
                     "parent_page": view_page,
                 }
+                if view_doc and view_doc.get("id"):
+                    payload["id"] = view_doc.get("id")
                 key = _store_callback_payload(payload)
                 cb = f"showcat_ref::{key}"
             except Exception:

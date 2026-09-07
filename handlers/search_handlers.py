@@ -136,6 +136,58 @@ def _category_result_button(cat, page: int, search_ref: str = None) -> list:
     return [InlineKeyboardButton(display_name, callback_data=cb)]
 
 
+def _coach_names_from(items) -> set:
+    """Coach names already represented by the listed course rows."""
+    out = set()
+    for c in items or []:
+        try:
+            coach = c.get("coach")
+            if coach:
+                out.add(str(coach))
+        except Exception:
+            pass
+    return out
+
+
+def _course_names_from(items) -> set:
+    """Course names already represented by the listed course rows."""
+    out = set()
+    for c in items or []:
+        try:
+            name = c.get("name")
+            if name:
+                out.add(str(name))
+        except Exception:
+            pass
+    return out
+
+
+def _drop_redundant_categories(cats, listed_courses) -> list:
+    """Drop category rows that are already represented by the listed courses.
+
+    When a coach's courses are already shown (e.g. "👨🏫 Course (John)"), a
+    category button for that same coach ("John › (Math)") is redundant — the
+    coach is findable inside the category the user is already looking at.
+    Likewise a category whose name equals an already-listed course name is the
+    same entity shown twice, so it is dropped to keep results minimal.
+    """
+    if not cats:
+        return cats
+    redundant = _coach_names_from(listed_courses) | _course_names_from(listed_courses)
+    if not redundant:
+        return cats
+    out = []
+    for cat in cats:
+        try:
+            name = cat.get("name") if isinstance(cat, dict) else str(cat)
+        except Exception:
+            name = str(cat)
+        if name in redundant:
+            continue
+        out.append(cat)
+    return out
+
+
 def _courses_back_ref(kind: str, name: str, page: int) -> str:
     try:
         key = _store_callback_payload(
@@ -231,6 +283,57 @@ def _merged_slices(page: int, page_size: int, seg_totals) -> list:
     return out
 
 
+async def _fetch_all(fetch_fn, db, query_text, page_size: int = 200, max_pages: int = 500, **kwargs):
+    """Fetch every matching item from a paged search function.
+
+    Needed so search results can be deduped globally: without it, the same
+    course/coach/category can surface once per segment and again on several
+    pages, and the reported total counts rows that are never shown.
+    """
+    out = []
+    page = 1
+    while page <= max_pages:
+        try:
+            items, _total, have_more = await fetch_fn(db, query_text, page=page, page_size=page_size, **kwargs)
+        except Exception:
+            break
+        if not items:
+            break
+        out.extend(items)
+        if not have_more or len(items) < page_size:
+            break
+        page += 1
+    return out
+
+
+def _normalize_search_segments(courses, coaches, cats):
+    """Globally dedupe the three search segments against each other.
+
+    - a coach row duplicating an already-listed course row is dropped
+    - a category row whose name is already a listed coach or course is dropped
+    """
+    if coaches and courses:
+        course_keys = {_course_key(c) for c in courses}
+        coaches = [c for c in coaches if _course_key(c) not in course_keys]
+    cats = _drop_redundant_categories(cats, coaches + courses)
+    return courses, coaches, cats
+
+
+def _paginate_deduped(page: int, page_size: int, *segments):
+    """Slice already-deduped segments for the requested page.
+
+    Returns (page_slices, total, total_pages, clamped_page).
+    """
+    seg_totals = [len(seg) for seg in segments]
+    total = sum(seg_totals)
+    total_pages = max(1, math.ceil(total / page_size)) if total else 1
+    if page > total_pages:
+        page = total_pages
+    slices = _merged_slices(page, page_size, seg_totals)
+    page_slices = [seg[off : off + count] for seg, (off, count) in zip(segments, slices, strict=True)]
+    return page_slices, total, total_pages, page
+
+
 # ---------------  shared search-result builders  ---------------
 
 
@@ -238,72 +341,41 @@ async def _build_category_search_results(db, query_text: str, page: int, context
     page_size = PAGE_SIZE
 
     try:
-        course_total = (await execute_course_search(db, query_text, page=1, page_size=1))[1]
+        matched_courses = _dedupe_courses(await _fetch_all(execute_course_search, db, query_text))
     except Exception:
-        course_total = 0
+        matched_courses = []
     try:
-        coach_total = (await execute_coach_course_search(db, query_text, page=1, page_size=1))[1]
+        coach_courses = _dedupe_courses(await _fetch_all(execute_coach_course_search, db, query_text))
     except Exception:
-        coach_total = 0
+        coach_courses = []
     try:
-        cat_total = (await execute_category_search(db, query_text, page=1, page_size=1))[1]
+        cats_all = _dedupe_categories(await _fetch_all(execute_category_search, db, query_text))
     except Exception:
-        cat_total = 0
-    total = course_total + coach_total + cat_total
-    if total == 0:
-        return None, None, 0
-    total_pages = max(1, math.ceil(total / page_size))
-    if page > total_pages:
-        page = total_pages
+        cats_all = []
 
-    (course_off, course_count), (coach_off, coach_count), (cat_off, cat_count) = _merged_slices(
+    matched_courses, coach_courses, cats_all = _normalize_search_segments(matched_courses, coach_courses, cats_all)
+
+    (page_courses, page_coaches, page_cats), total, total_pages, page = _paginate_deduped(
         page,
         page_size,
-        [course_total, coach_total, cat_total],
+        matched_courses,
+        coach_courses,
+        cats_all,
     )
-
-    matched_courses = []
-    if course_count > 0:
-        try:
-            matched_courses = _dedupe_courses(
-                await _fetch_slice(execute_course_search, db, query_text, course_off, course_count, page_size)
-            )
-        except Exception:
-            matched_courses = []
-
-    coach_courses_matched = []
-    if coach_count > 0:
-        try:
-            coach_courses_matched = _dedupe_courses(
-                await _fetch_slice(execute_coach_course_search, db, query_text, coach_off, coach_count, page_size)
-            )
-        except Exception:
-            coach_courses_matched = []
-
-    page_cats = []
-    if cat_count > 0:
-        try:
-            page_cats = _dedupe_categories(
-                await _fetch_slice(execute_category_search, db, query_text, cat_off, cat_count, page_size)
-            )
-        except Exception:
-            page_cats = []
-
-    if coach_courses_matched and matched_courses:
-        course_keys = {_course_key(c) for c in matched_courses}
-        coach_courses_matched = [c for c in coach_courses_matched if _course_key(c) not in course_keys]
+    if total == 0:
+        return None, None, 0
 
     search_ref = _search_results_ref("categories", query_text, page)
     _store_search_nav_ref(context, search_ref)
 
     keyboard = []
-    for crs in matched_courses:
+    for crs in page_courses:
         name = crs.get("name")
         link = crs.get("link")
         if name and link:
             keyboard.append([InlineKeyboardButton(f"🔗 {name}", url=link)])
 
-    for c in coach_courses_matched:
+    for c in page_coaches:
         link = c.get("link")
         name = c.get("name")
         if name and link:
@@ -337,81 +409,54 @@ async def _build_course_search_results(db, query_text: str, page: int, context: 
     page_size = PAGE_SIZE
 
     try:
-        cat_total = (await execute_category_search(db, query_text, page=1, page_size=1))[1]
+        matched_cats = _dedupe_categories(await _fetch_all(execute_category_search, db, query_text))
     except Exception:
-        cat_total = 0
+        matched_cats = []
     try:
-        coach_total = (await execute_coach_course_search(db, query_text, page=1, page_size=1))[1]
+        coach_courses = _dedupe_courses(await _fetch_all(execute_coach_course_search, db, query_text))
     except Exception:
-        coach_total = 0
+        coach_courses = []
     try:
-        course_total = (await execute_course_search(db, query_text, page=1, page_size=1))[1]
+        course_segment = _dedupe_courses(await _fetch_all(execute_course_search, db, query_text))
     except Exception:
-        course_total = 0
-    total = cat_total + coach_total + course_total
-    if total == 0:
-        return None, None, 0
-    total_pages = max(1, math.ceil(total / page_size))
-    if page > total_pages:
-        page = total_pages
+        course_segment = []
 
-    (cat_off, cat_count), (coach_off, coach_count), (course_off, course_count) = _merged_slices(
-        page,
-        page_size,
-        [cat_total, coach_total, course_total],
+    course_segment, coach_courses, matched_cats = _normalize_search_segments(
+        course_segment,
+        coach_courses,
+        matched_cats,
     )
 
-    matched_cats = []
-    if cat_count > 0:
-        try:
-            matched_cats = _dedupe_categories(
-                await _fetch_slice(execute_category_search, db, query_text, cat_off, cat_count, page_size)
-            )
-        except Exception:
-            matched_cats = []
-
-    coach_courses_matched = []
-    if coach_count > 0:
-        try:
-            coach_courses_matched = _dedupe_courses(
-                await _fetch_slice(execute_coach_course_search, db, query_text, coach_off, coach_count, page_size)
-            )
-        except Exception:
-            coach_courses_matched = []
-
-    course_items = []
-    if course_count > 0:
-        try:
-            course_items = _dedupe_courses(
-                await _fetch_slice(execute_course_search, db, query_text, course_off, course_count, page_size)
-            )
-        except Exception:
-            course_items = []
-
-    if coach_courses_matched and course_items:
-        course_keys = {_course_key(c) for c in course_items}
-        coach_courses_matched = [c for c in coach_courses_matched if _course_key(c) not in course_keys]
+    (page_cats, page_coaches, page_courses), total, total_pages, page = _paginate_deduped(
+        page,
+        page_size,
+        matched_cats,
+        coach_courses,
+        course_segment,
+    )
+    if total == 0:
+        return None, None, 0
 
     search_ref = _search_results_ref("courses", query_text, page)
     _store_search_nav_ref(context, search_ref)
     keyboard = []
 
-    for cat in matched_cats:
+    for cat in page_cats:
         keyboard.append(_category_result_button(cat, page=1, search_ref=search_ref))
 
-    for c in coach_courses_matched:
+    for c in page_coaches:
         link = c.get("link")
         name = c.get("name")
         if name and link:
             keyboard.append([InlineKeyboardButton(f"👨‍🏫 {name} ({c.get('coach')})", url=link)])
 
-    if course_items:
+    if page_courses:
         _, reply_markup = build_courses_page(
-            course_items,
+            page_courses,
             page=page,
             origin_type="global",
             origin_context=None,
-            total_count=course_total,
+            total_count=len(course_segment),
             is_page=True,
             store_page_ref=False,
             search_ref=search_ref,
@@ -448,92 +493,45 @@ async def _build_category_course_search_results(db, query_text: str, category: s
     page_size = PAGE_SIZE
 
     try:
-        child_total = (await execute_category_search(db, query_text, page=1, page_size=1, parent=category))[1]
+        child_cats_all = _dedupe_categories(
+            await _fetch_all(execute_category_search, db, query_text, parent=category)
+        )
     except Exception:
-        child_total = 0
+        child_cats_all = []
     try:
-        coach_total = (await execute_coach_course_search(db, query_text, category, page=1, page_size=1))[1]
+        coach_courses = _dedupe_courses(
+            await _fetch_all(execute_coach_course_search, db, query_text, category=category)
+        )
     except Exception:
-        coach_total = 0
+        coach_courses = []
     try:
-        course_total = (await execute_category_course_search(
-            db,
-            query_text,
-            category,
-            page=1,
-            page_size=1,
-            include_children=True,
-        ))[1]
+        course_segment = _dedupe_courses(
+            await _fetch_all(
+                execute_category_course_search,
+                db,
+                query_text,
+                category=category,
+                include_children=True,
+            )
+        )
     except Exception:
-        course_total = 0
-    total = child_total + coach_total + course_total
-    if total == 0:
-        return None, None, 0
-    total_pages = max(1, math.ceil(total / page_size))
-    if page > total_pages:
-        page = total_pages
+        course_segment = []
 
-    (child_off, child_count), (coach_off, coach_count), (course_off, course_count) = _merged_slices(
-        page,
-        page_size,
-        [child_total, coach_total, course_total],
+    course_segment, coach_courses, child_cats_all = _normalize_search_segments(
+        course_segment,
+        coach_courses,
+        child_cats_all,
     )
 
-    child_cats_matched = []
-    if child_count > 0:
-        try:
-            child_cats_matched = _dedupe_categories(
-                await _fetch_slice(
-                    execute_category_search,
-                    db,
-                    query_text,
-                    child_off,
-                    child_count,
-                    page_size,
-                    parent=category,
-                )
-            )
-        except Exception:
-            child_cats_matched = []
-
-    coach_courses_matched = []
-    if coach_count > 0:
-        try:
-            coach_courses_matched = _dedupe_courses(
-                await _fetch_slice(
-                    execute_coach_course_search,
-                    db,
-                    query_text,
-                    coach_off,
-                    coach_count,
-                    page_size,
-                    category=category,
-                )
-            )
-        except Exception:
-            coach_courses_matched = []
-
-    course_items = []
-    if course_count > 0:
-        try:
-            course_items = _dedupe_courses(
-                await _fetch_slice(
-                    execute_category_course_search,
-                    db,
-                    query_text,
-                    course_off,
-                    course_count,
-                    page_size,
-                    category=category,
-                    include_children=True,
-                )
-            )
-        except Exception:
-            course_items = []
-
-    if coach_courses_matched and course_items:
-        course_keys = {_course_key(c) for c in course_items}
-        coach_courses_matched = [c for c in coach_courses_matched if _course_key(c) not in course_keys]
+    (page_cats, page_coaches, page_courses), total, total_pages, page = _paginate_deduped(
+        page,
+        page_size,
+        child_cats_all,
+        coach_courses,
+        course_segment,
+    )
+    if total == 0:
+        return None, None, 0
 
     try:
         if context is not None:
@@ -546,7 +544,7 @@ async def _build_category_course_search_results(db, query_text: str, category: s
 
     keyboard = []
 
-    for child_cat in child_cats_matched:
+    for child_cat in page_cats:
         child_path = child_cat.get("path") or child_cat.get("name")
         payload = {
             "type": "showcat",
@@ -560,7 +558,7 @@ async def _build_category_course_search_results(db, query_text: str, category: s
             [InlineKeyboardButton(f"📁 {child_cat.get('name')}", callback_data=f"showcat_ref::{key}")],
         )
 
-    for c in coach_courses_matched:
+    for c in page_coaches:
         link = c.get("link")
         name = c.get("name")
         if name and link:
@@ -570,15 +568,15 @@ async def _build_category_course_search_results(db, query_text: str, category: s
                 ],
             )
 
-    if course_items:
+    if page_courses:
         _, reply_markup = build_courses_page(
-            course_items,
+            page_courses,
             page=page,
             origin_type="category",
             category=category,
             origin_context="categories",
             origin_context_page=1,
-            total_count=course_total,
+            total_count=len(course_segment),
             is_page=True,
             store_page_ref=False,
             search_ref=search_ref,
