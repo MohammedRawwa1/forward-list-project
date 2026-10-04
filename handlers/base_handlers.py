@@ -1965,17 +1965,23 @@ def build_courses_page(
         keyboard.append(pagination_buttons)
 
     try:
-        total_buttons = sum(len(r) for r in keyboard)
-    except Exception:
-        total_buttons = 0
-    MAX_BUTTONS = 90
-    if total_buttons > MAX_BUTTONS:
-        reserved = 6
-        max_course_buttons = max(1, MAX_BUTTONS - reserved)
-        max_course_rows = max_course_buttons // 2
-        display = display[:max_course_rows]
-        keyboard = []
-        for c in display:
+        # Build the (possibly capped) course-row keyboard. Telegram caps an inline
+        # keyboard at TELEGRAM_INLINE_KEYBOARD_LIMIT buttons in one message; each
+        # course row uses 2 buttons (name + Details), so the rows that fit are the
+        # spare button slots divided by 2. We count only the non-course buttons
+        # already in `keyboard` (pagination_prev/next at this point) so a page with
+        # few nav buttons can show more course rows than a busier page -- never a
+        # fixed 42.
+        non_course_buttons = 0
+        for _row in keyboard:
+            for _b in _row:
+                non_course_buttons += 1
+        spare_slots = max(0, TELEGRAM_INLINE_KEYBOARD_LIMIT - non_course_buttons)
+        max_course_rows = max(1, spare_slots // 2)
+
+        capped_display = display if len(display) <= max_course_rows else display[:max_course_rows]
+        course_keyboard = []
+        for c in capped_display:
             try:
                 course_cat = c.get("category") if isinstance(c, dict) else None
                 if not course_cat:
@@ -1994,20 +2000,157 @@ def build_courses_page(
                     c.get("id") if isinstance(c, dict) else None,
                     search_ref,
                 )
-                keyboard.append(
+                course_keyboard.append(
                     [InlineKeyboardButton(name, url=link), InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)],
                 )
             except Exception:
                 continue
-        pagination_buttons = []
-        if start > 0:
-            prev_cb = f"courses::global::{page - 1}" if origin_type == "global" else prev_cb
-            pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-        if page < total_pages:
-            next_cb = f"courses::global::{page + 1}" if origin_type == "global" else next_cb
-            pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
-        if pagination_buttons:
-            keyboard.append(pagination_buttons)
+        keyboard = course_keyboard
+
+    except Exception:
+        logger.exception("build_courses_page: unexpected error building course rows")
+        return None, None
+
+    # Pagination callbacks (Prev / Next). Keyset cursors take precedence over the
+    # simple page-number form when available, matching the original behaviour.
+    pagination_buttons = []
+    if start > 0:
+        if origin_type == "category" and category:
+            if store_page_ref:
+                try:
+                    items_to_store = None
+                    if not is_page and hasattr(all_courses, "__len__"):
+                        start_prev = (page - 2) * page_size
+                        if start_prev >= 0:
+                            slice_items = all_courses[start_prev : start_prev + page_size]
+                            items_to_store = []
+                            for it in slice_items:
+                                items_to_store.append(
+                                    {
+                                        "name": it.get("name") if isinstance(it, dict) else str(it),
+                                        "link": it.get("link") if isinstance(it, dict) else None,
+                                        "category": it.get("category") if isinstance(it, dict) else category,
+                                        "id": str(it.get("id"))
+                                        if isinstance(it, dict) and it.get("id") is not None
+                                        else None,
+                                    }
+                                )
+                    page_payload = {
+                        "type": "courses_page",
+                        "origin_type": origin_type,
+                        "category": category,
+                        "page": page - 1,
+                        "origin_context": origin_context,
+                        "origin_context_page": origin_context_page,
+                        "total_count": effective_total,
+                        "page_size": page_size,
+                    }
+                    if items_to_store is not None:
+                        page_payload["items"] = items_to_store
+                    key = _store_callback_payload(page_payload)
+                    prev_cb = f"courses_ref::{key}"
+                except Exception:
+                    prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page - 1}"
+                    if origin_context:
+                        prev_cb = (
+                            prev_cb
+                            + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                        )
+            else:
+                prev_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page - 1}"
+                if origin_context:
+                    prev_cb = (
+                        prev_cb
+                        + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                    )
+        elif origin_type == "coach" and category:
+            prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page - 1}"
+        else:
+            prev_cb = f"courses::global::{page - 1}"
+            if page_first_cursor is not None:
+                try:
+                    payload = {
+                        "type": "courses_page",
+                        "origin_type": "global",
+                        "category": None,
+                        "page": max(1, page - 1),
+                        "before": page_first_cursor,
+                        "total_count": effective_total,
+                        "page_size": page_size,
+                    }
+                    prev_cb = f"courses_ref::{_store_callback_payload(payload)}"
+                except Exception:
+                    prev_cb = f"courses::global::{page - 1}"
+        pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
+    if page < total_pages:
+        if origin_type == "category" and category:
+            if store_page_ref:
+                try:
+                    items_to_store = None
+                    if not is_page and hasattr(all_courses, "__len__"):
+                        start_next = page * page_size
+                        slice_items = all_courses[start_next : start_next + page_size]
+                        items_to_store = []
+                        for it in slice_items:
+                            items_to_store.append(
+                                {
+                                    "name": it.get("name") if isinstance(it, dict) else str(it),
+                                    "link": it.get("link") if isinstance(it, dict) else None,
+                                    "category": it.get("category") if isinstance(it, dict) else category,
+                                    "id": str(it.get("id"))
+                                    if isinstance(it, dict) and it.get("id") is not None
+                                    else None,
+                                }
+                            )
+                    page_payload = {
+                        "type": "courses_page",
+                        "origin_type": origin_type,
+                        "category": category,
+                        "page": page + 1,
+                        "origin_context": origin_context,
+                        "origin_context_page": origin_context_page,
+                        "total_count": effective_total,
+                        "page_size": page_size,
+                    }
+                    if items_to_store is not None:
+                        page_payload["items"] = items_to_store
+                    key = _store_callback_payload(page_payload)
+                    next_cb = f"courses_ref::{key}"
+                except Exception:
+                    next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page + 1}"
+                    if origin_context:
+                        next_cb = (
+                            next_cb
+                            + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                        )
+            else:
+                next_cb = f"courses::category::{urllib.parse.quote_plus(category)}::{page + 1}"
+                if origin_context:
+                    next_cb = (
+                        next_cb
+                        + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
+                    )
+        elif origin_type == "coach" and category:
+            next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page + 1}"
+        else:
+            next_cb = f"courses::global::{page + 1}"
+            if page_last_cursor is not None:
+                try:
+                    payload = {
+                        "type": "courses_page",
+                        "origin_type": "global",
+                        "category": None,
+                        "page": page + 1,
+                        "after": page_last_cursor,
+                        "total_count": effective_total,
+                        "page_size": page_size,
+                    }
+                    next_cb = f"courses_ref::{_store_callback_payload(payload)}"
+                except Exception:
+                    next_cb = f"courses::global::{page + 1}"
+        pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
+    if pagination_buttons:
+        keyboard.append(pagination_buttons)
 
     try:
         total_pages = math.ceil(effective_total / page_size) if effective_total is not None else page
@@ -2950,7 +3093,13 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             _set_session_keep_open(query.message, True)
         except Exception:
             pass
-        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
+        try:
+            design = await _resolve_design_for_category_name(db, category)
+        except Exception:
+            design = None
+        await _send_design_photo(
+            query, context, text, reply_markup, force_design=design
+        )
     except Exception:
         logger.exception("Error fetching coach courses in category")
         await safe_edit_message(
@@ -3072,7 +3221,13 @@ async def showtype_handler(update: Update, context: CallbackContext):
             _set_session_keep_open(query.message, True)
         except Exception:
             pass
-        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
+        try:
+            design = await _resolve_design_for_category_name(db, category_name)
+        except Exception:
+            design = None
+        await _send_design_photo(
+            query, context, text, reply_markup, force_design=design
+        )
 
     except Exception:
         logger.exception("Error showing type courses")
@@ -3295,7 +3450,33 @@ def _clear_design_pending(context):
         pass
 
 
+async def _resolve_design_for_category_name(db, category_name: str) -> str | None:
+    """Resolve the design (own or inherited from immediate parent) for a category
+
+    given only its name. Used by paginated / insider views (courses_callback,
+    show_coach_in_category, showtype_handler) so a view inside a designed parent
+    keeps the parent's banner instead of regenning or dropping it.
+    """
+    try:
+        if not category_name:
+            return None
+        cat_doc = await db.categories.find_one(
+            {"$or": [{"name": category_name}, {"path": category_name}]},
+            projection={"name": 1, "id": 1, "parent": 1},
+        )
+        if not cat_doc:
+            return None
+        return await _resolve_branch_design(db, cat_doc)
+    except Exception:
+        return None
+
+
 SEARCH_NAV_TTL = 3600
+# Telegram caps an inline keyboard at 100 buttons in a single message. Course rows
+# use 2 buttons each (name + Details), so the max course rows on a page = the
+# number of spare button slots divided by 2. We compute this dynamically from the
+# actual non-course buttons on the page so pages are never forced to a fixed 42.
+TELEGRAM_INLINE_KEYBOARD_LIMIT = 100
 
 SEARCH_NAV_USER_KEY = "search_results_nav"
 
@@ -3362,86 +3543,113 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
         if design is None:
             design = context.user_data.get("_branch_design")
 
-        if query.message:
+        # 4) Stability: do not regenerate a banner that is already showing.
+        #    If the current message already carries the design photo we want,
+        #    every subsequent tap edits the caption in place instead of deleting
+        #    and re-sending the same image (that is the "bounce" the user sees).
+        current_photo = None
+        try:
+            if query.message is not None and getattr(query.message, "photo", None):
+                current_photo = query.message.photo[-1].file_id
+        except Exception:
             current_photo = None
+        already_showing_design = design is not None and current_photo == design
+
+        show_photo = design is not None
+        # Media must be rebuilt only when switching text<->photo or to a
+        # *different* photo. edit_caption can only keep the current media.
+        needs_rebuild = (
+            show_photo and not already_showing_design and current_photo is not None
+        ) or (not show_photo and current_photo is not None)
+
+        if needs_rebuild:
+            # --- Rate limiting (matches safe_edit_message) ---
             try:
-                if getattr(query.message, "photo", None):
-                    current_photo = query.message.photo[-1].file_id
-            except Exception:
-                current_photo = None
-
-            show_photo = design is not None
-            photo_matches = show_photo and current_photo == design
-            # Media must be rebuilt when switching text<->photo or to a different
-            # photo. edit_caption can only keep the current media.
-            needs_rebuild = (show_photo and not photo_matches) or (not show_photo and current_photo is not None)
-
-            if needs_rebuild:
-                # --- Rate limiting (matches safe_edit_message) ---
-                try:
-                    user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
-                    key = getattr(query, "data", None) or "send_photo"
-                    if user_id and _is_debounced(user_id, key):
-                        if design is not None:
-                            context.user_data["_pending_design"] = design
-                        elif design is None and pending_design is not None:
-                            context.user_data["_pending_design"] = pending_design
-                        try:
-                            await safe_answer(query)
-                        except Exception:
-                            pass
-                        return
-
-                    uid = user_id or 0
-                    ok, wait = await _consume_token(uid)
-                    if not ok:
-                        if design is not None:
-                            context.user_data["_pending_design"] = design
-                        elif pending_design is not None:
-                            context.user_data["_pending_design"] = pending_design
-                        await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
-                        try:
-                            await safe_answer(query, text=f"Too many requests. Retrying in {wait}s.")
-                        except Exception:
-                            pass
-                        return
-
+                user_id = getattr(query.from_user, "id", None) or getattr(
+                    query.message, "chat_id", None
+                )
+                key = getattr(query, "data", None) or "send_photo"
+                if user_id and _is_debounced(user_id, key):
+                    if design is not None:
+                        context.user_data["_pending_design"] = design
+                    elif pending_design is not None:
+                        context.user_data["_pending_design"] = pending_design
                     try:
-                        await query.message.delete()
-                        if show_photo:
-                            await context.bot.send_photo(
-                                chat_id=query.message.chat_id,
-                                photo=design,
-                                caption=text,
-                                reply_markup=reply_markup,
-                            )
-                        else:
-                            await context.bot.send_message(
-                                chat_id=query.message.chat_id,
-                                text=text,
-                                reply_markup=reply_markup,
-                            )
-                        return
+                        await safe_answer(query)
                     except Exception:
                         pass
-                except Exception:
-                    pass
+                    return
 
-            if photo_matches:
+                uid = user_id or 0
+                ok, wait = await _consume_token(uid)
+                if not ok:
+                    if design is not None:
+                        context.user_data["_pending_design"] = design
+                    elif pending_design is not None:
+                        context.user_data["_pending_design"] = pending_design
+                    await schedule_retry_via_redis_or_local(
+                        query, text, reply_markup=reply_markup, delay=wait
+                    )
+                    try:
+                        await safe_answer(
+                            query, text=f"Too many requests. Retrying in {wait}s."
+                        )
+                    except Exception:
+                        pass
+                    return
+
                 try:
-                    await query.message.edit_caption(caption=text, reply_markup=reply_markup)
+                    await query.message.delete()
+                    if show_photo:
+                        await context.bot.send_photo(
+                            chat_id=query.message.chat_id,
+                            photo=design,
+                            caption=text,
+                            reply_markup=reply_markup,
+                        )
+                    else:
+                        await context.bot.send_message(
+                            chat_id=query.message.chat_id,
+                            text=text,
+                            reply_markup=reply_markup,
+                        )
                     return
                 except Exception:
+                    # If deleting the old message fails we must not leave the
+                    # user on a caption-less photo; fall back to caption edit
+                    # when possible, otherwise send a fresh message.
+                    if show_photo and current_photo == design:
+                        try:
+                            await query.message.edit_caption(
+                                caption=text, reply_markup=reply_markup
+                            )
+                            return
+                        except Exception:
+                            pass
                     pass
+            except Exception:
+                pass
+
+        if already_showing_design:
+            try:
+                await query.message.edit_caption(
+                    caption=text, reply_markup=reply_markup
+                )
+                return
+            except Exception:
+                pass
 
         # No existing message to recaption: send a new message with the design
         # (or a plain message if the branch has no design).
         if design is not None:
             try:
-                await context.bot.send_photo(
-                    chat_id=getattr(query.message, "chat_id", None)
+                chat_id = (
+                    getattr(query.message, "chat_id", None)
                     or getattr(getattr(query, "message", None), "chat_id", None)
-                    or getattr(query, "chat_id", None),
+                    or getattr(query, "chat_id", None)
+                )
+                await context.bot.send_photo(
+                    chat_id=chat_id,
                     photo=design,
                     caption=text,
                     reply_markup=reply_markup,
@@ -3450,7 +3658,9 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
             except Exception:
                 pass
 
-        await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None)
+        )
     except Exception:
         try:
             await safe_edit_message(
@@ -5794,11 +6004,12 @@ async def courses_callback(update: Update, context: CallbackContext):
                             reply_markup = InlineKeyboardMarkup(kb)
                         except Exception:
                             pass
-                        await safe_edit_message(
-                            query,
-                            text=text,
-                            reply_markup=reply_markup,
-                            action_key=getattr(query, "data", None),
+                        try:
+                            design = await _resolve_design_for_category_name(db, category)
+                        except Exception:
+                            design = None
+                        await _send_design_photo(
+                            query, context, text, reply_markup, force_design=design
                         )
                         return
 
@@ -5868,11 +6079,12 @@ async def courses_callback(update: Update, context: CallbackContext):
                             reply_markup = InlineKeyboardMarkup(kb)
                         except Exception:
                             pass
-                        await safe_edit_message(
-                            query,
-                            text=text,
-                            reply_markup=reply_markup,
-                            action_key=getattr(query, "data", None),
+                        try:
+                            design = await _resolve_design_for_category_name(db, coach_name)
+                        except Exception:
+                            design = None
+                        await _send_design_photo(
+                            query, context, text, reply_markup, force_design=design
                         )
                         return
                 else:
@@ -6011,11 +6223,12 @@ async def courses_callback(update: Update, context: CallbackContext):
                         reply_markup = InlineKeyboardMarkup(kb)
                     except Exception:
                         pass
-                    await safe_edit_message(
-                        query,
-                        text=text,
-                        reply_markup=reply_markup,
-                        action_key=getattr(query, "data", None),
+                    try:
+                        design = await _resolve_design_for_category_name(db, category)
+                    except Exception:
+                        design = None
+                    await _send_design_photo(
+                        query, context, text, reply_markup, force_design=design
                     )
                     return
             except Exception:
