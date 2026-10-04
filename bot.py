@@ -81,6 +81,23 @@ async def create_application():
     if not bot_token:
         msg = "BOT_TOKEN environment variable is not set"
         raise ValueError(msg)
+
+    # Number of updates handled in parallel. Defaults to 1 (fully sequential,
+    # PTB's default) so behavior is unchanged unless explicitly scaled up.
+    # Raise it (e.g. 32-128) to serve many users concurrently: one slow DB
+    # query then no longer blocks every other chat. Handlers are per-user safe
+    # (per-user state lives in context.user_data); the shared caches are
+    # guarded/locked. If a handler mutates shared state, keep this at 1.
+    max_concurrent = env_int("MAX_CONCURRENT_UPDATES", 1)
+
+    def _apply_concurrency(builder):
+        try:
+            if max_concurrent and max_concurrent > 1 and hasattr(builder, "concurrent_updates"):
+                return builder.concurrent_updates(max_concurrent)
+        except Exception:
+            logger.exception("Failed to enable concurrent updates; falling back to sequential")
+        return builder
+
     try:
         from telegram.ext import AIORateLimiter
 
@@ -97,17 +114,21 @@ async def create_application():
             group_time_period=group_time_period,
             max_retries=max_retries,
         )
-        application = Application.builder().token(bot_token).rate_limiter(rate_limiter).build()
+        application = _apply_concurrency(
+            Application.builder().token(bot_token).rate_limiter(rate_limiter),
+        ).build()
         logger.info(
-            "AIORateLimiter enabled (%.0f/s global, %.0f/%ss per-chat, max_retries=%d)",
+            "AIORateLimiter enabled (%.0f/s global, %.0f/%ss per-chat, max_retries=%d); "
+            "max_concurrent_updates=%d",
             overall_max_rate,
             group_max_rate,
             group_time_period,
             max_retries,
+            max_concurrent,
         )
     except Exception:
         logger.warning("Failed to create AIORateLimiter; falling back to unthrottled")
-        application = Application.builder().token(bot_token).build()
+        application = _apply_concurrency(Application.builder().token(bot_token)).build()
     return application
 
 

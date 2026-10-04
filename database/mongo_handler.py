@@ -62,6 +62,23 @@ class MongoDB:
         return cls._db
 
     @classmethod
+    async def ping(cls) -> bool:
+        """Return True if the server answers a ping, False otherwise.
+
+        Creating the Motor client is lazy — it does not prove connectivity —
+        so startup uses this to confirm the DB is actually reachable before
+        accepting Telegram updates, rather than serving empty course lists.
+        """
+        try:
+            if cls._db is None:
+                return False
+            await cls._db.command("ping")
+            return True
+        except Exception:
+            logger.debug("MongoDB ping failed", exc_info=True)
+            return False
+
+    @classmethod
     async def _backfill_course_uuids(cls, batch_size: int = 500):
         """Assign a uuid to EVERY embedded course that lacks a string one.
 
@@ -184,6 +201,43 @@ class MongoDB:
             logger.debug("Could not verify course uuid backfill status")
         return await cls._create_uuid_indexes()
 
+    # Read-critical non-unique indexes. On a 100k+ (or millions of) category
+    # collection, every find_one({"name": ...}) or
+    # find({"parent": ...}).sort("name") without these is a full collection
+    # scan; with them each lookup is O(log n). All are idempotent no-ops when
+    # they already exist, so they are safe to issue on every boot.
+    _QUERY_INDEXES = (
+        ("categories", [("name", 1)]),
+        ("categories", [("path", 1)]),
+        ("categories", [("parent", 1), ("name", 1)]),
+        ("categories", [("courses.name", 1), ("courses.id", 1)]),
+        ("categories", [("courses.coach", 1)]),
+        ("coaches", [("slug", 1)]),
+    )
+
+    @classmethod
+    async def _create_query_indexes(cls) -> bool:
+        """Create the supporting query indexes that keep browsing O(log n).
+
+        These are NOT unique and are best-effort: a failure is logged but must
+        not affect the uuid-index boot cache (that cache only guards the
+        expensive uuid backfill scan). Issued on both the cache-hit fast path
+        and the slow path so a dropped index self-heals on the next boot.
+        """
+        ok = True
+        for coll, keys in cls._QUERY_INDEXES:
+            try:
+                await cls._db[coll].create_index(keys)
+            except Exception:
+                ok = False
+                logger.exception("Failed to create supporting index %s on %s", keys, coll)
+        if ok:
+            logger.info(
+                "Supporting query indexes ensured "
+                "(categories: name, path, parent+name, courses.name, courses.coach; coaches: slug)",
+            )
+        return ok
+
     @classmethod
     async def _create_uuid_indexes(cls) -> bool:
         """Create both unique partial indexes plus coaches.topics.
@@ -255,12 +309,16 @@ class MongoDB:
             # Still fire the create_index no-ops: free when indexes exist, and
             # self-heals if someone dropped the indexes manually.
             ok = await cls._create_uuid_indexes()
+            # Supporting indexes are cheap here and independent of the uuid
+            # cache: ensure them on the fast path too (self-heals a dropped one).
+            await cls._create_query_indexes()
             if not ok:
                 cls._uuid_index_cache_ts = None
                 cls._uuid_index_cache_ok = False
             return ok
 
         ok = await cls._ensure_indexes_verified()
+        await cls._create_query_indexes()
         if ok:
             cls._uuid_index_cache_ts = time.monotonic()
             cls._uuid_index_cache_ok = True

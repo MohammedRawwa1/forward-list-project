@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import signal
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -15,8 +17,14 @@ from telegram.ext import Application, CallbackContext, TypeHandler
 
 import logging_config  # noqa: F401
 from bot import create_application, setup_handlers
+from config import env_float
 from database.mongo_handler import MongoDB
-from handlers.base_handlers import _bg_task, start_cache_cleanup_worker, start_redis_retry_worker
+from handlers.base_handlers import (
+    _bg_task,
+    _touch_user_session,
+    start_cache_cleanup_worker,
+    start_redis_retry_worker,
+)
 from logging_config import configure_uvicorn_loggers
 
 logger = logging.getLogger(__name__)
@@ -25,6 +33,13 @@ application: Application = None
 bot_token = os.getenv("BOT_TOKEN")
 
 LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
+
+# Bound how long startup waits for MongoDB to answer a ping before accepting
+# Telegram updates. Creating the client is lazy, so without this the webhook
+# could be registered while the DB is still unreachable and users would see
+# empty course lists until it recovers.
+MONGO_READY_TIMEOUT = env_float("MONGO_READY_TIMEOUT", 15.0)
+MONGO_READY_INTERVAL = env_float("MONGO_READY_INTERVAL", 1.0)
 
 if not bot_token:
     msg = "BOT_TOKEN environment variable is not set"
@@ -77,6 +92,28 @@ def _resolve_webhook_url() -> Optional[str]:
     return None
 
 
+async def _wait_for_mongo_ready(timeout: float = None, interval: float = None) -> bool:
+    """Poll MongoDB readiness (ping) until it answers or the timeout elapses.
+
+    Returns True as soon as the DB is reachable, False if it never came up in
+    time. Callers proceed either way (the /health endpoint reports degraded),
+    but registering the webhook only after readiness avoids the window where
+    Telegram sends updates the bot cannot yet serve.
+    """
+    if timeout is None:
+        timeout = MONGO_READY_TIMEOUT
+    if interval is None:
+        interval = MONGO_READY_INTERVAL
+    interval = max(0.1, interval)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        if await MongoDB.ping():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)
+
+
 async def _register_webhook(url: str) -> bool:
     """Register the webhook (configured in _resolve_webhook_url)."""
     api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
@@ -124,6 +161,11 @@ async def echo_update(update: Update, context: CallbackContext):
         update.effective_user.id if update.effective_user else None,
         update.effective_chat.id if update.effective_chat else None,
     )
+    # Record activity for EVERY update (messages, commands, callbacks) so the
+    # idle clock used for session auto-close and per-user user_data cleanup is
+    # accurate even for interactions that never touch an inline keyboard.
+    with contextlib.suppress(Exception):
+        _touch_user_session(update.effective_user.id if update.effective_user else None)
 
 
 # ---------- low-level update processing ----------
@@ -155,6 +197,17 @@ async def lifespan(_app: FastAPI):
 
     # ---------------------------- startup ----------------------------
     await initialize_db()
+    # Confirm the DB is actually reachable before wiring Telegram up, so the
+    # first updates cannot land while course/category reads would fail.
+    mongo_ready = await _wait_for_mongo_ready()
+    if mongo_ready:
+        logger.info("MongoDB readiness confirmed before accepting updates")
+    else:
+        logger.error(
+            "MongoDB did not become ready within %.0fs; starting anyway "
+            "(health will report degraded until it recovers)",
+            MONGO_READY_TIMEOUT,
+        )
     try:
         from handlers.base_handlers import _rehydrate_callback_map
 
@@ -190,7 +243,7 @@ async def lifespan(_app: FastAPI):
     application.add_handler(TypeHandler(Update, echo_update), group=-1)
 
     try:
-        _bg_task(start_cache_cleanup_worker())
+        _bg_task(start_cache_cleanup_worker(application))
     except Exception:
         logger.exception("Failed to start cache cleanup worker")
 
@@ -216,7 +269,8 @@ async def lifespan(_app: FastAPI):
     configure_uvicorn_loggers()
 
     logger.info(
-        "STARTUP COMPLETE | uuid-indexes=%s | webhook=%s | workers=1",
+        "STARTUP COMPLETE | mongo=%s | uuid-indexes=%s | webhook=%s | workers=1",
+        "ready" if mongo_ready else "NOT READY (degraded; see errors above)",
         "ok" if uuid_indexes_ok else "FAILED (see errors above)",
         "ok" if webhook_ok else "FAILED (updates will not arrive; see errors above)",
     )

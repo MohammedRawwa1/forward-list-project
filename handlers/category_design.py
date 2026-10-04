@@ -59,6 +59,12 @@ async def _set_design(db, category_name: str, file_id: str):
             {"$set": {"file_id": file_id}},
             upsert=True,
         )
+        try:
+            from handlers.base_handlers import invalidate_design_cache
+
+            invalidate_design_cache(category_name)
+        except Exception:
+            pass
         return True
     except Exception:
         logger.exception("Error saving design for '%s'", category_name)
@@ -68,6 +74,12 @@ async def _set_design(db, category_name: str, file_id: str):
 async def _delete_design(db, category_name: str):
     try:
         res = await db[DESIGNS_COLLECTION].delete_one({"name": category_name})
+        try:
+            from handlers.base_handlers import invalidate_design_cache
+
+            invalidate_design_cache(category_name)
+        except Exception:
+            pass
         return res.deleted_count > 0
     except Exception:
         logger.exception("Error deleting design for '%s'", category_name)

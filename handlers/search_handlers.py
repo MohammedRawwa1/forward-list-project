@@ -1,6 +1,7 @@
 import logging
 import math
 import re
+import time
 import urllib.parse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -13,6 +14,7 @@ from telegram.ext import (
     filters,
 )
 
+from config import env_int
 from conversation_states import SEARCH_QUERY
 from handlers.atlas_search import (
     execute_category_course_search,
@@ -22,6 +24,7 @@ from handlers.atlas_search import (
 )
 from handlers.base_handlers import (
     PAGE_SIZE,
+    _dedupe_markup,
     _resolve_callback_payload,
     _store_callback_payload,
     _store_search_nav_ref,
@@ -256,20 +259,6 @@ def _origin_back_row(context, mode: str, category: str = None):
         return None
 
 
-async def _fetch_slice(fetch_fn, db, query_text, offset, count, page_size, **kwargs):
-    if count <= 0:
-        return []
-    page = offset // page_size + 1
-    within = offset % page_size
-    items, _total, _have_more = await fetch_fn(db, query_text, page=page, page_size=page_size, **kwargs)
-    out = list(items[within:])
-    needed = count - len(out)
-    if needed > 0:
-        more, _, _ = await fetch_fn(db, query_text, page=page + 1, page_size=page_size, **kwargs)
-        out.extend(more[:needed])
-    return out[:count]
-
-
 def _merged_slices(page: int, page_size: int, seg_totals) -> list:
     start = (page - 1) * page_size
     end = start + page_size
@@ -283,14 +272,77 @@ def _merged_slices(page: int, page_size: int, seg_totals) -> list:
     return out
 
 
-async def _fetch_all(fetch_fn, db, query_text, page_size: int = 200, max_pages: int = 500, **kwargs):
-    """Fetch every matching item from a paged search function.
+# ---------------  bounded scan + cached result sets  ---------------
 
-    Needed so search results can be deduped globally: without it, the same
-    course/coach/category can surface once per segment and again on several
-    pages, and the reported total counts rows that are never shown.
+SEARCH_SCAN_PAGE_SIZE = max(1, env_int("SEARCH_SCAN_PAGE_SIZE", 200))
+SEARCH_SCAN_MAX_ROWS = max(1, env_int("SEARCH_SCAN_MAX_ROWS", 2000))
+SEARCH_SCAN_MAX_PAGES = max(1, env_int("SEARCH_SCAN_MAX_PAGES", 50))
+SEARCH_RESULT_CACHE_TTL = max(1, env_int("SEARCH_RESULT_CACHE_TTL", 300))
+SEARCH_RESULT_CACHE_MAX = max(1, env_int("SEARCH_RESULT_CACHE_MAX", 128))
+
+# Cache of fully assembled (deduped) result sets. Search content does not depend
+# on the user, so it is safe to share across users; TTL + size caps keep it flat.
+_RESULT_CACHE = {}
+
+
+def _result_cache_key(mode: str, query_text: str, category: str = None) -> tuple:
+    return (mode, (query_text or "").strip().lower(), category or "")
+
+
+def _result_cache_get(key: tuple):
+    try:
+        entry = _RESULT_CACHE.get(key)
+        if not entry:
+            return None
+        ts, value = entry
+        if time.time() - ts > SEARCH_RESULT_CACHE_TTL:
+            _RESULT_CACHE.pop(key, None)
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def _result_cache_put(key: tuple, value):
+    try:
+        _RESULT_CACHE[key] = (time.time(), value)
+        if len(_RESULT_CACHE) > SEARCH_RESULT_CACHE_MAX:
+            ordered = sorted(_RESULT_CACHE.items(), key=lambda kv: kv[1][0])
+            for stale_key, _entry in ordered[: max(1, len(ordered) // 4)]:
+                _RESULT_CACHE.pop(stale_key, None)
+    except Exception:
+        pass
+
+
+def invalidate_search_cache():
+    """Drop cached search result sets (called when courses/categories change)."""
+    try:
+        _RESULT_CACHE.clear()
+    except Exception:
+        pass
+
+
+async def _fetch_all(
+    fetch_fn,
+    db,
+    query_text,
+    page_size: int = None,
+    max_pages: int = None,
+    max_rows: int = None,
+    **kwargs,
+):
+    """Fetch matching items, bounded by hard row/page caps to keep memory flat.
+
+    Needed so search results can be deduped globally, but no single query may
+    load an unbounded number of rows. Returns ``(items, truncated)``; the flag
+    is True when a cap stopped the scan early so the caller can tell the user
+    the result set is partial instead of silently dropping matches.
     """
+    page_size = page_size or SEARCH_SCAN_PAGE_SIZE
+    max_pages = max_pages or SEARCH_SCAN_MAX_PAGES
+    max_rows = max_rows or SEARCH_SCAN_MAX_ROWS
     out = []
+    truncated = False
     page = 1
     while page <= max_pages:
         try:
@@ -299,11 +351,131 @@ async def _fetch_all(fetch_fn, db, query_text, page_size: int = 200, max_pages: 
             break
         if not items:
             break
+        remaining = max_rows - len(out)
+        if len(items) > remaining:
+            out.extend(items[:remaining])
+            truncated = True
+            break
         out.extend(items)
         if not have_more or len(items) < page_size:
             break
         page += 1
-    return out
+    else:
+        # Ran out of allowed pages while the source still had more rows.
+        truncated = True
+    return out, truncated
+
+
+async def _collect_category_segments(db, query_text: str):
+    """Deduped, bounded (courses, coaches, categories, truncated) for a global query."""
+    key = _result_cache_key("categories", query_text)
+    cached = _result_cache_get(key)
+    if cached is not None:
+        return cached
+    truncated = False
+    matched_courses = []
+    coach_courses = []
+    cats_all = []
+    try:
+        matched_courses, hit = await _fetch_all(execute_course_search, db, query_text)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    try:
+        coach_courses, hit = await _fetch_all(execute_coach_course_search, db, query_text)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    try:
+        cats_all, hit = await _fetch_all(execute_category_search, db, query_text)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    matched_courses = _dedupe_courses(matched_courses)
+    coach_courses = _dedupe_courses(coach_courses)
+    cats_all = _dedupe_categories(cats_all)
+    matched_courses, coach_courses, cats_all = _normalize_search_segments(matched_courses, coach_courses, cats_all)
+    value = (matched_courses, coach_courses, cats_all, truncated)
+    _result_cache_put(key, value)
+    return value
+
+
+async def _collect_course_segments(db, query_text: str):
+    """Deduped, bounded (categories, coaches, courses, truncated) for a global query."""
+    key = _result_cache_key("courses", query_text)
+    cached = _result_cache_get(key)
+    if cached is not None:
+        return cached
+    truncated = False
+    matched_cats = []
+    coach_courses = []
+    course_segment = []
+    try:
+        matched_cats, hit = await _fetch_all(execute_category_search, db, query_text)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    try:
+        coach_courses, hit = await _fetch_all(execute_coach_course_search, db, query_text)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    try:
+        course_segment, hit = await _fetch_all(execute_course_search, db, query_text)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    matched_cats = _dedupe_categories(matched_cats)
+    coach_courses = _dedupe_courses(coach_courses)
+    course_segment = _dedupe_courses(course_segment)
+    course_segment, coach_courses, matched_cats = _normalize_search_segments(
+        course_segment, coach_courses, matched_cats
+    )
+    value = (matched_cats, coach_courses, course_segment, truncated)
+    _result_cache_put(key, value)
+    return value
+
+
+async def _collect_category_course_segments(db, query_text: str, category: str):
+    """Deduped, bounded (child_cats, coaches, courses, truncated) scoped to a category."""
+    key = _result_cache_key("category_courses", query_text, category)
+    cached = _result_cache_get(key)
+    if cached is not None:
+        return cached
+    truncated = False
+    child_cats_all = []
+    coach_courses = []
+    course_segment = []
+    try:
+        child_cats_all, hit = await _fetch_all(execute_category_search, db, query_text, parent=category)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    try:
+        coach_courses, hit = await _fetch_all(execute_coach_course_search, db, query_text, category=category)
+        truncated = truncated or hit
+    except Exception:
+        pass
+    try:
+        course_segment, hit = await _fetch_all(
+            execute_category_course_search,
+            db,
+            query_text,
+            category=category,
+            include_children=True,
+        )
+        truncated = truncated or hit
+    except Exception:
+        pass
+    child_cats_all = _dedupe_categories(child_cats_all)
+    coach_courses = _dedupe_courses(coach_courses)
+    course_segment = _dedupe_courses(course_segment)
+    course_segment, coach_courses, child_cats_all = _normalize_search_segments(
+        course_segment, coach_courses, child_cats_all
+    )
+    value = (child_cats_all, coach_courses, course_segment, truncated)
+    _result_cache_put(key, value)
+    return value
 
 
 def _normalize_search_segments(courses, coaches, cats):
@@ -340,20 +512,7 @@ def _paginate_deduped(page: int, page_size: int, *segments):
 async def _build_category_search_results(db, query_text: str, page: int, context: CallbackContext = None):
     page_size = PAGE_SIZE
 
-    try:
-        matched_courses = _dedupe_courses(await _fetch_all(execute_course_search, db, query_text))
-    except Exception:
-        matched_courses = []
-    try:
-        coach_courses = _dedupe_courses(await _fetch_all(execute_coach_course_search, db, query_text))
-    except Exception:
-        coach_courses = []
-    try:
-        cats_all = _dedupe_categories(await _fetch_all(execute_category_search, db, query_text))
-    except Exception:
-        cats_all = []
-
-    matched_courses, coach_courses, cats_all = _normalize_search_segments(matched_courses, coach_courses, cats_all)
+    matched_courses, coach_courses, cats_all, truncated = await _collect_category_segments(db, query_text)
 
     (page_courses, page_coaches, page_cats), total, total_pages, page = _paginate_deduped(
         page,
@@ -402,30 +561,15 @@ async def _build_category_search_results(db, query_text: str, page: int, context
         keyboard.append([InlineKeyboardButton("🔙 Back to Categories", callback_data="back_to_cats")])
 
     title = f"🔍 Results for '{query_text}' (categories, courses & coaches, page {page}/{total_pages}):"
+    if truncated:
+        title += " ⚠️ partial set — refine your query"
     return title, keyboard, total
 
 
 async def _build_course_search_results(db, query_text: str, page: int, context: CallbackContext = None):
     page_size = PAGE_SIZE
 
-    try:
-        matched_cats = _dedupe_categories(await _fetch_all(execute_category_search, db, query_text))
-    except Exception:
-        matched_cats = []
-    try:
-        coach_courses = _dedupe_courses(await _fetch_all(execute_coach_course_search, db, query_text))
-    except Exception:
-        coach_courses = []
-    try:
-        course_segment = _dedupe_courses(await _fetch_all(execute_course_search, db, query_text))
-    except Exception:
-        course_segment = []
-
-    course_segment, coach_courses, matched_cats = _normalize_search_segments(
-        course_segment,
-        coach_courses,
-        matched_cats,
-    )
+    matched_cats, coach_courses, course_segment, truncated = await _collect_course_segments(db, query_text)
 
     (page_cats, page_coaches, page_courses), total, total_pages, page = _paginate_deduped(
         page,
@@ -486,41 +630,16 @@ async def _build_course_search_results(db, query_text: str, page: int, context: 
         keyboard.append([InlineKeyboardButton("🔙 Back to Courses", callback_data="courses::global::1")])
 
     title = f"🔍 Results for '{query_text}' (courses, categories & coaches, page {page}/{total_pages}):"
+    if truncated:
+        title += " ⚠️ partial set — refine your query"
     return title, keyboard, total
 
 
 async def _build_category_course_search_results(db, query_text: str, category: str, page: int, context: CallbackContext = None):
     page_size = PAGE_SIZE
 
-    try:
-        child_cats_all = _dedupe_categories(
-            await _fetch_all(execute_category_search, db, query_text, parent=category)
-        )
-    except Exception:
-        child_cats_all = []
-    try:
-        coach_courses = _dedupe_courses(
-            await _fetch_all(execute_coach_course_search, db, query_text, category=category)
-        )
-    except Exception:
-        coach_courses = []
-    try:
-        course_segment = _dedupe_courses(
-            await _fetch_all(
-                execute_category_course_search,
-                db,
-                query_text,
-                category=category,
-                include_children=True,
-            )
-        )
-    except Exception:
-        course_segment = []
-
-    course_segment, coach_courses, child_cats_all = _normalize_search_segments(
-        course_segment,
-        coach_courses,
-        child_cats_all,
+    child_cats_all, coach_courses, course_segment, truncated = await _collect_category_course_segments(
+        db, query_text, category
     )
 
     (page_cats, page_coaches, page_courses), total, total_pages, page = _paginate_deduped(
@@ -614,6 +733,8 @@ async def _build_category_course_search_results(db, query_text: str, category: s
         keyboard.append([InlineKeyboardButton("🔙 Back to Category", callback_data=back_cb)])
 
     title = f"🔍 Results for '{query_text}' in '{category}' incl. subcategories & coaches (page {page}/{total_pages}):"
+    if truncated:
+        title += " ⚠️ partial set — refine your query"
     return title, keyboard, total
 
 # ---------------  callback entry points  ---------------
@@ -834,7 +955,7 @@ async def _perform_category_search(update: Update, context: CallbackContext, que
             )
             return
 
-        await update.message.reply_text(title, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(title, reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)))
 
     except Exception:
         logger.exception("Error searching categories")
@@ -857,7 +978,7 @@ async def _perform_course_search(update: Update, context: CallbackContext, query
             )
             return
 
-        await update.message.reply_text(title, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(title, reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)))
 
     except Exception:
         logger.exception("Error searching courses")
@@ -879,7 +1000,7 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
             )
             return
 
-        await update.message.reply_text(title, reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(title, reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)))
 
     except Exception:
         logger.exception("Error searching category courses")
@@ -934,7 +1055,7 @@ async def search_courses_pagination_callback(update: Update, context: CallbackCo
         await safe_edit_message(
             query,
             title,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
             action_key=getattr(query, "data", None),
         )
 
@@ -992,7 +1113,7 @@ async def search_categories_pagination_callback(update: Update, context: Callbac
         await safe_edit_message(
             query,
             title,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
             action_key=getattr(query, "data", None),
         )
 
@@ -1067,7 +1188,7 @@ async def search_category_courses_pagination_callback(update: Update, context: C
         await safe_edit_message(
             query,
             title,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
             action_key=getattr(query, "data", None),
         )
 
@@ -1149,7 +1270,7 @@ async def back_to_results_callback(update: Update, context: CallbackContext):
         await safe_edit_message(
             query,
             title,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
             action_key=getattr(query, "data", None),
         )
 

@@ -17,14 +17,6 @@ from handlers.base_handlers import (
 )
 
 
-def _parse_origin_page(value, default: int = 1) -> int:
-    try:
-        page = int(value)
-        return page if page >= 1 else default
-    except Exception:
-        return default
-
-
 async def _course_doc_by_id(db, course_id: str, projection=None):
     """Locate the single category doc holding the course with this uuid."""
     try:

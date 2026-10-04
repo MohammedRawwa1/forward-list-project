@@ -15,6 +15,7 @@ from telegram.ext import (
 from config import is_owner
 from conversation_states import ADD_CATEGORY, ADD_COACH, ADD_LINK, ADD_NAME, ADD_PARENT
 from handlers.base_handlers import (
+    _dedupe_markup,
     _fit_cb,
     _resolve_callback_payload,
     _shorten_showcat_cb,
@@ -212,7 +213,7 @@ async def add_course_start(update: Update, context: CallbackContext):
                         keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back_to_cats")])
                         await update.message.reply_text(
                             f"Choose a coach for new course under '{parent_name}':",
-                            reply_markup=InlineKeyboardMarkup(keyboard),
+                            reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
                         )
                         return ADD_COACH
                 except Exception:
@@ -277,7 +278,7 @@ async def add_course_start(update: Update, context: CallbackContext):
 
     await update.message.reply_text(
         "Choose a parent category for the new course:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
     )
     return ADD_PARENT
 
@@ -740,7 +741,7 @@ async def parent_selected(update: Update, context: CallbackContext):
     await safe_edit_message(
         query,
         "Choose a coach for this course (or enter one manually):",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
         action_key=getattr(query, "data", None),
     )
     return ADD_COACH
@@ -866,7 +867,7 @@ async def addcoach_page(update: Update, context: CallbackContext):
     await safe_edit_message(
         query,
         "Choose a coach for this course (or enter one manually):",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
         action_key=getattr(query, "data", None),
     )
     return ADD_COACH
@@ -947,7 +948,7 @@ async def addparent_page(update: Update, context: CallbackContext):
     await safe_edit_message(
         query,
         f"Choose a parent category for the new course (page {page}/{last_page}):",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=_dedupe_markup(InlineKeyboardMarkup(keyboard)),
         action_key=getattr(query, "data", None),
     )
     return ADD_PARENT
@@ -1012,7 +1013,7 @@ async def addcat_page(update_or_message, context: CallbackContext, *, page: int 
     if nav:
         keyboard.append(nav)
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = _dedupe_markup(InlineKeyboardMarkup(keyboard))
 
     if is_query:
         await safe_edit_message(

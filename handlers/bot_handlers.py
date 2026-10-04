@@ -118,7 +118,7 @@ async def delete_category_start(update: Update, context: CallbackContext):
 
         await update.message.reply_text(
             "Choose a category to delete:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=base_handlers._dedupe_markup(InlineKeyboardMarkup(keyboard)),
         )
 
     except Exception:
@@ -205,7 +205,7 @@ async def handle_delete_category_page(update: Update, context: CallbackContext):
     await base_handlers.safe_edit_message(
         query,
         "Choose a category to delete:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=base_handlers._dedupe_markup(InlineKeyboardMarkup(keyboard)),
         action_key=getattr(query, "data", None),
     )
 
@@ -283,7 +283,7 @@ async def delete_parent_start(update: Update, context: CallbackContext):
 
         await update.message.reply_text(
             "Choose a parent category to delete:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=base_handlers._dedupe_markup(InlineKeyboardMarkup(keyboard)),
         )
 
     except Exception:
@@ -369,7 +369,7 @@ async def handle_delete_parent_page(update: Update, context: CallbackContext):
         await base_handlers.safe_edit_message(
             query,
             f"Choose a parent category to delete (page {page}):",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=base_handlers._dedupe_markup(InlineKeyboardMarkup(keyboard)),
             action_key=data,
         )
     except Exception:
@@ -389,7 +389,7 @@ async def delete_all_data_start(update: Update, context: CallbackContext):
     ]
     await update.message.reply_text(
         "Are you sure you want to delete ALL categories and courses? This cannot be undone.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=base_handlers._dedupe_markup(InlineKeyboardMarkup(keyboard)),
     )
     try:
         from conversation_states import DELETE_ALL

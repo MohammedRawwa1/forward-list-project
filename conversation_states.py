@@ -1,7 +1,5 @@
 # ---------------  /add  ---------------
 ADD_NAME, ADD_LINK, ADD_CATEGORY, ADD_PARENT, ADD_COACH = range(5)
-# ---------------  /start  ---------------
-START_AWAIT_NAME = 7
 # ---------------  /create_category  ---------------
 CREATE_CAT_NAME = 10
 CREATE_CAT_PARENT = 11

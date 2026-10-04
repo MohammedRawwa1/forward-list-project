@@ -46,21 +46,6 @@ async def _resolve_callback_ref_key(db, key: str) -> dict | None:
     return CALLBACK_MAP.get(key)
 
 
-def _course_uuid(course) -> str | None:
-    """Return a valid uuid string for an embedded course, generating and using it when missing."""
-    try:
-        if not isinstance(course, dict):
-            return None
-        cid = course.get("id")
-        if isinstance(cid, str) and UUID_RE.match(cid.strip()):
-            return cid.strip()
-        new_id = str(uuid.uuid4())
-        course["id"] = new_id
-        return new_id
-    except Exception:
-        return None
-
-
 async def ensure_course_uuids(db, category_name: str, batch_limit: int = 500):
     """Ensure every embedded course in the given category doc(s) has a stable uuid.
 
@@ -132,6 +117,13 @@ async def invalidate_course_caches(category: str = None, coach: str = None):
                 _bg_task(_redis.delete(key))
         except Exception:
             pass
+    # Search result sets are cached too; a delete must not leave stale rows.
+    try:
+        from handlers.search_handlers import invalidate_search_cache
+
+        invalidate_search_cache()
+    except Exception:
+        pass
 
 
 async def collect_subtree_names(
@@ -310,37 +302,95 @@ def _set_callback_resolve_cache(key: str, payload, ttl: int = 60):
         pass
 
 
-_SESSION_KEEP_OPEN: dict[tuple[int, int], float] = {}
-_SESSION_KEEP_OPEN_MAX = 10000
+# Per-user inline session activity. Each user's keyboard session "opens" when
+# they interact and "closes" once THAT user has been idle for GUI_SESSION_TTL.
+# Activity is tracked per user id, so one busy user never keeps another user's
+# session alive (and vice versa): there is no single shared session clock, and
+# the admin's session is isolated from everyone else's exactly like any other
+# user's. The single GUI_SESSION_TTL env var still defines the idle window.
+#
+# The activity map is also the per-user "last seen" clock used to bound PTB's
+# per-user data: it is kept for _SESSION_ACTIVITY_TTL (at least USER_DATA_TTL)
+# and hard-capped so it can never grow without limit as users accumulate.
+USER_DATA_TTL = env_int("USER_DATA_TTL", 24 * 3600)
+_USER_SESSION_ACTIVITY: dict[int, float] = {}
+_SESSION_ACTIVITY_TTL = max(GUI_SESSION_TTL, USER_DATA_TTL * 2)
+_USER_SESSION_ACTIVITY_MAX = env_int("SESSION_ACTIVITY_MAX", 100000)
+
+
+def _touch_user_session(user_id):
+    """Record activity for a user, resetting their independent idle timer."""
+    try:
+        if user_id is None:
+            return
+        uid = int(user_id)
+        now = time.time()
+        if len(_USER_SESSION_ACTIVITY) > _USER_SESSION_ACTIVITY_MAX // 4 * 3:
+            cutoff = now - _SESSION_ACTIVITY_TTL
+            stale = [k for k, ts in _USER_SESSION_ACTIVITY.items() if ts < cutoff]
+            for k in stale:
+                try:
+                    del _USER_SESSION_ACTIVITY[k]
+                except Exception:
+                    pass
+        _USER_SESSION_ACTIVITY[uid] = now
+        if len(_USER_SESSION_ACTIVITY) > _USER_SESSION_ACTIVITY_MAX:
+            drop = max(1, len(_USER_SESSION_ACTIVITY) // 4)
+            for _ in range(drop):
+                try:
+                    _USER_SESSION_ACTIVITY.pop(next(iter(_USER_SESSION_ACTIVITY)), None)
+                except StopIteration:
+                    break
+    except Exception:
+        pass
+
+
+def _user_idle_seconds(user_id):
+    """Seconds since the user's last recorded activity, or None if unknown."""
+    try:
+        if user_id is None:
+            return None
+        ts = _USER_SESSION_ACTIVITY.get(int(user_id))
+        if ts is None:
+            return None
+        return time.time() - ts
+    except Exception:
+        return None
+
+
+def _session_user_id(message):
+    """Best-effort user id for a message (private chats: chat id == user id)."""
+    try:
+        chat = getattr(message, "chat", None)
+        if chat is None:
+            return None
+        uid = getattr(chat, "id", None)
+        return int(uid) if uid is not None else None
+    except Exception:
+        return None
+
+
+def _event_user_id(update_or_message):
+    """Resolve the acting user's id from an Update or a Message."""
+    try:
+        u = getattr(update_or_message, "effective_user", None)
+        if u is None:
+            u = getattr(update_or_message, "from_user", None)
+        return getattr(u, "id", None) if u is not None else None
+    except Exception:
+        return None
 
 
 def _set_session_keep_open(message, keep: bool = True):
+    """Compatibility shim: touch (or drop) the session activity for a message's user."""
     try:
-        chat_id = getattr(message, "chat", None).id if getattr(message, "chat", None) else None
-        msg_id = getattr(message, "message_id", None)
-        if chat_id is None or msg_id is None:
+        uid = _session_user_id(message)
+        if uid is None:
             return
-        key = (int(chat_id), int(msg_id))
         if keep:
-            now = time.time()
-            cutoff = now - GUI_SESSION_TTL
-            if len(_SESSION_KEEP_OPEN) > _SESSION_KEEP_OPEN_MAX // 4 * 3:
-                stale = [k for k, ts in _SESSION_KEEP_OPEN.items() if ts < cutoff]
-                for k in stale:
-                    try:
-                        del _SESSION_KEEP_OPEN[k]
-                    except Exception:
-                        pass
-            _SESSION_KEEP_OPEN[key] = now
-            if len(_SESSION_KEEP_OPEN) > _SESSION_KEEP_OPEN_MAX:
-                drop = max(1, len(_SESSION_KEEP_OPEN) // 4)
-                for _ in range(drop):
-                    try:
-                        _SESSION_KEEP_OPEN.pop(next(iter(_SESSION_KEEP_OPEN)), None)
-                    except StopIteration:
-                        break
+            _touch_user_session(uid)
         else:
-            _SESSION_KEEP_OPEN.pop(key, None)
+            _USER_SESSION_ACTIVITY.pop(uid, None)
     except Exception:
         pass
 
@@ -485,21 +535,84 @@ async def _get_courses_count(db, category: str, ttl: int = 60):
     return cnt
 
 
+async def _get_bot_courses_total(db, ttl: int = 60):
+    """Total number of courses across every category in the bot (from MongoDB).
+
+    Cached (memory + Redis) so course lists can render a 'shown/total' counter
+    without re-counting the whole collection on every page.
+    """
+    key = "count:all_courses"
+    now = time.time()
+    entry = _COUNT_CACHE.get(key)
+    if entry and entry[1] > now:
+        return entry[0]
+    try:
+        if _redis is not None:
+            val = await _redis.get(key)
+            if val is not None:
+                try:
+                    cnt = int(val)
+                except Exception:
+                    cnt = 0
+                _COUNT_CACHE[key] = (cnt, now + ttl)
+                _prune_count_cache()
+                return cnt
+    except Exception:
+        pass
+
+    try:
+        pipeline = [
+            {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
+            {"$group": {"_id": None, "count": {"$sum": "$n"}}},
+        ]
+        agg = await db.categories.aggregate(pipeline).to_list(length=1)
+        cnt = int(agg[0].get("count", 0)) if agg else 0
+    except Exception:
+        cnt = 0
+
+    _COUNT_CACHE[key] = (cnt, now + ttl)
+    _prune_count_cache()
+    try:
+        if _redis is not None:
+            _bg_task(_redis.set(key, str(cnt), ex=ttl))
+    except Exception:
+        pass
+    return cnt
+
+
 # ----------  message scheduling  ----------
-def schedule_close_inline_message(message, delay: int = None, notice: str = "(Session closed due to inactivity)"):
+# How often each open session re-checks whether its user has gone idle. Small
+# enough to close promptly, large enough to avoid spinning: the timer is
+# per-user, so continued activity merely resets that user's own deadline.
+SESSION_CLOSE_CHECK_INTERVAL = max(0.5, env_float("SESSION_CLOSE_CHECK_INTERVAL", 5.0))
+
+
+def schedule_close_inline_message(
+    message,
+    delay: int = None,
+    notice: str = "(Session closed due to inactivity)",
+    user_id=None,
+):
     if delay is None:
         delay = GUI_SESSION_TTL
 
+    uid = user_id if user_id is not None else _session_user_id(message)
+    # Opening the session counts as activity so this user's idle clock starts now.
+    _touch_user_session(uid)
+
     async def _worker():
-        await asyncio.sleep(delay)
         try:
-            try:
-                chat_id = getattr(message, "chat", None).id if getattr(message, "chat", None) else None
-                msg_id = getattr(message, "message_id", None)
-                if chat_id is not None and msg_id is not None and (int(chat_id), int(msg_id)) in _SESSION_KEEP_OPEN:
-                    return
-            except Exception:
-                pass
+            # Close only once THIS user has been idle for `delay`, re-checking
+            # periodically so their own continued activity resets the deadline
+            # without touching any other user's session.
+            if uid is None:
+                await asyncio.sleep(delay)
+            else:
+                while True:
+                    idle = _user_idle_seconds(uid)
+                    if idle is None or idle >= delay:
+                        break
+                    await asyncio.sleep(min(SESSION_CLOSE_CHECK_INTERVAL, max(delay - idle, 0.5)))
 
             orig = getattr(message, "text", None) or getattr(message, "caption", None) or ""
             try:
@@ -1036,7 +1149,18 @@ def _is_debounced(user_id: int, action_key: str, interval: float = None) -> bool
 
 _USER_BUCKETS = {}
 _USER_BUCKETS_MAX = 50000
-_GLOBAL_BUCKET = {"tokens": 20.0, "capacity": 20.0, "last_refill": time.time(), "refill_rate": 5.0}
+# Global (process-wide) token bucket. This is the ceiling on how many callback
+# edits the whole process sustains per second across ALL users, so it must be
+# raised to scale past a trickle of traffic. Tunable via env; keep the refill
+# rate at/under Telegram's ~30 msg/s global send limit to avoid FloodWait.
+GLOBAL_BUCKET_CAPACITY = env_float("GLOBAL_BUCKET_CAPACITY", 20.0)
+GLOBAL_BUCKET_REFILL_RATE = env_float("GLOBAL_BUCKET_REFILL_RATE", 5.0)
+_GLOBAL_BUCKET = {
+    "tokens": GLOBAL_BUCKET_CAPACITY,
+    "capacity": GLOBAL_BUCKET_CAPACITY,
+    "last_refill": time.time(),
+    "refill_rate": GLOBAL_BUCKET_REFILL_RATE,
+}
 USER_BUCKET_CAPACITY = env_float("USER_BUCKET_CAPACITY", 20.0)
 USER_BUCKET_REFILL_RATE = env_float("USER_BUCKET_REFILL_RATE", 5.0)
 
@@ -1345,7 +1469,7 @@ CACHE_CLEANUP_INTERVAL = env_int("CACHE_CLEANUP_INTERVAL", 300)
 
 
 # ----------  workers  ----------
-def _prune_all_caches():
+def _prune_all_caches(application=None):
     _prune_count_cache()
     _prune_page_cache()
     _prune_callback_resolve_cache()
@@ -1367,18 +1491,33 @@ def _prune_all_caches():
                 break
 
     now = time.time()
-    cutoff_sk = now - GUI_SESSION_TTL
-    stale_sk = [k for k, ts in _SESSION_KEEP_OPEN.items() if ts < cutoff_sk]
+    # Bound PTB's per-user data first (needs the still-present timestamps):
+    # PTB never evicts user_data/chat_data on its own, so without this a bot
+    # with a growing user base leaks memory indefinitely. Users idle past
+    # USER_DATA_TTL have their user_data dropped. Activity is recorded for
+    # every update, so this only ever evicts genuinely inactive users.
+    if application is not None and USER_DATA_TTL > 0:
+        cutoff_ud = now - USER_DATA_TTL
+        for uid in list(_USER_SESSION_ACTIVITY.keys()):
+            try:
+                if _USER_SESSION_ACTIVITY.get(uid, now) < cutoff_ud:
+                    application.drop_user_data(uid)
+                    _USER_SESSION_ACTIVITY.pop(uid, None)
+            except Exception:
+                pass
+
+    cutoff_sk = now - _SESSION_ACTIVITY_TTL
+    stale_sk = [k for k, ts in _USER_SESSION_ACTIVITY.items() if ts < cutoff_sk]
     for k in stale_sk:
         try:
-            del _SESSION_KEEP_OPEN[k]
+            del _USER_SESSION_ACTIVITY[k]
         except Exception:
             pass
-    if len(_SESSION_KEEP_OPEN) > _SESSION_KEEP_OPEN_MAX:
-        drop = max(1, len(_SESSION_KEEP_OPEN) // 4)
+    if len(_USER_SESSION_ACTIVITY) > _USER_SESSION_ACTIVITY_MAX:
+        drop = max(1, len(_USER_SESSION_ACTIVITY) // 4)
         for _ in range(drop):
             try:
-                _SESSION_KEEP_OPEN.pop(next(iter(_SESSION_KEEP_OPEN)), None)
+                _USER_SESSION_ACTIVITY.pop(next(iter(_USER_SESSION_ACTIVITY)), None)
             except StopIteration:
                 break
 
@@ -1407,7 +1546,7 @@ def _prune_all_caches():
             pass
 
 
-async def start_cache_cleanup_worker():
+async def start_cache_cleanup_worker(application=None):
     logger.info(
         "Starting cache cleanup worker (interval=%ds)",
         CACHE_CLEANUP_INTERVAL,
@@ -1416,7 +1555,7 @@ async def start_cache_cleanup_worker():
         await asyncio.sleep(CACHE_CLEANUP_INTERVAL)
         try:
             before = time.time()
-            _prune_all_caches()
+            _prune_all_caches(application)
             elapsed = time.time() - before
             logger.debug("Cache cleanup completed in %.3fs", elapsed)
         except Exception:
@@ -1459,6 +1598,8 @@ async def safe_edit_message(
     keep_photo: bool = False,
 ):
     try:
+        # Guarantee unique callback_data so no two buttons can light up together.
+        reply_markup = _dedupe_markup(reply_markup)
         user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
         key = action_key or getattr(query, "data", None) or "callback"
         if user_id and _is_debounced(user_id, key, debounce_interval):
@@ -1528,6 +1669,12 @@ async def safe_edit_message(
 
 async def safe_answer(query, text: str = None):
     try:
+        # Every button tap is activity for that user: reset their own session
+        # idle timer so their keyboard stays open until THEY go inactive.
+        _touch_user_session(getattr(getattr(query, "from_user", None), "id", None))
+    except Exception:
+        pass
+    try:
         if text is not None:
             await query.answer(text=text)
         else:
@@ -1564,6 +1711,9 @@ def build_courses_page(
     is_page: bool = False,
     store_page_ref: bool = False,
     search_ref: str = None,
+    overall_total: int = None,
+    page_first_cursor: dict = None,
+    page_last_cursor: dict = None,
 ):
     page_size = PAGE_SIZE
     try:
@@ -1692,6 +1842,21 @@ def build_courses_page(
             prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page - 1}"
         else:
             prev_cb = f"courses::global::{page - 1}"
+            # Keyset "previous": query the page before this page's first item.
+            if page_first_cursor is not None:
+                try:
+                    payload = {
+                        "type": "courses_page",
+                        "origin_type": "global",
+                        "category": None,
+                        "page": max(1, page - 1),
+                        "before": page_first_cursor,
+                        "total_count": effective_total,
+                        "page_size": page_size,
+                    }
+                    prev_cb = f"courses_ref::{_store_callback_payload(payload)}"
+                except Exception:
+                    prev_cb = f"courses::global::{page - 1}"
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
     if page < total_pages:
         if origin_type == "category" and category:
@@ -1780,6 +1945,21 @@ def build_courses_page(
                 next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page + 1}"
         else:
             next_cb = f"courses::global::{page + 1}"
+            # Keyset "next": continue after this page's last item.
+            if page_last_cursor is not None:
+                try:
+                    payload = {
+                        "type": "courses_page",
+                        "origin_type": "global",
+                        "category": None,
+                        "page": page + 1,
+                        "after": page_last_cursor,
+                        "total_count": effective_total,
+                        "page_size": page_size,
+                    }
+                    next_cb = f"courses_ref::{_store_callback_payload(payload)}"
+                except Exception:
+                    next_cb = f"courses::global::{page + 1}"
         pagination_buttons.append(InlineKeyboardButton("➡️ Next", callback_data=next_cb))
     if pagination_buttons:
         keyboard.append(pagination_buttons)
@@ -1989,7 +2169,23 @@ def build_courses_page(
     except Exception:
         pass
 
-    return text, InlineKeyboardMarkup(keyboard)
+    # Progress counter: courses actually rendered on this page / total courses
+    # indexed in the bot (read from MongoDB), e.g. "... (page 1): [47/900]".
+    # Counted from the real course buttons so it stays correct however many
+    # courses the page ends up showing after its own size / button limits.
+    try:
+        if overall_total is not None and overall_total > 0:
+            rendered = sum(
+                1
+                for row in keyboard
+                for b in row
+                if getattr(b, "text", None) == "ℹ️ Details"
+            )
+            text = f"{text} [{rendered}/{int(overall_total)}]"
+    except Exception:
+        pass
+
+    return text, InlineKeyboardMarkup(_dedupe_keyboard(keyboard))
 
 
 # ----------  browse commands  ----------
@@ -2388,7 +2584,7 @@ async def categories_page(update_or_message, context: CallbackContext, *, page: 
     else:
         msg = await update_or_message.reply_text(title, reply_markup=reply_markup)
         try:
-            schedule_close_inline_message(msg)
+            schedule_close_inline_message(msg, user_id=_event_user_id(update_or_message))
         except Exception:
             pass
     return
@@ -2887,6 +3083,167 @@ async def showtype_handler(update: Update, context: CallbackContext):
         )
 
 
+# ----------  inline keyboard hygiene  ----------
+def _dedupe_keyboard(keyboard):
+    """Drop inline buttons whose callback_data duplicates an earlier one.
+
+    Telegram clients cannot tell two buttons with identical callback_data
+    apart, so tapping one can light up BOTH (the 'two buttons glow together'
+    bug) and both send the same action. The classic trigger is a nav panel
+    that uses the same helper for Previous(page-1) and Home(page 1): on page 2
+    those produce byte-identical data. Keeping the first occurrence guarantees
+    every button is uniquely addressable.
+    """
+    seen = set()
+    out = []
+    try:
+        for row in keyboard or []:
+            new_row = []
+            for b in row:
+                data = getattr(b, "callback_data", None)
+                if data is None:
+                    new_row.append(b)
+                    continue
+                if data in seen:
+                    logger.debug("Dropping duplicate callback_data=%r (%r)", data, getattr(b, "text", None))
+                    continue
+                seen.add(data)
+                new_row.append(b)
+            if new_row:
+                out.append(new_row)
+    except Exception:
+        return keyboard
+    return out
+
+
+def _dedupe_markup(reply_markup):
+    """Return reply_markup with duplicate callback_data buttons removed."""
+    try:
+        if reply_markup is None:
+            return None
+        rows = getattr(reply_markup, "inline_keyboard", None)
+        if not rows:
+            return reply_markup
+        deduped = _dedupe_keyboard(rows)
+        if len(deduped) == len(rows) and all(len(a) == len(b) for a, b in zip(deduped, rows)):
+            return reply_markup
+        return InlineKeyboardMarkup(deduped)
+    except Exception:
+        return reply_markup
+
+
+# ----------  category design caching / inheritance  ----------
+# Cache resolved designs (incl. inherited ones) so browsing does not re-query
+# on every hop and, more importantly, so a child view keeps its parent's theme
+# instead of flickering the image away. Invalidated when a design is set/removed.
+_DESIGN_CACHE = {}
+_DESIGN_CACHE_MAX = 5000
+_DESIGN_CACHE_TTL = env_int("DESIGN_CACHE_TTL", 300)
+
+
+def _design_cache_lookup(key):
+    """Return (found, value) so a cached `None` (no design) is distinguishable."""
+    try:
+        entry = _DESIGN_CACHE.get(key)
+        if entry is None:
+            return False, None
+        value, expires = entry
+        if expires > time.time():
+            return True, value
+        _DESIGN_CACHE.pop(key, None)
+        return False, None
+    except Exception:
+        return False, None
+
+
+def _design_cache_store(key, value):
+    try:
+        _DESIGN_CACHE[key] = (value, time.time() + _DESIGN_CACHE_TTL)
+        if len(_DESIGN_CACHE) > _DESIGN_CACHE_MAX:
+            drop = max(1, len(_DESIGN_CACHE) // 4)
+            for _ in range(drop):
+                try:
+                    _DESIGN_CACHE.pop(next(iter(_DESIGN_CACHE)), None)
+                except StopIteration:
+                    break
+    except Exception:
+        pass
+
+
+def invalidate_design_cache(category_name=None):
+    """Drop cached designs. Designs change rarely, so a full clear is fine."""
+    try:
+        _DESIGN_CACHE.clear()
+    except Exception:
+        pass
+
+
+async def _design_own(db, name, cid):
+    """The category's OWN design (not inherited), cached under an 'own:' key.
+
+    Kept separate from the inherited value so resolving a child never reads a
+    parent's inherited theme as if it were the parent's own.
+    """
+    try:
+        from handlers.category_design import get_category_design
+    except Exception:
+        return None
+    try:
+        key = "own:" + str(cid or name)
+        found, value = _design_cache_lookup(key)
+        if found:
+            return value
+        value = await get_category_design(db, name)
+        _design_cache_store(key, value)
+        return value
+    except Exception:
+        return None
+
+
+async def _resolve_category_design(db, category_doc):
+    """Design file_id for a category, inheriting its IMMEDIATE parent's design.
+
+    Strictly parent-scoped: a child with no design of its own shows only its
+    direct parent's OWN design. There is no deeper ancestor walk, so switching
+    to a different parent (or to a top-level category) resolves to None and the
+    image is removed rather than a grandparent's theme leaking across branches.
+    """
+    try:
+        if not category_doc:
+            return None
+    except Exception:
+        return None
+    try:
+        key = "resolved:" + str(category_doc.get("id") or category_doc.get("name"))
+        found, value = _design_cache_lookup(key)
+        if found:
+            return value
+
+        own = await _design_own(db, category_doc.get("name"), category_doc.get("id"))
+        if own:
+            _design_cache_store(key, own)
+            return own
+
+        # One hop only: the immediate parent's own design.
+        parent = category_doc.get("parent")
+        inherited = None
+        if parent:
+            try:
+                pdoc = await db.categories.find_one(
+                    {"name": parent},
+                    projection={"name": 1, "id": 1},
+                )
+            except Exception:
+                pdoc = None
+            if pdoc:
+                inherited = await _design_own(db, pdoc.get("name"), pdoc.get("id"))
+
+        _design_cache_store(key, inherited)
+        return inherited
+    except Exception:
+        return None
+
+
 def _clear_design_pending(context):
     try:
         context.user_data.pop("_pending_design", None)
@@ -2930,14 +3287,16 @@ def _back_to_results_row(context, search_ref: str = None):
 
 
 async def _send_design_photo(query, context, text, reply_markup):
-    """Render a category view, showing its own design photo when one exists.
+    """Render a category view, showing its own (or inherited) design photo.
 
-    The design must never leak from one category to another: when the view has a
-    design we show exactly that photo (replacing any other photo already on the
-    message), and when the view has no design we fall back to a plain text message
-    so a stale banner from a previously-viewed category does not persist.
+    The design must never leak from an unrelated branch: when the view resolves
+    to a design we show exactly that file_id, and when no design applies we fall
+    back to plain text so a stale banner does not persist. Within the same
+    branch the resolved file_id is unchanged, so the photo is only re-captioned
+    in place rather than deleted and re-sent (no disappear/reappear flicker).
     """
     try:
+        reply_markup = _dedupe_markup(reply_markup)
         pending_design = context.user_data.pop("_pending_design", None)
 
         if query.message:
@@ -3124,6 +3483,22 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 if results_row:
                     keyboard.append(results_row)
 
+                # Keep the parent's theme while paging through its subcategories
+                # so going "back" does not strip the image and re-render it.
+                try:
+                    _pdb = await get_db()
+                    if _pdb is not None:
+                        pdoc = await _pdb.categories.find_one(
+                            {"name": parent_name},
+                            projection={"name": 1, "id": 1, "parent": 1},
+                        )
+                        design = await _resolve_category_design(_pdb, pdoc) if pdoc else None
+                        if design:
+                            context.user_data["_pending_design"] = design
+                        else:
+                            _clear_design_pending(context)
+                except Exception:
+                    pass
                 title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
                 await _send_design_photo(query, context, title, InlineKeyboardMarkup(keyboard))
                 return
@@ -3225,9 +3600,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
     cat_name = category_doc.get("name")
     cat_path = category_doc.get("path") or cat_name
     try:
-        from handlers.category_design import get_category_design
-
-        design_file_id = await get_category_design(db, cat_name)
+        design_file_id = await _resolve_category_design(db, category_doc)
         if design_file_id:
             context.user_data["_pending_design"] = design_file_id
         else:
@@ -3610,45 +3983,31 @@ async def list_courses(update: Update, context: CallbackContext):
     try:
         page = 1
         page_size = PAGE_SIZE
-        start = (page - 1) * page_size
-        items_pipeline = [
-            {"$unwind": "$courses"},
-            {"$project": {"name": "$courses.name", "link": "$courses.link", "category": "$name", "id": "$courses.id"}},
-            {"$sort": {"name": 1}},
-            {"$skip": start},
-            {"$limit": page_size + 1},
-        ]
+        has_more = False
         async with _db_timing(f"list_courses:page:{page}"):
             cache_key = f"page:global:{page}"
             cached = _get_cached_page(cache_key)
             if cached is not None:
                 items = cached
             else:
-                try:
-                    items = await db.categories.aggregate(items_pipeline).to_list(length=page_size + 1)
-                except Exception:
-                    items = []
+                # Keyset first page: no O(offset) skip, and Next carries a
+                # cursor so deep pages stay bounded index scans.
+                items, has_more = await _fetch_global_courses_keyset(db, page_size, after=None)
                 try:
                     _set_cached_page(cache_key, items, ttl=3)
                 except Exception:
                     pass
-        has_more = len(items) > page_size
         all_courses = items[:page_size]
         all_courses = sorted(all_courses, key=lambda c: (c.get("name") or "").lower())
-        try:
-            cnt_doc = await db.categories.aggregate(
-                [
-                    {"$project": {"n": {"$size": {"$ifNull": ["$courses", []]}}}},
-                    {"$group": {"_id": None, "count": {"$sum": "$n"}}},
-                ],
-            ).to_list(length=1)
-            total_courses = (
-                int(cnt_doc[0].get("count"))
-                if cnt_doc
-                else (page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses)))
-            )
-        except Exception:
+        # Bot-wide course total (cached), used both for pagination and for the
+        # 'shown/total' counter rendered on each page. If the count query fails
+        # (transient DB error) fall back to a lower-bound estimate from this
+        # page so pagination still works instead of collapsing to one page.
+        total_courses = await _get_bot_courses_total(db)
+        if not total_courses:
             total_courses = page * page_size + 1 if has_more else ((page - 1) * page_size + len(all_courses))
+        first_cursor = _course_cursor(all_courses[0]) if all_courses else None
+        last_cursor = _course_cursor(all_courses[-1]) if all_courses else None
         if all_courses:
             text, reply_markup = build_courses_page(
                 all_courses,
@@ -3657,6 +4016,9 @@ async def list_courses(update: Update, context: CallbackContext):
                 origin_context=None,
                 total_count=total_courses,
                 is_page=True,
+                overall_total=total_courses,
+                page_first_cursor=first_cursor,
+                page_last_cursor=last_cursor,
             )
             if not text:
                 await update.message.reply_text("No courses available.")
@@ -3669,7 +4031,7 @@ async def list_courses(update: Update, context: CallbackContext):
                 pass
             msg = await update.message.reply_text(text, reply_markup=reply_markup)
             try:
-                schedule_close_inline_message(msg)
+                schedule_close_inline_message(msg, user_id=_event_user_id(update))
             except Exception:
                 pass
         else:
@@ -4835,6 +5197,75 @@ async def _courses_origin_total(db, origin_type: str, category: str = None, fres
     return None
 
 
+def _course_cursor(item):
+    """Sort cursor (name, id) for a course row, used by keyset pagination."""
+    try:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        if name is None:
+            return None
+        return {"name": name, "id": item.get("id")}
+    except Exception:
+        return None
+
+
+async def _fetch_global_courses_keyset(db, page_size: int, after=None, before=None):
+    """Keyset (cursor) page of all embedded courses ordered by (name, id).
+
+    Avoids the O(offset) cost of `skip` for deep pages: `after` fetches the
+    page following a cursor, `before` the page preceding it (queried
+    descending, then reversed). Returns (items, has_more). Backed by the
+    compound {courses.name, courses.id} index so it stays a bounded index scan.
+    """
+    try:
+        pipeline = [
+            {"$unwind": "$courses"},
+            {
+                "$project": {
+                    "name": "$courses.name",
+                    "link": "$courses.link",
+                    "category": "$name",
+                    "id": "$courses.id",
+                },
+            },
+        ]
+        cursor = before if before else after
+        if cursor and cursor.get("name") is not None:
+            if before:
+                pipeline.append(
+                    {
+                        "$match": {
+                            "$or": [
+                                {"name": {"$lt": cursor["name"]}},
+                                {"name": cursor["name"], "id": {"$lt": cursor.get("id")}},
+                            ],
+                        },
+                    },
+                )
+            else:
+                pipeline.append(
+                    {
+                        "$match": {
+                            "$or": [
+                                {"name": {"$gt": cursor["name"]}},
+                                {"name": cursor["name"], "id": {"$gt": cursor.get("id")}},
+                            ],
+                        },
+                    },
+                )
+        direction = -1 if before else 1
+        pipeline.extend([{"$sort": {"name": direction, "id": direction}}, {"$limit": page_size + 1}])
+        rows = await db.categories.aggregate(pipeline).to_list(length=page_size + 1)
+        has_more = len(rows) > page_size
+        rows = rows[:page_size]
+        if before:
+            rows = list(reversed(rows))
+        return rows, has_more
+    except Exception:
+        return [], False
+
+
 def _clamp_courses_page(page: int, total, page_size: int):
     if total is None:
         return page
@@ -4905,6 +5336,11 @@ async def courses_callback(update: Update, context: CallbackContext):
         )
         return
     page_size = PAGE_SIZE
+    # Bot-wide course total (cached) for the 'shown/total' progress counter.
+    try:
+        overall_total = await _get_bot_courses_total(db)
+    except Exception:
+        overall_total = None
 
     try:
         if data.startswith("courses_ref::"):
@@ -4931,30 +5367,41 @@ async def courses_callback(update: Update, context: CallbackContext):
                         if origin_type == "global":
                             total_count = await _courses_origin_total(db, "global")
                             page = _clamp_courses_page(page, total_count, page_size)
-                            start = (page - 1) * page_size
-                            items_pipeline = [
-                                {"$unwind": "$courses"},
-                                {
-                                    "$project": {
-                                        "name": "$courses.name",
-                                        "link": "$courses.link",
-                                        "category": "$name",
-                                        "id": {"$ifNull": ["$courses.id", None]},
-                                    },
-                                },
-                                {"$sort": {"name": 1}},
-                                {"$skip": start},
-                                {"$limit": page_size + 1},
-                            ]
-                            try:
-                                items_result = await db.categories.aggregate(items_pipeline).to_list(
-                                    length=page_size + 1,
+                            after_cursor = payload.get("after")
+                            before_cursor = payload.get("before")
+                            if after_cursor or before_cursor:
+                                # Keyset navigation: bounded index scan, no O(offset) skip.
+                                items, has_more = await _fetch_global_courses_keyset(
+                                    db,
+                                    page_size,
+                                    after=after_cursor,
+                                    before=before_cursor,
                                 )
-                            except Exception:
-                                items_result = []
-                            has_more = len(items_result) > page_size
-                            items = items_result[:page_size]
-                            items = sorted(items, key=lambda c: (c.get("name") or "").lower())
+                            else:
+                                start = (page - 1) * page_size
+                                items_pipeline = [
+                                    {"$unwind": "$courses"},
+                                    {
+                                        "$project": {
+                                            "name": "$courses.name",
+                                            "link": "$courses.link",
+                                            "category": "$name",
+                                            "id": {"$ifNull": ["$courses.id", None]},
+                                        },
+                                    },
+                                    {"$sort": {"name": 1}},
+                                    {"$skip": start},
+                                    {"$limit": page_size + 1},
+                                ]
+                                try:
+                                    items_result = await db.categories.aggregate(items_pipeline).to_list(
+                                        length=page_size + 1,
+                                    )
+                                except Exception:
+                                    items_result = []
+                                has_more = len(items_result) > page_size
+                                items = items_result[:page_size]
+                                items = sorted(items, key=lambda c: (c.get("name") or "").lower())
                             if total_count is None:
                                 total_count = (
                                     page * page_size + 1 if has_more else ((page - 1) * page_size + len(items))
@@ -5023,6 +5470,9 @@ async def courses_callback(update: Update, context: CallbackContext):
                     total_count=total_count,
                     is_page=True,
                     store_page_ref=False,
+                    overall_total=overall_total,
+                    page_first_cursor=_course_cursor(items[0]) if items else None,
+                    page_last_cursor=_course_cursor(items[-1]) if items else None,
                 )
                 if not text:
                     await safe_edit_message(query, "No courses found.", action_key=getattr(query, "data", None))
@@ -5119,6 +5569,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             origin_type="global",
                             total_count=total_courses,
                             is_page=True,
+                            overall_total=overall_total,
                         )
                         if not text:
                             await safe_edit_message(
@@ -5200,6 +5651,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             total_count=total_courses,
                             is_page=True,
                             store_page_ref=True,
+                            overall_total=overall_total,
                         )
                         if not text:
                             await safe_edit_message(
@@ -5273,6 +5725,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             total_count=total_courses,
                             is_page=True,
                             store_page_ref=True,
+                            overall_total=overall_total,
                         )
                         if not text:
                             await safe_edit_message(
@@ -5415,6 +5868,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         category=category,
                         origin_context=origin_ctx,
                         origin_context_page=origin_ctx_page,
+                        overall_total=overall_total,
                     )
                     if not text:
                         await safe_edit_message(
