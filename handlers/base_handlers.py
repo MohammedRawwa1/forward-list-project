@@ -3543,23 +3543,40 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
         if design is None:
             design = context.user_data.get("_branch_design")
 
-        # 4) Stability: do not regenerate a banner that is already showing.
-        #    If the current message already carries the design photo we want,
-        #    every subsequent tap edits the caption in place instead of deleting
-        #    and re-sending the same image (that is the "bounce" the user sees).
+        show_photo = design is not None
+
+        # Current media on the message the user tapped (if any).
         current_photo = None
         try:
             if query.message is not None and getattr(query.message, "photo", None):
                 current_photo = query.message.photo[-1].file_id
         except Exception:
             current_photo = None
-        already_showing_design = design is not None and current_photo == design
 
-        show_photo = design is not None
-        # Media must be rebuilt only when switching text<->photo or to a
-        # *different* photo. edit_caption can only keep the current media.
+        # (a) The message already shows exactly the design we want -> caption-only
+        #     edit. This is the stable path: no new message, no delete, no bounce.
+        if show_photo and current_photo == design:
+            try:
+                await query.message.edit_caption(
+                    caption=text, reply_markup=reply_markup
+                )
+                return
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "not modified" in msg or "message is not modified" in msg:
+                    # Caption is already correct; nothing to do (don't fall through
+                    # to safe_edit_message, which would strip the photo).
+                    return
+                # Some other error (e.g. missing permissions) -> fall back below.
+
+        # (b) We need a different media state than what is currently shown:
+        #     - text message -> want photo: delete text, send photo (entry path)
+        #     - photo (different) -> want photo: delete old, send new photo
+        #     - photo -> want text: delete photo, send text (strip banner)
         needs_rebuild = (
-            show_photo and not already_showing_design and current_photo is not None
+            show_photo
+            and current_photo is not None
+            and current_photo != design
         ) or (not show_photo and current_photo is not None)
 
         if needs_rebuild:
@@ -3600,48 +3617,48 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
 
                 try:
                     await query.message.delete()
-                    if show_photo:
+                except Exception:
+                    pass
+
+                if show_photo:
+                    try:
                         await context.bot.send_photo(
                             chat_id=query.message.chat_id,
                             photo=design,
                             caption=text,
                             reply_markup=reply_markup,
                         )
-                    else:
+                        return
+                    except Exception:
+                        pass
+                else:
+                    try:
                         await context.bot.send_message(
                             chat_id=query.message.chat_id,
                             text=text,
                             reply_markup=reply_markup,
                         )
-                    return
-                except Exception:
-                    # If deleting the old message fails we must not leave the
-                    # user on a caption-less photo; fall back to caption edit
-                    # when possible, otherwise send a fresh message.
-                    if show_photo and current_photo == design:
-                        try:
-                            await query.message.edit_caption(
-                                caption=text, reply_markup=reply_markup
-                            )
-                            return
-                        except Exception:
-                            pass
-                    pass
+                        return
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
-        if already_showing_design:
+        # (c) No existing media that matches what we want (a text message with no
+        #     photo, or a message whose media we could not read): send the design as
+        #     a new photo. When the current message is a text message we can delete,
+        #     do so first so the photo replaces it in the same window instead of
+        #     leaving an orphan text message behind (that is the "new message" the
+        #     user saw). If deletion fails we still send the photo (best effort).
+        if show_photo:
             try:
-                await query.message.edit_caption(
-                    caption=text, reply_markup=reply_markup
-                )
-                return
+                if query.message is not None:
+                    try:
+                        await query.message.delete()
+                    except Exception:
+                        pass
             except Exception:
                 pass
-
-        # No existing message to recaption: send a new message with the design
-        # (or a plain message if the branch has no design).
-        if design is not None:
             try:
                 chat_id = (
                     getattr(query.message, "chat_id", None)
@@ -3659,7 +3676,10 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
                 pass
 
         await safe_edit_message(
-            query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None)
+            query,
+            text=text,
+            reply_markup=reply_markup,
+            action_key=getattr(query, "data", None),
         )
     except Exception:
         try:
