@@ -3200,6 +3200,49 @@ async def _design_own(db, name, cid):
         return None
 
 
+async def _resolve_branch_design(db, category_doc) -> str | None:
+    """Resolve the design that a category VIEW should display, and cache it
+
+    at process level (`_DESIGN_CACHE`) AND at the user level so that every
+    subsequent view inside the same category branch reuses the same file_id.
+
+    For a parent category this is its own/inherited design. For a child, the
+    design displayed is the child's own/inherited design (one-hop parent scope).
+    The key point is that we resolve ONCE per category doc id and reuse across
+    all the parent's coaches/courses/subcategory/type/empty views, so the image
+    never re-sends on every pagination step.
+    """
+    try:
+        if not category_doc:
+            return None
+        cid = category_doc.get("id")
+        name = category_doc.get("name") or ""
+        cache_key = "resolved:" + str(cid or name)
+        found, value = _design_cache_lookup(cache_key)
+        if found:
+            return value
+        own = await _design_own(db, name, cid)
+        if own:
+            _design_cache_store(cache_key, own)
+            return own
+        parent = category_doc.get("parent")
+        inherited = None
+        if parent:
+            try:
+                pdoc = await db.categories.find_one(
+                    {"name": parent},
+                    projection={"name": 1, "id": 1},
+                )
+            except Exception:
+                pdoc = None
+            if pdoc:
+                inherited = await _design_own(db, pdoc.get("name"), pdoc.get("id"))
+        _design_cache_store(cache_key, inherited)
+        return inherited
+    except Exception:
+        return None
+
+
 async def _resolve_category_design(db, category_doc):
     """Design file_id for a category, inheriting its IMMEDIATE parent's design.
 
@@ -3286,18 +3329,38 @@ def _back_to_results_row(context, search_ref: str = None):
         return None
 
 
-async def _send_design_photo(query, context, text, reply_markup):
+async def _send_design_photo(query, context, text, reply_markup, force_design: str = None):
     """Render a category view, showing its own (or inherited) design photo.
 
     The design must never leak from an unrelated branch: when the view resolves
     to a design we show exactly that file_id, and when no design applies we fall
-    back to plain text so a stale banner does not persist. Within the same
-    branch the resolved file_id is unchanged, so the photo is only re-captioned
-    in place rather than deleted and re-sent (no disappear/reappear flicker).
+    back to plain text so a stale banner does not persist.
+
+    Within the same category branch, the design file_id is resolved once (by the
+    entry view) and stored in `context.user_data["_branch_design"]`. Every
+    sub-view reuses it, so the photo is only re-captioned in place rather than
+    deleted and re-sent — there is no disappear/reappear flicker while paging
+    through coaches/courses/subcategories/types of a parent that holds the image.
+
+    `force_design` overrides any pending/branch design (used when a caller
+    explicitly wants a specific file_id shown).
     """
     try:
         reply_markup = _dedupe_markup(reply_markup)
+
+        # 1) Explicit override wins.
+        design = force_design
+
+        # 2) A freshly-set pending design (from this update's own resolution)
+        #    overrides the older branch design so the view always shows the right
+        #    thing even when the branch design changes between taps.
         pending_design = context.user_data.pop("_pending_design", None)
+        if design is None and pending_design is not None:
+            design = pending_design
+
+        # 3) Reuse the branch design that the entry view already resolved.
+        if design is None:
+            design = context.user_data.get("_branch_design")
 
         if query.message:
             current_photo = None
@@ -3307,11 +3370,11 @@ async def _send_design_photo(query, context, text, reply_markup):
             except Exception:
                 current_photo = None
 
-            wants_photo = pending_design is not None
-            photo_matches = wants_photo and current_photo == pending_design
-            # Media must be rebuilt when moving text->photo, photo->different
-            # photo, or photo->text. edit_caption can only keep the current media.
-            needs_rebuild = (wants_photo and not photo_matches) or (not wants_photo and current_photo is not None)
+            show_photo = design is not None
+            photo_matches = show_photo and current_photo == design
+            # Media must be rebuilt when switching text<->photo or to a different
+            # photo. edit_caption can only keep the current media.
+            needs_rebuild = (show_photo and not photo_matches) or (not show_photo and current_photo is not None)
 
             if needs_rebuild:
                 # --- Rate limiting (matches safe_edit_message) ---
@@ -3319,7 +3382,10 @@ async def _send_design_photo(query, context, text, reply_markup):
                     user_id = getattr(query.from_user, "id", None) or getattr(query.message, "chat_id", None)
                     key = getattr(query, "data", None) or "send_photo"
                     if user_id and _is_debounced(user_id, key):
-                        context.user_data["_pending_design"] = pending_design
+                        if design is not None:
+                            context.user_data["_pending_design"] = design
+                        elif design is None and pending_design is not None:
+                            context.user_data["_pending_design"] = pending_design
                         try:
                             await safe_answer(query)
                         except Exception:
@@ -3329,7 +3395,10 @@ async def _send_design_photo(query, context, text, reply_markup):
                     uid = user_id or 0
                     ok, wait = await _consume_token(uid)
                     if not ok:
-                        context.user_data["_pending_design"] = pending_design
+                        if design is not None:
+                            context.user_data["_pending_design"] = design
+                        elif pending_design is not None:
+                            context.user_data["_pending_design"] = pending_design
                         await schedule_retry_via_redis_or_local(query, text, reply_markup=reply_markup, delay=wait)
                         try:
                             await safe_answer(query, text=f"Too many requests. Retrying in {wait}s.")
@@ -3339,10 +3408,10 @@ async def _send_design_photo(query, context, text, reply_markup):
 
                     try:
                         await query.message.delete()
-                        if wants_photo:
+                        if show_photo:
                             await context.bot.send_photo(
                                 chat_id=query.message.chat_id,
-                                photo=pending_design,
+                                photo=design,
                                 caption=text,
                                 reply_markup=reply_markup,
                             )
@@ -3364,6 +3433,22 @@ async def _send_design_photo(query, context, text, reply_markup):
                     return
                 except Exception:
                     pass
+
+        # No existing message to recaption: send a new message with the design
+        # (or a plain message if the branch has no design).
+        if design is not None:
+            try:
+                await context.bot.send_photo(
+                    chat_id=getattr(query.message, "chat_id", None)
+                    or getattr(getattr(query, "message", None), "chat_id", None)
+                    or getattr(query, "chat_id", None),
+                    photo=design,
+                    caption=text,
+                    reply_markup=reply_markup,
+                )
+                return
+            except Exception:
+                pass
 
         await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
     except Exception:
@@ -3483,24 +3568,29 @@ async def showcat_handler(update: Update, context: CallbackContext):
                 if results_row:
                     keyboard.append(results_row)
 
-                # Keep the parent's theme while paging through its subcategories
-                # so going "back" does not strip the image and re-render it.
+                # Keep the parent's theme while paging through its subcategories.
+                # The parent's design is the branch design for this view, so reuse it
+                # rather than re-resolving on every pagination page.
+                title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
+                # If the subcategories view is showing a parent that has a design,
+                # prefer the parent's own design as the branch design for this page.
+                branch_design = None
                 try:
-                    _pdb = await get_db()
-                    if _pdb is not None:
-                        pdoc = await _pdb.categories.find_one(
-                            {"name": parent_name},
-                            projection={"name": 1, "id": 1, "parent": 1},
-                        )
-                        design = await _resolve_category_design(_pdb, pdoc) if pdoc else None
-                        if design:
-                            context.user_data["_pending_design"] = design
-                        else:
-                            _clear_design_pending(context)
+                    branch_design = context.user_data.get("_branch_design")
                 except Exception:
                     pass
-                title = f"{parent_name} — Subcategories (page {page}/{last_page}):"
-                await _send_design_photo(query, context, title, InlineKeyboardMarkup(keyboard))
+                if not branch_design and parent_name:
+                    try:
+                        branch_design = await _resolve_branch_design(await get_db(), {"name": parent_name})
+                    except Exception:
+                        pass
+                await _send_design_photo(
+                    query,
+                    context,
+                    title,
+                    InlineKeyboardMarkup(keyboard),
+                    force_design=branch_design,
+                )
                 return
         except Exception:
             pass
@@ -3599,14 +3689,6 @@ async def showcat_handler(update: Update, context: CallbackContext):
 
     cat_name = category_doc.get("name")
     cat_path = category_doc.get("path") or cat_name
-    try:
-        design_file_id = await _resolve_category_design(db, category_doc)
-        if design_file_id:
-            context.user_data["_pending_design"] = design_file_id
-        else:
-            _clear_design_pending(context)
-    except Exception:
-        pass
 
     try:
         context.user_data["last_viewed_category"] = cat_path
@@ -3617,6 +3699,19 @@ async def showcat_handler(update: Update, context: CallbackContext):
     if not category_doc:
         await safe_edit_message(query, f"Category “{cat_name}” not found.", action_key=getattr(query, "data", None))
         return
+
+    # Resolve the design for THIS category branch once, then reuse across every
+    # coaches/courses/subcategory/type/empty view so the image never re-sends.
+    # This is the single design resolution for the whole view; every sub-view
+    # below reuses `context.user_data["_branch_design"]`.
+    try:
+        branch_design = await _resolve_branch_design(db, category_doc)
+        if branch_design:
+            context.user_data["_branch_design"] = branch_design
+        else:
+            context.user_data.pop("_branch_design", None)
+    except Exception:
+        pass
 
     coaches = []
     try:
@@ -3772,6 +3867,7 @@ async def showcat_handler(update: Update, context: CallbackContext):
             context,
             f"{cat_path} — Subcategories (page {page}/{last_page}):",
             InlineKeyboardMarkup(keyboard),
+            force_design=branch_design,
         )
         return
 
@@ -3803,8 +3899,19 @@ async def showcat_handler(update: Update, context: CallbackContext):
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             keyboard.append(results_row)
-        await _send_design_photo(query, context, f"{cat_name} — Select a type:", InlineKeyboardMarkup(keyboard))
+        await _send_design_photo(
+            query,
+            context,
+            f"{cat_name} — Select a type:",
+            InlineKeyboardMarkup(keyboard),
+            force_design=branch_design,
+        )
         return
+
+    try:
+        branch_design = context.user_data.get("_branch_design")
+    except Exception:
+        branch_design = None
 
     if coaches:
         keyboard = []
@@ -3852,7 +3959,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
         results_row = _back_to_results_row(context, search_ref)
         if results_row:
             keyboard.append(results_row)
-        await _send_design_photo(query, context, f"Coaches in '{cat_name}':", InlineKeyboardMarkup(keyboard))
+        await _send_design_photo(
+            query,
+            context,
+            f"Coaches in '{cat_name}':",
+            InlineKeyboardMarkup(keyboard),
+            force_design=branch_design,
+        )
         return
 
     courses = category_doc.get("courses", [])
@@ -3901,8 +4014,10 @@ async def showcat_handler(update: Update, context: CallbackContext):
             context,
             f"Category “{cat_name}” is empty.\nUse /add to populate it.",
             InlineKeyboardMarkup(keyboard),
+            force_design=branch_design,
         )
         return
+
     page = page_from_callback or 1
     parent = category_doc.get("parent")
     origin_ctx = None
@@ -3956,7 +4071,13 @@ async def showcat_handler(update: Update, context: CallbackContext):
         reply_markup = InlineKeyboardMarkup(kb)
     except Exception:
         pass
-    await safe_edit_message(query, text=text, reply_markup=reply_markup, action_key=getattr(query, "data", None))
+    await _send_design_photo(
+        query,
+        context,
+        text,
+        reply_markup,
+        force_design=branch_design,
+    )
 
 
 # ----------  courses listing  ----------
