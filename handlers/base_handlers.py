@@ -1715,7 +1715,7 @@ def build_courses_page(
     page_first_cursor: dict = None,
     page_last_cursor: dict = None,
 ):
-    page_size = PAGE_SIZE
+    page_size = COURSE_PAGE_SIZE
     try:
         if is_page:
             display = list(all_courses) if all_courses is not None else []
@@ -1972,10 +1972,13 @@ def build_courses_page(
         # already in `keyboard` (pagination_prev/next at this point) so a page with
         # few nav buttons can show more course rows than a busier page -- never a
         # fixed 42.
-        non_course_buttons = 0
-        for _row in keyboard:
-            for _b in _row:
-                non_course_buttons += 1
+        # `keyboard` already holds the course rows at this point, so counting it
+        # wholesale overstated the non-course load and collapsed the page to a
+        # single course. Count only the navigation that will coexist with the
+        # rows: the pagination row appended above, plus the breadcrumb Home/End
+        # row (<=2), the "🔙 Back" button (<=1) and the caller-appended Search /
+        # results rows (<=2).
+        non_course_buttons = len(pagination_buttons) + 5
         spare_slots = max(0, TELEGRAM_INLINE_KEYBOARD_LIMIT - non_course_buttons)
         max_course_rows = max(1, spare_slots // 2)
 
@@ -2785,7 +2788,7 @@ async def show_coach_handler(update: Update, context: CallbackContext):
     await safe_answer(query)
     raw = getattr(query, "data", "") or ""
     page = 1
-    page_size = PAGE_SIZE
+    page_size = COURSE_PAGE_SIZE
     coach_slug = None
     try:
         if raw.startswith("coach::"):
@@ -2909,7 +2912,13 @@ async def show_coach_handler(update: Update, context: CallbackContext):
         except Exception:
             pass
         if text and reply_markup:
-            await safe_edit_message(query, text, reply_markup=reply_markup, action_key=raw)
+            # A coach is a child of its category, so it shows that parent's
+            # banner (one-hop inheritance) and keeps it while paging its courses.
+            try:
+                design = await _resolve_design_for_category_name(db, coach_name)
+            except Exception:
+                design = None
+            await _send_design_photo(query, context, text, reply_markup, force_design=design)
         else:
             await safe_edit_message(query, f"No courses found for coach '{coach_name}'.", action_key=raw)
     except Exception:
@@ -3051,7 +3060,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
         if parent_origin:
             origin_ctx = parent_origin
         total_courses = len(coach_courses)
-        page_size = PAGE_SIZE
+        page_size = COURSE_PAGE_SIZE
         start = (page - 1) * page_size
         page_items = coach_courses[start : start + page_size]
         text, reply_markup = build_courses_page(
@@ -3477,6 +3486,15 @@ SEARCH_NAV_TTL = 3600
 # number of spare button slots divided by 2. We compute this dynamically from the
 # actual non-course buttons on the page so pages are never forced to a fixed 42.
 TELEGRAM_INLINE_KEYBOARD_LIMIT = 100
+# Maximum courses rendered on a single page. Telegram caps an inline keyboard at
+# TELEGRAM_INLINE_KEYBOARD_LIMIT buttons; each course row costs 2 buttons (name +
+# "ℹ️ Details") and a page also carries up to ~8 non-course buttons (pagination,
+# breadcrumb Home/End, Back, Search, results row). Reserving those keeps the whole
+# keyboard within the limit while showing as many courses as actually fit -- the
+# per-page count is computed from the button budget here, not hardcoded (was 42),
+# and is reused by every course fetch so a page never drops courses it sliced off.
+COURSE_NAV_RESERVE = 8
+COURSE_PAGE_SIZE = max(1, (TELEGRAM_INLINE_KEYBOARD_LIMIT - COURSE_NAV_RESERVE) // 2)
 
 SEARCH_NAV_USER_KEY = "search_results_nav"
 
@@ -3651,6 +3669,24 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
         #     leaving an orphan text message behind (that is the "new message" the
         #     user saw). If deletion fails we still send the photo (best effort).
         if show_photo:
+            # The tapped message may already be a photo whose file_id we could not
+            # read (e.g. an inaccessible/expired media payload, or a client that
+            # omits `photo`). Re-captioning it in place first keeps the same window
+            # instead of spawning a brand-new message on every tap -- the exact
+            # "regening as if new" symptom inside a designed parent.
+            try:
+                if query.message is not None and getattr(query.message, "photo", None):
+                    try:
+                        await query.message.edit_caption(
+                            caption=text, reply_markup=reply_markup
+                        )
+                        return
+                    except Exception as exc:
+                        msg = str(exc).lower()
+                        if "not modified" in msg or "message is not modified" in msg:
+                            return
+            except Exception:
+                pass
             try:
                 if query.message is not None:
                     try:
@@ -4333,7 +4369,7 @@ async def list_courses(update: Update, context: CallbackContext):
 
     try:
         page = 1
-        page_size = PAGE_SIZE
+        page_size = COURSE_PAGE_SIZE
         has_more = False
         async with _db_timing(f"list_courses:page:{page}"):
             cache_key = f"page:global:{page}"
@@ -5686,7 +5722,7 @@ async def courses_callback(update: Update, context: CallbackContext):
             action_key=getattr(query, "data", None),
         )
         return
-    page_size = PAGE_SIZE
+    page_size = COURSE_PAGE_SIZE
     # Bot-wide course total (cached) for the 'shown/total' progress counter.
     try:
         overall_total = await _get_bot_courses_total(db)
@@ -5860,12 +5896,26 @@ async def courses_callback(update: Update, context: CallbackContext):
                     reply_markup = InlineKeyboardMarkup(kb)
                 except Exception:
                     pass
-                await safe_edit_message(
-                    query,
-                    text=text,
-                    reply_markup=reply_markup,
-                    action_key=getattr(query, "data", None),
-                )
+                # Inside a category/coach branch the parent's banner design must
+                # survive paging. Passing the branch design through
+                # _send_design_photo re-captions the existing photo in place
+                # instead of letting safe_edit_message delete it and post a new
+                # text message (the "regens as new / extra message" symptom).
+                if origin_type in ("category", "coach") and category:
+                    try:
+                        design = await _resolve_design_for_category_name(db, category)
+                    except Exception:
+                        design = None
+                    await _send_design_photo(
+                        query, context, text, reply_markup, force_design=design
+                    )
+                else:
+                    await safe_edit_message(
+                        query,
+                        text=text,
+                        reply_markup=reply_markup,
+                        action_key=getattr(query, "data", None),
+                    )
                 return
 
         if data.startswith("courses::"):
