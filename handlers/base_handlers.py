@@ -1714,13 +1714,18 @@ def build_courses_page(
     overall_total: int = None,
     page_first_cursor: dict = None,
     page_last_cursor: dict = None,
+    page_offset: int = None,
 ):
     page_size = COURSE_PAGE_SIZE
     try:
         if is_page:
             display = list(all_courses) if all_courses is not None else []
             effective_total = total_count if total_count is not None else len(display)
-            start = (page - 1) * page_size
+            # `page_offset` lets a handler that fetched an arbitrary slice (for
+            # dynamic, size-aware page sizes) tell us its real position so the
+            # next/prev links continue from the right place instead of a page*size
+            # multiple that would skip the tail a page left off.
+            start = page_offset if page_offset is not None else (page - 1) * page_size
         else:
             total_len = (
                 total_count if total_count is not None else (len(all_courses) if hasattr(all_courses, "__len__") else 0)
@@ -1839,7 +1844,19 @@ def build_courses_page(
                         + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
                     )
         elif origin_type == "coach" and category:
-            prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page - 1}"
+            try:
+                page_payload = {
+                    "type": "courses_page",
+                    "origin_type": "coach",
+                    "category": category,
+                    "page": max(1, page - 1),
+                    "offset": max(0, start - page_size),
+                    "total_count": effective_total,
+                    "page_size": page_size,
+                }
+                prev_cb = f"courses_ref::{_store_callback_payload(page_payload)}"
+            except Exception:
+                prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page - 1}"
         else:
             prev_cb = f"courses::global::{page - 1}"
             # Keyset "previous": query the page before this page's first item.
@@ -1858,13 +1875,19 @@ def build_courses_page(
                 except Exception:
                     prev_cb = f"courses::global::{page - 1}"
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-    if page < total_pages:
+    # With size-aware, variable page sizes the page*size count can under-report the
+    # real remaining rows, so also offer Next whenever rows remain after the ones
+    # actually rendered (offset-aware, no skip).
+    _more_rows = effective_total is None or (start + len(display)) < effective_total
+    if page < total_pages or _more_rows:
         if origin_type == "category" and category:
             if store_page_ref:
                 try:
                     items_to_store = None
                     if not is_page and hasattr(all_courses, "__len__"):
-                        start_next = page * page_size
+                        # Continue from the rows actually rendered, not page*size, so
+                        # a size-capped page does not skip the tail it left off.
+                        start_next = start + len(display)
                         slice_items = all_courses[start_next : start_next + page_size]
                         items_to_store = []
                         for it in slice_items:
@@ -1883,6 +1906,7 @@ def build_courses_page(
                         "origin_type": origin_type,
                         "category": category,
                         "page": page + 1,
+                        "offset": start + len(display),
                         "origin_context": origin_context,
                         "origin_context_page": origin_context_page,
                         "total_count": effective_total,
@@ -1911,7 +1935,9 @@ def build_courses_page(
                 try:
                     items_to_store = None
                     if not is_page and hasattr(all_courses, "__len__"):
-                        start_next = page * page_size
+                        # Continue from the rows actually rendered, not page*size, so
+                        # a size-capped page does not skip the tail it left off.
+                        start_next = start + len(display)
                         slice_items = all_courses[start_next : start_next + page_size]
                         items_to_store = []
                         for it in slice_items:
@@ -1930,6 +1956,7 @@ def build_courses_page(
                         "origin_type": origin_type,
                         "category": category,
                         "page": page + 1,
+                        "offset": start + len(display),
                         "origin_context": origin_context,
                         "origin_context_page": origin_context_page,
                         "total_count": effective_total,
@@ -1954,6 +1981,7 @@ def build_courses_page(
                         "category": None,
                         "page": page + 1,
                         "after": page_last_cursor,
+                        "offset": start + len(display),
                         "total_count": effective_total,
                         "page_size": page_size,
                     }
@@ -1982,9 +2010,19 @@ def build_courses_page(
         spare_slots = max(0, TELEGRAM_INLINE_KEYBOARD_LIMIT - non_course_buttons)
         max_course_rows = max(1, spare_slots // 2)
 
-        capped_display = display if len(display) <= max_course_rows else display[:max_course_rows]
+        # Build rows one at a time and stop when NEITHER the button budget NOR the
+        # serialized-size budget is exceeded. Because the size budget is checked
+        # against each row's real name/link/callback bytes, a page packed with long
+        # names renders fewer rows (down to 1) while a page with short names renders
+        # up to `max_course_rows` -- so the count (and the shown/total counter)
+        # varies instead of repeating the same number for every page.
+        budget = max(1000, REPLY_MARKUP_MAX_BYTES - _COURSE_NAV_BYTES)
         course_keyboard = []
-        for c in capped_display:
+        rendered_display = []
+        used_bytes = 0
+        for c in display:
+            if len(course_keyboard) >= max_course_rows:
+                break
             try:
                 course_cat = c.get("category") if isinstance(c, dict) else None
                 if not course_cat:
@@ -2003,12 +2041,29 @@ def build_courses_page(
                     c.get("id") if isinstance(c, dict) else None,
                     search_ref,
                 )
-                course_keyboard.append(
-                    [InlineKeyboardButton(name, url=link), InlineKeyboardButton("ℹ️ Details", callback_data=details_cb)],
-                )
+                row = [
+                    InlineKeyboardButton(name, url=link),
+                    InlineKeyboardButton("ℹ️ Details", callback_data=details_cb),
+                ]
+                row_bytes = len(InlineKeyboardMarkup([row]).to_json())
             except Exception:
                 continue
+            if course_keyboard and (used_bytes + row_bytes) > budget:
+                break
+            course_keyboard.append(row)
+            rendered_display.append(c)
+            used_bytes += row_bytes
         keyboard = course_keyboard
+        if rendered_display:
+            display = rendered_display
+            # Keyset cursors must track the rows actually rendered, otherwise the
+            # next/prev page would skip the tail we left off to respect the size cap.
+            if origin_type == "global":
+                try:
+                    page_first_cursor = _course_cursor(display[0])
+                    page_last_cursor = _course_cursor(display[-1])
+                except Exception:
+                    pass
 
     except Exception:
         logger.exception("build_courses_page: unexpected error building course rows")
@@ -2067,7 +2122,19 @@ def build_courses_page(
                         + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
                     )
         elif origin_type == "coach" and category:
-            prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page - 1}"
+            try:
+                page_payload = {
+                    "type": "courses_page",
+                    "origin_type": "coach",
+                    "category": category,
+                    "page": max(1, page - 1),
+                    "offset": max(0, start - page_size),
+                    "total_count": effective_total,
+                    "page_size": page_size,
+                }
+                prev_cb = f"courses_ref::{_store_callback_payload(page_payload)}"
+            except Exception:
+                prev_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page - 1}"
         else:
             prev_cb = f"courses::global::{page - 1}"
             if page_first_cursor is not None:
@@ -2085,13 +2152,19 @@ def build_courses_page(
                 except Exception:
                     prev_cb = f"courses::global::{page - 1}"
         pagination_buttons.append(InlineKeyboardButton("⬅️ Previous", callback_data=prev_cb))
-    if page < total_pages:
+    # With size-aware, variable page sizes the page*size count can under-report the
+    # real remaining rows, so also offer Next whenever rows remain after the ones
+    # actually rendered (offset-aware, no skip).
+    _more_rows = effective_total is None or (start + len(display)) < effective_total
+    if page < total_pages or _more_rows:
         if origin_type == "category" and category:
             if store_page_ref:
                 try:
                     items_to_store = None
                     if not is_page and hasattr(all_courses, "__len__"):
-                        start_next = page * page_size
+                        # Continue from the rows actually rendered, not page*size, so
+                        # a size-capped page does not skip the tail it left off.
+                        start_next = start + len(display)
                         slice_items = all_courses[start_next : start_next + page_size]
                         items_to_store = []
                         for it in slice_items:
@@ -2110,6 +2183,7 @@ def build_courses_page(
                         "origin_type": origin_type,
                         "category": category,
                         "page": page + 1,
+                        "offset": start + len(display),
                         "origin_context": origin_context,
                         "origin_context_page": origin_context_page,
                         "total_count": effective_total,
@@ -2134,7 +2208,19 @@ def build_courses_page(
                         + f"::from_parent::{urllib.parse.quote_plus(str(origin_context))}::{origin_context_page or 1}"
                     )
         elif origin_type == "coach" and category:
-            next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page + 1}"
+            try:
+                page_payload = {
+                    "type": "courses_page",
+                    "origin_type": "coach",
+                    "category": category,
+                    "page": page + 1,
+                    "offset": start + len(display),
+                    "total_count": effective_total,
+                    "page_size": page_size,
+                }
+                next_cb = f"courses_ref::{_store_callback_payload(page_payload)}"
+            except Exception:
+                next_cb = f"courses::coach::{urllib.parse.quote_plus(category)}::{page + 1}"
         else:
             next_cb = f"courses::global::{page + 1}"
             if page_last_cursor is not None:
@@ -2145,6 +2231,7 @@ def build_courses_page(
                         "category": None,
                         "page": page + 1,
                         "after": page_last_cursor,
+                        "offset": start + len(display),
                         "total_count": effective_total,
                         "page_size": page_size,
                     }
@@ -2312,6 +2399,30 @@ def build_courses_page(
                     page,
                 )
                 keyboard.append([InlineKeyboardButton("🔙 Back", callback_data=back_cb)])
+    except Exception:
+        pass
+
+    # Safety net: never hand Telegram a keyboard it will reject with
+    # "BadRequest: Reply markup is too long" (which would make the edit fail and
+    # the caller re-send the whole message -- the "design regens as new" symptom).
+    # COURSE_PAGE_SIZE is already budgeted from this limit, so this is normally a
+    # no-op; it guards pages packed with unusually long names/links. Drop trailing
+    # course rows until the serialized keyboard fits.
+    try:
+        while len(keyboard) > 1 and len(InlineKeyboardMarkup(keyboard).to_json()) > REPLY_MARKUP_MAX_BYTES:
+            removed = False
+            for idx in range(len(keyboard) - 1, -1, -1):
+                row = keyboard[idx]
+                if (
+                    len(row) == 2
+                    and getattr(row[0], "url", None)
+                    and getattr(row[1], "text", "") == "ℹ️ Details"
+                ):
+                    del keyboard[idx]
+                    removed = True
+                    break
+            if not removed:
+                break
     except Exception:
         pass
 
@@ -3486,15 +3597,24 @@ SEARCH_NAV_TTL = 3600
 # number of spare button slots divided by 2. We compute this dynamically from the
 # actual non-course buttons on the page so pages are never forced to a fixed 42.
 TELEGRAM_INLINE_KEYBOARD_LIMIT = 100
-# Maximum courses rendered on a single page. Telegram caps an inline keyboard at
-# TELEGRAM_INLINE_KEYBOARD_LIMIT buttons; each course row costs 2 buttons (name +
-# "ℹ️ Details") and a page also carries up to ~8 non-course buttons (pagination,
-# breadcrumb Home/End, Back, Search, results row). Reserving those keeps the whole
-# keyboard within the limit while showing as many courses as actually fit -- the
-# per-page count is computed from the button budget here, not hardcoded (was 42),
-# and is reused by every course fetch so a page never drops courses it sliced off.
+# Telegram actually rejects an oversized keyboard with
+#   BadRequest: Reply markup is too long
+# well before 100 buttons when course names/links run long (empirically around
+# ~9-10 KB of serialized JSON). So the per-page course count is budgeted by BOTH
+# the button cap and a serialized-size cap, and the result is reused by every
+# course fetch so a full page never exceeds the limit and never drops courses it
+# sliced off. Tune via env without a code change.
+REPLY_MARKUP_MAX_BYTES = env_int("REPLY_MARKUP_MAX_BYTES", 9000)
+_COURSE_ROW_BYTES = env_int("COURSE_ROW_BYTES_ESTIMATE", 200)
+_COURSE_NAV_BYTES = env_int("COURSE_NAV_BYTES_ESTIMATE", 600)
 COURSE_NAV_RESERVE = 8
-COURSE_PAGE_SIZE = max(1, (TELEGRAM_INLINE_KEYBOARD_LIMIT - COURSE_NAV_RESERVE) // 2)
+COURSE_PAGE_SIZE = max(
+    1,
+    min(
+        (TELEGRAM_INLINE_KEYBOARD_LIMIT - COURSE_NAV_RESERVE) // 2,
+        max(1, (REPLY_MARKUP_MAX_BYTES - _COURSE_NAV_BYTES) // _COURSE_ROW_BYTES),
+    ),
+)
 
 SEARCH_NAV_USER_KEY = "search_results_nav"
 
@@ -5664,13 +5784,15 @@ def _clamp_courses_page(page: int, total, page_size: int):
     return page
 
 
-async def _fetch_category_courses_page(db, category, page: int, page_size: int):
+async def _fetch_category_courses_page(db, category, page: int, page_size: int, offset: int = None):
     for _attempt in range(2):
         try:
             await ensure_course_uuids(db, category)
         except Exception:
             pass
-        start = (page - 1) * page_size
+        # `offset` overrides the page*size position so dynamic (size-aware) pages
+        # that render fewer than page_size courses continue without skipping.
+        start = offset if offset is not None else (page - 1) * page_size
         items_pipeline = [
             {"$match": {"$or": [{"name": category}, {"path": category}]}},
             {"$unwind": "$courses"},
@@ -5748,6 +5870,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                 origin_ctx = payload.get("origin_context")
                 origin_ctx_page = payload.get("origin_context_page")
                 total_count = int(payload.get("total_count")) if payload.get("total_count") is not None else None
+                offset = payload.get("offset")
 
                 if not items:
                     try:
@@ -5796,12 +5919,14 @@ async def courses_callback(update: Update, context: CallbackContext):
 
                         elif origin_type == "category":
                             total_count = await _courses_origin_total(db, "category", category)
-                            page = _clamp_courses_page(page, total_count, page_size)
+                            if offset is None:
+                                page = _clamp_courses_page(page, total_count, page_size)
                             items, has_more, page = await _fetch_category_courses_page(
                                 db,
                                 category,
                                 page,
                                 page_size,
+                                offset=offset,
                             )
                             if total_count is None:
                                 total_count = (
@@ -5811,8 +5936,9 @@ async def courses_callback(update: Update, context: CallbackContext):
                         elif origin_type == "coach":
                             coach_name = category
                             total_count = await _courses_origin_total(db, "coach", coach_name)
-                            page = _clamp_courses_page(page, total_count, page_size)
-                            start = (page - 1) * page_size
+                            if offset is None:
+                                page = _clamp_courses_page(page, total_count, page_size)
+                            start = offset if offset is not None else (page - 1) * page_size
                             items_pipeline = [
                                 {"$match": {"courses.coach": coach_name}},
                                 {"$unwind": "$courses"},
@@ -5856,8 +5982,9 @@ async def courses_callback(update: Update, context: CallbackContext):
                     origin_context_page=origin_ctx_page,
                     total_count=total_count,
                     is_page=True,
-                    store_page_ref=False,
+                    store_page_ref=origin_type in ("category", "coach"),
                     overall_total=overall_total,
+                    page_offset=offset,
                     page_first_cursor=_course_cursor(items[0]) if items else None,
                     page_last_cursor=_course_cursor(items[-1]) if items else None,
                 )
