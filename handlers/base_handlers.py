@@ -1596,6 +1596,7 @@ async def safe_edit_message(
     action_key: str = None,
     debounce_interval: float = None,
     keep_photo: bool = False,
+    parse_mode: str = None,
 ):
     try:
         # Guarantee unique callback_data so no two buttons can light up together.
@@ -1627,16 +1628,16 @@ async def safe_edit_message(
                 # cannot remove media via edit, so rebuild the message as plain text.
                 try:
                     await _msg.delete()
-                    await _msg.reply_text(text, reply_markup=reply_markup)
+                    await _msg.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
                     return True
                 except Exception:
                     logger.debug(
                         "safe_edit_message: photo strip failed, falling back to caption edit",
                         exc_info=True,
                     )
-            await _msg.edit_caption(caption=text, reply_markup=reply_markup)
+            await _msg.edit_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
         else:
-            await query.edit_message_text(text, reply_markup=reply_markup)
+            await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
         return True
     except RetryAfter as e:
         wait = int(getattr(e, "retry_after", 1) or 1)
@@ -2451,6 +2452,7 @@ async def help_command(update: Update, context: CallbackContext):
         "📚 **Course Navigator Bot** — I'll help you find and manage courses organized by coaches and categories!\n\n"
         "/start - Set your name and introduce yourself\n"
         "/add - Add a new course (choose a category, then a coach, then enter details)\n"
+        "/update - Rename a course and/or edit its link (owner only)\n"
         "/courses - Browse all your saved courses\n"
         "/categories - Browse categories and find courses by coach\n"
         "/create_category - Create a new category or parent folder\n\n"

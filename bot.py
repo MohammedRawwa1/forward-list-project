@@ -66,6 +66,7 @@ from handlers.search_handlers import (
     search_category_courses_pagination_callback,
     search_courses_pagination_callback,
 )
+from handlers.update_handlers import setup_update_handlers, update_stale_callback
 
 logger = logging.getLogger(__name__)
 
@@ -188,8 +189,16 @@ async def setup_handlers(application: Application):
     )
     application.add_handler(CallbackQueryHandler(handle_back_to_cats, pattern=r"^back_to_cats$"))
 
-    # ---------- conversations ----------
+    # ----------  conversations ----------
     await setup_course_handlers(application)
+
+    # /update conversation: registered before the global cancel handler so its
+    # own state handlers win, with a stale-button fallback registered after it.
+    try:
+        await setup_update_handlers(application)
+        application.add_handler(CallbackQueryHandler(update_stale_callback, pattern=r"^update_"))
+    except Exception:
+        logger.exception("Failed to register /update handlers")
 
     # ---------- search (before global cancel so active search gets priority) ----------
     try:

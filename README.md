@@ -78,6 +78,7 @@ Caching & Redis Backoff
 
 Admin commands & tooling (owner only)
 - `/add` - add a course
+- `/update` - rename a course title and/or edit its link (picker flow: parent → coach/child → course, then a name/link editor with Okay/Cancel; writes are located by course uuid so they land on the parent, coach, or child document that actually holds the course)
 - `/courses` - list courses
 - `/categories` - list categories
 - `/delete_category` - delete a coach/child category and subtree
