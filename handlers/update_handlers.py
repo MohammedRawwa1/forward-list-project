@@ -694,6 +694,8 @@ async def update_course_page(update: Update, context: CallbackContext):
 async def update_back_to_doc(update: Update, context: CallbackContext):
     query = update.callback_query
     await safe_answer(query)
+    if not await _guard(query):
+        return ConversationHandler.END
     db = await get_db()
     if db is None:
         await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
@@ -823,6 +825,9 @@ async def update_edit_link(update: Update, context: CallbackContext):
 
 
 async def update_name_received(update: Update, context: CallbackContext):
+    if not is_owner(getattr(getattr(update, "effective_user", None), "id", None)):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
+        return ConversationHandler.END
     draft = context.user_data.get("update_draft")
     if not draft:
         await update.message.reply_text("Session expired. Run /update again.")
@@ -837,6 +842,10 @@ async def update_name_received(update: Update, context: CallbackContext):
 
 
 async def update_link_received(update: Update, context: CallbackContext):
+    if not is_owner(getattr(getattr(update, "effective_user", None), "id", None)):
+        await update.message.reply_text("⛔ Only the bot owner can run this command.")
+        return ConversationHandler.END
+
     from handlers.course_handlers import is_valid_url
 
     draft = context.user_data.get("update_draft")
@@ -853,6 +862,8 @@ async def update_link_received(update: Update, context: CallbackContext):
 
 
 async def update_dialog_hint(update: Update, context: CallbackContext):
+    if not is_owner(getattr(getattr(update, "effective_user", None), "id", None)):
+        return ConversationHandler.END
     await update.message.reply_text("Tap ✏️ Edit Name or 🔗 Edit Link first, then press ✅ Okay (or /cancel).")
     return UPDATE_DIALOG
 
@@ -928,4 +939,8 @@ async def update_stale_callback(update: Update, context: CallbackContext):
     """Fallback for /update buttons whose conversation is no longer active."""
     query = update.callback_query
     await safe_answer(query)
+    user_id = getattr(getattr(query, "from_user", None), "id", None)
+    if not is_owner(user_id):
+        await safe_edit_message(query, "⛔ Only the bot owner can run this command.", action_key=getattr(query, "data", None))
+        return
     await safe_edit_message(query, "This update session expired. Run /update again.", action_key=getattr(query, "data", None))
