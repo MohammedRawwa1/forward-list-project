@@ -63,10 +63,3 @@ services:
       # into connections the edge answers with 429.
       - key: "WEBHOOK_MAX_CONNECTIONS"
         value: "4"
-      # Opt-in self-ping that stops the service from reaching the 15-minute
-      # idle spin-down. One always-on Free service uses ~730 of the 750 monthly
-      # instance-hours, so keep it enabled on ONE service only.
-      - key: "KEEP_WARM"
-        value: "0"
-      - key: "KEEP_WARM_INTERVAL_SECONDS"
-        value: "600"

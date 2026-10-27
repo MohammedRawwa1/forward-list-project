@@ -16,8 +16,8 @@ from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, CallbackContext, TypeHandler
 
-import keep_warm
 import logging_config  # noqa: F401
+import update_dedup
 from bot import create_application, setup_handlers
 from config import env_float
 from database.mongo_handler import MongoDB
@@ -39,33 +39,10 @@ bot_token = os.getenv("BOT_TOKEN")
 # depend on the thing it is diagnosing.
 _webhook_state: dict = {"ok": None, "host": None, "at": None}
 _mongo_ready = False
+# Process start, so /status can say how long ago the container woke up: on a Free
+# instance a small uptime is the explanation for a late first reply.
+_STARTED_AT = time.time()
 
-
-# Who is hitting /health/live, split by source. A Free Render instance only
-# stays awake on inbound traffic, and whether a request this process makes to
-# its own public URL is counted has never been documented. These counters are
-# the evidence: an external pinger (the keepalive workflow, or any uptime
-# monitor) lands in `external`, the opt-in self-ping in `self`.
-_health_checks: dict = {
-    "self": 0,
-    "self_last_at": None,
-    "external": 0,
-    "external_last_at": None,
-    "external_last_user_agent": None,
-}
-
-
-def _record_health_check(request: Request) -> None:
-    """Count one /health/live hit, noting whether it came from this process."""
-    now = time.time()
-    ua = (request.headers.get("user-agent") or "")[:120]
-    if request.headers.get("x-keep-warm") == "1" or "keep-warm-internal" in ua:
-        _health_checks["self"] += 1
-        _health_checks["self_last_at"] = now
-    else:
-        _health_checks["external"] += 1
-        _health_checks["external_last_at"] = now
-        _health_checks["external_last_user_agent"] = ua or None
 
 LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
 
@@ -253,6 +230,12 @@ async def _process_telegram_update(request: Request) -> dict:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
 
+    # Telegram stops waiting at ~60s and retries, which a Free instance's cold
+    # start can outlast: drop the retry instead of answering the message twice.
+    if not update_dedup.mark_seen(payload.get("update_id")):
+        logger.info("Duplicate delivery of update %s dropped", payload.get("update_id"))
+        return {"status": "ok", "duplicate": True}
+
     # Telegram treats a slow answer as a failed delivery, and the POST that
     # wakes a spun-down Free instance is the one with the least time to spare.
     # So answer now and process in the background: waiting for the PTB
@@ -385,10 +368,6 @@ async def lifespan(_app: FastAPI):
     # that connection for up to ~1 minute while the container boots, so waiting
     # for Mongo (15s of retries), the PTB application and setWebhook here made
     # Telegram record a failed delivery - and failed Render's health check too.
-    # Opt-in: ping our own public URL so a Free instance never idles long
-    # enough to spin down (see keep_warm.py). Independent of Mongo, so it starts
-    # even while the backends are still connecting.
-    keep_warm.start()
     _INFLIGHT_UPDATES.add(asyncio.create_task(_initialize_backends()))
     loop = asyncio.get_running_loop()
 
@@ -404,7 +383,6 @@ async def lifespan(_app: FastAPI):
     yield
 
     # ---------------------------- shutdown ----------------------------
-    keep_warm.stop()
     logger.info("Shutdown event triggered; attempting graceful stop of bot application")
     try:
         if application is not None:
@@ -455,13 +433,12 @@ async def root():
 
 @app.get("/health/live")
 @app.get("/healthz")
-async def health_live(request: Request):
+async def health_live():
     """Liveness only: no MongoDB access, so Render's health check passes while
     the backends are still coming up instead of restart-looping a slow boot.
 
-    Also the endpoint an external keep-alive should hit: public, cheap, and it
-    never waits on Mongo."""
-    _record_health_check(request)
+    Deliberately the cheapest route in the app: it is the one Render probes, and
+    on a Free instance anything slower turns a cold start into a restart loop."""
     return {"ok": True, "bot_ready": application is not None}
 
 
@@ -507,10 +484,10 @@ def _redact_webhook_path(url: str) -> str:
 async def status(request: Request):
     """Answer "why is the bot deaf?" in one request.
 
-    Reports DB readiness, the webhook this process registered, the keep-warm
-    loop, and Telegram's own getWebhookInfo (pending updates, max_connections,
-    last delivery error). Disabled unless STATUS_TOKEN is set, and it never
-    returns the bot token.
+    Reports DB readiness, the webhook this process registered, the duplicate
+    suppression guard, and Telegram's own getWebhookInfo (pending updates,
+    max_connections, last delivery error). Disabled unless STATUS_TOKEN is set,
+    and it never returns the bot token.
     """
     expected = os.getenv("STATUS_TOKEN")
     if not expected:
@@ -553,11 +530,11 @@ async def status(request: Request):
     return JSONResponse(
         {
             "ok": True,
+            "uptime_seconds": round(time.time() - _STARTED_AT, 1),
             "bot_ready": application is not None,
             "mongo_ready": _mongo_ready,
             "registered_by_this_process": _webhook_state,
-            "keep_warm": keep_warm.snapshot(),
-            "health_checks": dict(_health_checks),
+            "update_dedup": update_dedup.snapshot(),
             "webhook": webhook,
         }
     )
