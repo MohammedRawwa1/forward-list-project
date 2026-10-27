@@ -117,7 +117,11 @@ async def _wait_for_mongo_ready(timeout: float = None, interval: float = None) -
 async def _register_webhook(url: str) -> bool:
     """Register the webhook (configured in _resolve_webhook_url)."""
     api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-    payload: dict = {"url": url, "max_connections": 100}
+    # Telegram opens up to this many parallel deliveries to the webhook. A
+    # sleeping Free instance wakes on the first POST and holds it while the
+    # container boots, so 100 parallel connections is a burst the edge answers
+    # with 429. Four is plenty: the handler acks in milliseconds.
+    payload: dict = {"url": url, "max_connections": int(os.getenv("WEBHOOK_MAX_CONNECTIONS", "4"))}
     secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
     if secret_token:
         payload["secret_token"] = secret_token
@@ -171,9 +175,39 @@ async def echo_update(update: Update, context: CallbackContext):
 # ---------- low-level update processing ----------
 
 
+# Payloads that arrived while the bot was still initialising. Telegram already
+# received its 200 for these, so they have to be processed once the bot is up
+# or the message is lost.
+_PENDING_UPDATES: list = []
+_MAX_PENDING_UPDATES = 200
+# Update tasks are kept referenced: asyncio holds only a weak reference to a
+# bare task, so one collected mid-flight would be dropped silently even though
+# Telegram considers it delivered.
+_INFLIGHT_UPDATES: set = set()
+
+
+async def _dispatch_update(payload: dict) -> None:
+    """Process one raw update payload, keeping its task referenced."""
+    try:
+        if application is None:
+            return
+        update = Update.de_json(payload, application.bot)
+        if update is None:
+            logger.warning("Skipping unusable update payload %s", payload.get("update_id"))
+            return
+        await application.process_update(update)
+    except Exception:
+        logger.exception("Failed to process Telegram update %s", payload.get("update_id"))
+    finally:
+        _INFLIGHT_UPDATES.discard(asyncio.current_task())
+
+
+def _schedule_update(payload: dict) -> None:
+    task = asyncio.create_task(_dispatch_update(payload))
+    _INFLIGHT_UPDATES.add(task)
+
+
 async def _process_telegram_update(request: Request) -> dict:
-    if application is None:
-        raise HTTPException(status_code=503, detail="Bot still starting up")
     json_str = await request.body()
     if len(json_str) > 1_000_000:
         raise HTTPException(status_code=413, detail="Payload too large")
@@ -183,19 +217,36 @@ async def _process_telegram_update(request: Request) -> dict:
         raise HTTPException(status_code=400, detail="Invalid JSON") from e
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Expected a JSON object")
-    update = Update.de_json(payload, application.bot)
-    if update is None:
-        raise HTTPException(status_code=400, detail="Invalid update payload")
-    await application.process_update(update)
+
+    # Telegram treats a slow answer as a failed delivery, and the POST that
+    # wakes a spun-down Free instance is the one with the least time to spare.
+    # So answer now and process in the background: waiting for the PTB
+    # application here (or letting the handler run inline, as it used to) is
+    # exactly what made the bot go silent after a spin-down.
+    if application is None:
+        if len(_PENDING_UPDATES) < _MAX_PENDING_UPDATES:
+            _PENDING_UPDATES.append(payload)
+        else:
+            logger.warning("Dropping update %s: pre-startup queue is full", payload.get("update_id"))
+        return {"status": "ok", "queued": True}
+
+    _schedule_update(payload)
     return {"status": "ok"}
 
 
 # ---------- lifespan (startup + shutdown) ----------
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def _initialize_backends() -> None:
+    """Mongo, PTB, handlers and webhook registration, off the serving path.
+
+    This used to run inside lifespan startup, so uvicorn answered nothing -
+    not Render's health check, not Telegram's webhook POST - until Mongo, the
+    uuid indexes, the PTB application and setWebhook had all finished. On a
+    Free instance the request that wakes the container is the one with the
+    least time to spare, so that work runs here and the server answers
+    immediately.
+    """
     global application
 
-    # ---------------------------- startup ----------------------------
     await initialize_db()
     # Confirm the DB is actually reachable before wiring Telegram up, so the
     # first updates cannot land while course/category reads would fail.
@@ -274,7 +325,23 @@ async def lifespan(_app: FastAPI):
         "ok" if uuid_indexes_ok else "FAILED (see errors above)",
         "ok" if webhook_ok else "FAILED (updates will not arrive; see errors above)",
     )
+    # Anything Telegram delivered while we were booting already received its
+    # 200, so it has to be processed now.
+    while _PENDING_UPDATES:
+        _schedule_update(_PENDING_UPDATES.pop(0))
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    global application
+
+    # ---------------------------- startup ----------------------------
+    # Serve first: uvicorn answers no request until this generator yields, and
+    # this process is woken by the very request it has to answer. Render holds
+    # that connection for up to ~1 minute while the container boots, so waiting
+    # for Mongo (15s of retries), the PTB application and setWebhook here made
+    # Telegram record a failed delivery - and failed Render's health check too.
+    _INFLIGHT_UPDATES.add(asyncio.create_task(_initialize_backends()))
     loop = asyncio.get_running_loop()
 
     def _log_signal(sig):
@@ -335,6 +402,14 @@ async def webhook(token: str, request: Request):
 @app.get("/")
 async def root():
     return {"message": "Bot is running"}
+
+
+@app.get("/health/live")
+@app.get("/healthz")
+async def health_live():
+    """Liveness only: no MongoDB access, so Render's health check passes while
+    the backends are still coming up instead of restart-looping a slow boot."""
+    return {"ok": True, "bot_ready": application is not None}
 
 
 @app.get("/health")
