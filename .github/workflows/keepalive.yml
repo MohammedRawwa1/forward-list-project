@@ -1,0 +1,66 @@
+# External keep-alive for this Free Render web service.
+#
+# Render spins a Free web service down after 15 minutes without inbound HTTP
+# traffic, and Telegram will not wait the ~1 minute a cold start takes, so the
+# first message after an idle period is lost and only its retry is served.
+#
+# An in-process self-ping (KEEP_WARM=1) is best-effort at most: Render documents
+# inbound traffic as the trigger and says nothing about a service calling its own
+# public URL. This workflow pings from outside instead - GitHub's scheduler sends
+# a GET to /health/live every 10 minutes, which is ordinary inbound traffic.
+#
+# One-time setup: set the repository variable KEEP_ALIVE_URL to the service's
+# health endpoint.
+#   gh variable set KEEP_ALIVE_URL --body https://<service>.onrender.com/health/live
+# (Settings -> Secrets and variables -> Actions -> Variables also works.)
+#
+# Free-tier arithmetic: pinging around the clock keeps the service running
+# ~730 h/month, nearly all of the 750 instance-hours a workspace gets. Keep this
+# enabled on ONE service, or narrow `cron` to the hours you use the bot.
+# Exhausting the quota suspends every Free service in the workspace until the
+# 1st of the next month.
+#
+# GitHub disables scheduled workflows in repositories with no activity for 60
+# days; re-enable from the Actions tab if the pings stop.
+name: keep-alive
+
+on:
+  schedule:
+    # Every 10 minutes, leaving 5 minutes of slack under Render's 15-minute idle
+    # window for scheduler delays.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Request the public health endpoint
+        env:
+          URL: ${{ vars.KEEP_ALIVE_URL }}
+        run: |
+          if [ -z "$URL" ]; then
+            echo "::notice::KEEP_ALIVE_URL is not set - skipping. Set it to https://<service>.onrender.com/health/live"
+            exit 0
+          fi
+          # A cold start answers in ~25-60s and the first request can fail while
+          # the container boots, so retry instead of reporting a failed ping.
+          for attempt in 1 2 3; do
+            code=$(curl -sSL -o /tmp/health.out -w '%{http_code}' -m 90 "$URL" || echo 000)
+            echo "attempt $attempt: HTTP $code from $URL"
+            if [ "$code" = "200" ]; then
+              cat /tmp/health.out
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::keep-alive ping failed; last HTTP $code"
+          exit 1

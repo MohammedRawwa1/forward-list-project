@@ -7,12 +7,20 @@ lost and only its retry is served.
 
 Setting KEEP_WARM=1 makes this process request its own public /health/live every
 KEEP_WARM_INTERVAL_SECONDS (default 600, comfortably below the 15-minute idle
-threshold). The request arrives through Render's edge like any other inbound
-request, so the instance never reaches the sleeping state.
+threshold).
+
+This is best-effort, not a guarantee. Render only promises that *inbound*
+traffic keeps a service awake, and it does not document whether a request a
+service makes to its own public URL is counted, proxied differently, or
+excluded. The reliable form is a pinger that is not this process: the
+keepalive GitHub Actions workflow in .github/workflows/keepalive.yml (or any
+external uptime monitor) hitting /health/live. /status splits the two under
+`health_checks`, so you can see which one is actually reaching the service.
 
 Cost: the service then runs continuously - roughly 730 of the 750 instance-hours
-a workspace gets per month. Enable it on ONE service only: exhausting that quota
-suspends every Free service in the workspace until the 1st of the next month.
+a workspace gets per month, whichever kind of ping is used. Exhausting that
+quota suspends every Free service in the workspace until the 1st of the next
+month.
 """
 
 import asyncio
@@ -75,7 +83,12 @@ async def _loop(url: str, interval: float) -> None:
     while True:
         try:
             async with httpx.AsyncClient(timeout=PING_TIMEOUT_SECONDS, follow_redirects=True) as client:
-                resp = await client.get(url)
+                # Tagged so /health/live can tell this self-ping apart from a
+                # real external one in its health_checks counters.
+                resp = await client.get(
+                    url,
+                    headers={"User-Agent": "keep-warm-internal/1.0", "X-Keep-Warm": "1"},
+                )
             _state["pings"] += 1
             _state["last_status"] = resp.status_code
             _state["last_ok_at"] = time.time()
