@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from telegram import Update
 from telegram.ext import Application, CallbackContext, TypeHandler
 
+import keep_warm
 import logging_config  # noqa: F401
 from bot import create_application, setup_handlers
 from config import env_float
@@ -31,6 +33,12 @@ logger = logging.getLogger(__name__)
 
 application: Application = None
 bot_token = os.getenv("BOT_TOKEN")
+
+# Reported by /status: the webhook this process registered, and whether MongoDB
+# answered during startup. Both are plain flags on purpose - /status must not
+# depend on the thing it is diagnosing.
+_webhook_state: dict = {"ok": None, "host": None, "at": None}
+_mongo_ready = False
 
 LIVENESS_TOKEN = os.getenv("LIVENESS_TOKEN")
 
@@ -245,12 +253,13 @@ async def _initialize_backends() -> None:
     least time to spare, so that work runs here and the server answers
     immediately.
     """
-    global application
+    global application, _mongo_ready
 
     await initialize_db()
     # Confirm the DB is actually reachable before wiring Telegram up, so the
     # first updates cannot land while course/category reads would fail.
     mongo_ready = await _wait_for_mongo_ready()
+    _mongo_ready = mongo_ready
     if mongo_ready:
         logger.info("MongoDB readiness confirmed before accepting updates")
     else:
@@ -317,6 +326,14 @@ async def _initialize_backends() -> None:
             "Set WEBHOOK_URL or RENDER_EXTERNAL_URL env vars.",
         )
 
+    _webhook_state.update(
+        {
+            "ok": webhook_ok,
+            "host": urllib.parse.urlsplit(wh_url).hostname if wh_url else None,
+            "at": time.time(),
+        }
+    )
+
     configure_uvicorn_loggers()
 
     logger.info(
@@ -341,6 +358,10 @@ async def lifespan(_app: FastAPI):
     # that connection for up to ~1 minute while the container boots, so waiting
     # for Mongo (15s of retries), the PTB application and setWebhook here made
     # Telegram record a failed delivery - and failed Render's health check too.
+    # Opt-in: ping our own public URL so a Free instance never idles long
+    # enough to spin down (see keep_warm.py). Independent of Mongo, so it starts
+    # even while the backends are still connecting.
+    keep_warm.start()
     _INFLIGHT_UPDATES.add(asyncio.create_task(_initialize_backends()))
     loop = asyncio.get_running_loop()
 
@@ -356,6 +377,7 @@ async def lifespan(_app: FastAPI):
     yield
 
     # ---------------------------- shutdown ----------------------------
+    keep_warm.stop()
     logger.info("Shutdown event triggered; attempting graceful stop of bot application")
     try:
         if application is not None:
@@ -433,6 +455,80 @@ async def health(request: Request):
             status_code=503,
         )
     return JSONResponse({"status": "ok", "mongo": "connected"})
+
+
+def _redact_token(token: str | None) -> str:
+    """Identify the bot without printing its token."""
+    if not token:
+        return "(none)"
+    return f"...{token[-6:]}" if len(token) > 6 else "..."
+
+
+def _redact_webhook_path(url: str) -> str:
+    """Keep the route shape, hide the token segment Telegram delivers to."""
+    segments = [s for s in urllib.parse.urlsplit(url or "").path.split("/") if s]
+    if not segments:
+        return "/"
+    return "/" + "/".join("***" if (":" in s or any(ch.isdigit() for ch in s)) else s for s in segments)
+
+
+@app.get("/status")
+async def status(request: Request):
+    """Answer "why is the bot deaf?" in one request.
+
+    Reports DB readiness, the webhook this process registered, the keep-warm
+    loop, and Telegram's own getWebhookInfo (pending updates, max_connections,
+    last delivery error). Disabled unless STATUS_TOKEN is set, and it never
+    returns the bot token.
+    """
+    expected = os.getenv("STATUS_TOKEN")
+    if not expected:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "status disabled"})
+    provided = request.headers.get("X-STATUS-TOKEN") or request.query_params.get("token")
+    if provided != expected:
+        return JSONResponse(status_code=403, content={"ok": False, "error": "unauthorized"})
+
+    webhook = {"bot": _redact_token(bot_token)}
+    # httpx logs the request line at INFO, and the token is part of that URL:
+    # keep it out of the JSON logs while this diagnostic runs.
+    httpx_logger = logging.getLogger("httpx")
+    previous_level = httpx_logger.level
+    httpx_logger.setLevel(logging.WARNING)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{bot_token}/getWebhookInfo")
+        data = resp.json()
+        if not data.get("ok"):
+            webhook["error"] = data.get("description") or f"http_{resp.status_code}"
+        else:
+            info = data.get("result") or {}
+            url = info.get("url") or ""
+            webhook.update(
+                {
+                    "webhook_host": urllib.parse.urlsplit(url).hostname,
+                    "webhook_path": _redact_webhook_path(url),
+                    "pending_update_count": info.get("pending_update_count", 0),
+                    "max_connections": info.get("max_connections"),
+                    "last_error_message": info.get("last_error_message"),
+                    "last_error_date": info.get("last_error_date"),
+                    "ip_address": info.get("ip_address"),
+                }
+            )
+    except Exception as exc:
+        webhook["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        httpx_logger.setLevel(previous_level)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "bot_ready": application is not None,
+            "mongo_ready": _mongo_ready,
+            "registered_by_this_process": _webhook_state,
+            "keep_warm": keep_warm.snapshot(),
+            "webhook": webhook,
+        }
+    )
 
 
 if __name__ == "__main__":

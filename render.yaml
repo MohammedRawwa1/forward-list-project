@@ -1,0 +1,72 @@
+services:
+  - type: "web"
+    name: "forward-list-bot"
+    env: "python"
+    plan: "free"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    # Liveness only. /health/live answers while Mongo and the bot application
+    # are still coming up; /health pings Mongo and would fail the check - and
+    # restart the container - during a slow boot.
+    healthCheckPath: "/health/live"
+    envVars:
+      # Secrets are placeholders (sync: false): set the values in the Render
+      # dashboard. A value committed here has to be rotated as soon as the
+      # repository leaks, and this repository's history already contains it.
+      - key: "BOT_TOKEN"
+        sync: false
+      # WEBHOOK_URL is deliberately not set. It used to hold a URL built from a
+      # previous token, which makes the bot silently deaf; main.py only accepts
+      # it when it contains the current BOT_TOKEN and otherwise derives the base
+      # from RENDER_EXTERNAL_URL, which Render always keeps in sync. Unset is the
+      # reliable choice - if you set it manually it must contain the current token.
+      - key: "MONGODB_URL"
+        sync: false
+      - key: "TELEGRAM_SECRET_TOKEN"
+        sync: false
+      - key: "STATUS_TOKEN"
+        sync: false
+      - key: "MONGODB_NAME"
+        value: "course_bot"
+      - key: "PORT"
+        value: "10000"
+      - key: "LOG_LEVEL"
+        value: "INFO"
+      - key: "CACHE_CLEANUP_INTERVAL"
+        value: "300"
+      - key: "CALLBACK_REF_TTL"
+        value: "604800"
+      - key: "CALLBACK_REHYDRATE_LIMIT"
+        value: "10000"
+      - key: "CALLBACK_RESOLVE_CACHE_MAX"
+        value: "2000"
+      - key: "EDIT_DEBOUNCE"
+        value: "0.2"
+      - key: "GUI_SESSION_TTL"
+        value: "300"
+      - key: "RATE_LIMIT_GROUP_MAX_RATE"
+        value: "120"
+      - key: "RATE_LIMIT_GROUP_TIME_PERIOD"
+        value: "60.0"
+      - key: "RATE_LIMIT_MAX_RETRIES"
+        value: "5"
+      - key: "RATE_LIMIT_OVERALL_MAX_RATE"
+        value: "30"
+      - key: "RATE_LIMIT_OVERALL_TIME_PERIOD"
+        value: "1.0"
+      - key: "USE_ATLAS_SEARCH"
+        value: "1"
+      - key: "AUTO_CREATE_INDEXES"
+        value: "1"
+      # Telegram opens this many parallel deliveries to the webhook. A sleeping
+      # Free instance wakes on the first POST, so a large number turns a burst
+      # into connections the edge answers with 429.
+      - key: "WEBHOOK_MAX_CONNECTIONS"
+        value: "4"
+      # Opt-in self-ping that stops the service from reaching the 15-minute
+      # idle spin-down. One always-on Free service uses ~730 of the 750 monthly
+      # instance-hours, so keep it enabled on ONE service only.
+      - key: "KEEP_WARM"
+        value: "0"
+      - key: "KEEP_WARM_INTERVAL_SECONDS"
+        value: "600"
