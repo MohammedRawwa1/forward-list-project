@@ -58,8 +58,9 @@ services:
         value: "1"
       - key: "AUTO_CREATE_INDEXES"
         value: "1"
-      # Telegram opens this many parallel deliveries to the webhook. A sleeping
-      # Free instance wakes on the first POST, so a large number turns a burst
-      # into connections the edge answers with 429.
+      # Telegram opens this many parallel deliveries to the webhook. A cold
+      # starting Free instance answers extra parallel connections with 429, which
+      # Telegram records as a failed delivery, so keep it at one: the handler acks
+      # in milliseconds, so serialised delivery costs nothing.
       - key: "WEBHOOK_MAX_CONNECTIONS"
-        value: "4"
+        value: "1"

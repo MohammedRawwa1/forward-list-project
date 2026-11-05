@@ -17,6 +17,10 @@ select = [
 ]
 
 [lint.per-file-ignores]
+# S310: urlopen in the waker script - SERVICE_URL is scheme-checked before the
+# call, which bandit's static analysis cannot see.
+"scripts/wake_check.py" = ["S310"]
+
 # Lazy imports in top-level scripts are intentional (avoid circular imports)
 "handlers/__init__.py" = ["E402"]
 "main.py" = ["E402", "S603", "S607", "S104", "UP045", "RUF029"]

@@ -1,0 +1,33 @@
+name: wake-on-demand
+
+# Knocks on the service only when Telegram reports an undelivered update, so an
+# idle bot stays spun down and consumes no instance-hours. See docs/ON_DEMAND.md.
+#
+# Required repository configuration (Settings -> Secrets and variables -> Actions):
+#   secret BOT_TOKEN   - the bot's current token, matching the one Render runs
+#   variable SERVICE_URL - e.g. https://your-service.onrender.com
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: wake-on-demand
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Knock only if something is stuck
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          SERVICE_URL: ${{ vars.SERVICE_URL }}
+          LOOKBACK_MINUTES: "10"
+        run: python3 scripts/wake_check.py

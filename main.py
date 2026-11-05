@@ -129,11 +129,11 @@ async def _wait_for_mongo_ready(timeout: float = None, interval: float = None) -
 async def _register_webhook(url: str) -> bool:
     """Register the webhook (configured in _resolve_webhook_url)."""
     api_url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
-    # Telegram opens up to this many parallel deliveries to the webhook. A
-    # sleeping Free instance wakes on the first POST and holds it while the
-    # container boots, so 100 parallel connections is a burst the edge answers
-    # with 429. Four is plenty: the handler acks in milliseconds.
-    payload: dict = {"url": url, "max_connections": int(os.getenv("WEBHOOK_MAX_CONNECTIONS", "4"))}
+    # Telegram opens up to this many parallel deliveries to the webhook. A cold
+    # starting Free instance answers extra parallel connections with 429, which
+    # Telegram records as a failed delivery, so keep it at one: the handler acks
+    # in milliseconds, so serialised delivery costs nothing.
+    payload: dict = {"url": url, "max_connections": int(os.getenv("WEBHOOK_MAX_CONNECTIONS", "1"))}
     secret_token = os.getenv("TELEGRAM_SECRET_TOKEN")
     if secret_token:
         payload["secret_token"] = secret_token
@@ -145,6 +145,12 @@ async def _register_webhook(url: str) -> bool:
             if data.get("ok"):
                 logger.info("Webhook successfully registered -> %s", redacted_url)
                 return True
+            if data.get("error_code") == 401:
+                logger.error(
+                    "Telegram rejected the bot token itself (401). If the bot was deleted or the token "
+                    "revoked, set BOT_TOKEN to the current token from BotFather; until then no update can "
+                    "be delivered and nothing can wake this service."
+                )
             logger.error("Telegram setWebhook failed: %s (url=%s)", data, redacted_url)
             return False
     except Exception:
