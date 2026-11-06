@@ -3650,6 +3650,68 @@ def _back_to_results_row(context, search_ref: str = None):
         return None
 
 
+_DESIGN_RENDER_KEY = "_design_render"
+
+
+def _remember_design_render(context, message, design):
+    """Record which design a message is now showing.
+
+    Telegram returns a *different* file_id for a photo every time it is sent by
+    file_id, so `query.message.photo[-1].file_id == design` is false from the
+    second view onwards. Comparing file_ids therefore reported "different media"
+    on every pagination tap and the banner was deleted and re-sent. Identity is
+    tracked per rendered message instead.
+    """
+    try:
+        if message is None or design is None:
+            return
+        photo = getattr(message, "photo", None) or []
+        context.user_data[_DESIGN_RENDER_KEY] = {
+            "chat_id": getattr(message, "chat_id", None),
+            "message_id": getattr(message, "message_id", None),
+            "design": design,
+            "unique": photo[-1].file_unique_id if photo else None,
+        }
+    except Exception:
+        pass
+
+
+def _forget_design_render(context):
+    try:
+        context.user_data.pop(_DESIGN_RENDER_KEY, None)
+    except Exception:
+        pass
+
+
+def _shows_design(context, query, design, current_photo, current_unique=None):
+    """True when the tapped message is already displaying `design`.
+
+    Three signals, cheapest first: the exact file_id still matches (same process,
+    same send), the recorded render says this message holds this design, or the
+    stored file is the same *unique* file behind a new file_id (a re-sent photo).
+    """
+    if design is None or current_photo is None:
+        return False
+    if current_photo == design:
+        return True
+    try:
+        rec = context.user_data.get(_DESIGN_RENDER_KEY) or {}
+        if rec.get("design") != design:
+            return False
+        message = getattr(query, "message", None)
+        if rec.get("message_id") != getattr(message, "message_id", None):
+            return False
+        rec_chat = rec.get("chat_id")
+        cur_chat = getattr(message, "chat_id", None)
+        if rec_chat is not None and cur_chat is not None and rec_chat != cur_chat:
+            return False
+        if rec.get("unique") and current_unique:
+            return rec["unique"] == current_unique
+        return True
+    except Exception:
+        return False
+
+
 async def _send_design_photo(query, context, text, reply_markup, force_design: str = None):
     """Render a category view, showing its own (or inherited) design photo.
 
@@ -3687,19 +3749,30 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
 
         # Current media on the message the user tapped (if any).
         current_photo = None
+        current_unique = None
         try:
             if query.message is not None and getattr(query.message, "photo", None):
                 current_photo = query.message.photo[-1].file_id
+                current_unique = query.message.photo[-1].file_unique_id
         except Exception:
             current_photo = None
+            current_unique = None
 
         # (a) The message already shows exactly the design we want -> caption-only
         #     edit. This is the stable path: no new message, no delete, no bounce.
-        if show_photo and current_photo == design:
+        #     Identity is the rendered message, not the file_id (see
+        #     _remember_design_render: a re-sent photo gets a fresh file_id).
+        already_showing = show_photo and _shows_design(
+            context, query, design, current_photo, current_unique
+        )
+        if already_showing:
             try:
                 await query.message.edit_caption(
                     caption=text, reply_markup=reply_markup
                 )
+                # Self-heal the record (e.g. after a restart lost user_data and
+                # the match came from a still-identical file_id).
+                _remember_design_render(context, query.message, design)
                 return
             except Exception as exc:
                 msg = str(exc).lower()
@@ -3716,8 +3789,12 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
         needs_rebuild = (
             show_photo
             and current_photo is not None
-            and current_photo != design
+            and not already_showing
         ) or (not show_photo and current_photo is not None)
+
+        if not show_photo:
+            # A text view must not carry a stale "this message is the banner" mark.
+            _forget_design_render(context)
 
         if needs_rebuild:
             # --- Rate limiting (matches safe_edit_message) ---
@@ -3762,12 +3839,13 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
 
                 if show_photo:
                     try:
-                        await context.bot.send_photo(
+                        sent = await context.bot.send_photo(
                             chat_id=query.message.chat_id,
                             photo=design,
                             caption=text,
                             reply_markup=reply_markup,
                         )
+                        _remember_design_render(context, sent, design)
                         return
                     except Exception:
                         pass
@@ -3802,10 +3880,12 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
                         await query.message.edit_caption(
                             caption=text, reply_markup=reply_markup
                         )
+                        _remember_design_render(context, query.message, design)
                         return
                     except Exception as exc:
                         msg = str(exc).lower()
                         if "not modified" in msg or "message is not modified" in msg:
+                            _remember_design_render(context, query.message, design)
                             return
             except Exception:
                 pass
@@ -3823,12 +3903,13 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
                     or getattr(getattr(query, "message", None), "chat_id", None)
                     or getattr(query, "chat_id", None)
                 )
-                await context.bot.send_photo(
+                sent = await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=design,
                     caption=text,
                     reply_markup=reply_markup,
                 )
+                _remember_design_render(context, sent, design)
                 return
             except Exception:
                 pass
