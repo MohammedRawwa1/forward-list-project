@@ -47,12 +47,22 @@ DESIGNS_COLLECTION = "category_designs"
 async def _get_design(db, category_name: str) -> str | None:
     try:
         doc = await db[DESIGNS_COLLECTION].find_one({"name": category_name}, projection={"file_id": 1})
-        return doc.get("file_id") if doc else None
+        # A stored blank value is not a design. Returning "" made callers treat the
+        # category as "has a banner", and Telegram then rejected the render with
+        # Media_empty / Wrong file identifier, taking the whole view down.
+        file_id = (doc or {}).get("file_id")
+        if isinstance(file_id, str):
+            file_id = file_id.strip()
+        return file_id or None
     except Exception:
         return None
 
 
 async def _set_design(db, category_name: str, file_id: str):
+    if not isinstance(file_id, str) or not file_id.strip():
+        logger.warning("Refusing to store an empty design for '%s'", category_name)
+        return False
+    file_id = file_id.strip()
     try:
         await db[DESIGNS_COLLECTION].update_one(
             {"name": category_name},

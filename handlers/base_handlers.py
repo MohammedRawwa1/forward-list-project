@@ -3730,6 +3730,58 @@ def _shows_design(context, query, design, current_photo, current_unique=None):
         return False
 
 
+# file_id -> (usable, valid_until). Probing costs one getFile call; the answer
+# rarely changes, so it is cached for a few minutes.
+_DESIGN_FILE_STATUS = {}
+_DESIGN_FILE_STATUS_TTL = 600.0
+
+
+async def _design_is_usable(context, design) -> bool:
+    """Whether this bot can actually send `design` as a photo.
+
+    A file_id is only valid for the bot that received it, and an empty or foreign
+    value makes both edit_media and send_photo fail -- Telegram answers
+    "Media_empty" / "Wrong file identifier/http url specified" respectively. That
+    used to take the whole category view down with it (no banner AND no coaches).
+    An unusable design is now treated as "this category has no design", so the
+    plain text view with its coaches is rendered instead.
+    """
+    if not isinstance(design, str) or not design.strip():
+        logger.warning(
+            "Stored design for this category is empty; rendering the text view. "
+            "Re-upload it with /design_cat"
+        )
+        return False
+
+    now = time.time()
+    cached = _DESIGN_FILE_STATUS.get(design)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    usable = True
+    try:
+        await context.bot.get_file(design)
+    except Exception as exc:
+        usable = False
+        logger.warning(
+            "Stored design file_id is not usable (%s); rendering the text view "
+            "without a banner. Re-upload it with /design_cat",
+            exc,
+        )
+
+    try:
+        if len(_DESIGN_FILE_STATUS) > 200:
+            cutoff = now - _DESIGN_FILE_STATUS_TTL
+            for key, value in list(_DESIGN_FILE_STATUS.items()):
+                if value[1] <= cutoff:
+                    _DESIGN_FILE_STATUS.pop(key, None)
+        _DESIGN_FILE_STATUS[design] = (usable, now + _DESIGN_FILE_STATUS_TTL)
+    except Exception:
+        pass
+
+    return usable
+
+
 async def _send_design_photo(query, context, text, reply_markup, force_design: str = None):
     """Render a category view, showing its own (or inherited) design photo.
 
@@ -3764,6 +3816,8 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
             design = context.user_data.get("_branch_design")
 
         show_photo = design is not None
+        if show_photo:
+            show_photo = await _design_is_usable(context, design)
 
         # Current media on the message the user tapped (if any).
         current_photo = None
