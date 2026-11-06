@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from pymongo.errors import DuplicateKeyError
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.error import BadRequest, RetryAfter
 from telegram.ext import CallbackContext, ConversationHandler
 
@@ -3676,6 +3676,24 @@ def _remember_design_render(context, message, design):
         pass
 
 
+PHOTO_CAPTION_LIMIT = 1024
+
+
+def _banner_caption(text):
+    """Telegram caps a photo caption at 1024 characters.
+
+    A long view rendered as a caption would otherwise be rejected by
+    send_photo/edit_media, the banner would never appear, and the caller fell
+    through to an edit of a message that no longer existed.
+    """
+    try:
+        if text and len(text) > PHOTO_CAPTION_LIMIT:
+            return text[: PHOTO_CAPTION_LIMIT - 1] + "…"
+    except Exception:
+        pass
+    return text
+
+
 def _forget_design_render(context):
     try:
         context.user_data.pop(_DESIGN_RENDER_KEY, None)
@@ -3768,7 +3786,7 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
         if already_showing:
             try:
                 await query.message.edit_caption(
-                    caption=text, reply_markup=reply_markup
+                    caption=_banner_caption(text), reply_markup=reply_markup
                 )
                 # Self-heal the record (e.g. after a restart lost user_data and
                 # the match came from a still-identical file_id).
@@ -3780,147 +3798,89 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
                     # Caption is already correct; nothing to do (don't fall through
                     # to safe_edit_message, which would strip the photo).
                     return
-                # Some other error (e.g. missing permissions) -> fall back below.
-
-        # (b) We need a different media state than what is currently shown:
-        #     - text message -> want photo: delete text, send photo (entry path)
-        #     - photo (different) -> want photo: delete old, send new photo
-        #     - photo -> want text: delete photo, send text (strip banner)
-        needs_rebuild = (
-            show_photo
-            and current_photo is not None
-            and not already_showing
-        ) or (not show_photo and current_photo is not None)
+                logger.debug("Banner caption edit failed (%s); swapping the media", exc)
 
         if not show_photo:
             # A text view must not carry a stale "this message is the banner" mark.
             _forget_design_render(context)
-
-        if needs_rebuild:
-            # --- Rate limiting (matches safe_edit_message) ---
-            try:
-                user_id = getattr(query.from_user, "id", None) or getattr(
-                    query.message, "chat_id", None
+            if current_photo is None:
+                # Plain text on a plain text message: the ordinary in-place edit.
+                await safe_edit_message(
+                    query,
+                    text=text,
+                    reply_markup=reply_markup,
+                    action_key=getattr(query, "data", None),
                 )
-                key = getattr(query, "data", None) or "send_photo"
-                if user_id and _is_debounced(user_id, key):
-                    if design is not None:
-                        context.user_data["_pending_design"] = design
-                    elif pending_design is not None:
-                        context.user_data["_pending_design"] = pending_design
-                    try:
-                        await safe_answer(query)
-                    except Exception:
-                        pass
-                    return
+                return
 
-                uid = user_id or 0
-                ok, wait = await _consume_token(uid)
-                if not ok:
-                    if design is not None:
-                        context.user_data["_pending_design"] = design
-                    elif pending_design is not None:
-                        context.user_data["_pending_design"] = pending_design
-                    await schedule_retry_via_redis_or_local(
-                        query, text, reply_markup=reply_markup, delay=wait
-                    )
-                    try:
-                        await safe_answer(
-                            query, text=f"Too many requests. Retrying in {wait}s."
-                        )
-                    except Exception:
-                        pass
-                    return
-
-                try:
-                    await query.message.delete()
-                except Exception:
-                    pass
-
-                if show_photo:
-                    try:
-                        sent = await context.bot.send_photo(
-                            chat_id=query.message.chat_id,
-                            photo=design,
-                            caption=text,
-                            reply_markup=reply_markup,
-                        )
-                        _remember_design_render(context, sent, design)
-                        return
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        await context.bot.send_message(
-                            chat_id=query.message.chat_id,
-                            text=text,
-                            reply_markup=reply_markup,
-                        )
-                        return
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        # (c) No existing media that matches what we want (a text message with no
-        #     photo, or a message whose media we could not read): send the design as
-        #     a new photo. When the current message is a text message we can delete,
-        #     do so first so the photo replaces it in the same window instead of
-        #     leaving an orphan text message behind (that is the "new message" the
-        #     user saw). If deletion fails we still send the photo (best effort).
-        if show_photo:
-            # The tapped message may already be a photo whose file_id we could not
-            # read (e.g. an inaccessible/expired media payload, or a client that
-            # omits `photo`). Re-captioning it in place first keeps the same window
-            # instead of spawning a brand-new message on every tap -- the exact
-            # "regening as if new" symptom inside a designed parent.
+        # (b) The message needs different media than it currently has. Do it with
+        #     edit_media, in place. The old code deleted the message first and sent
+        #     the replacement afterwards: when that send failed (long caption, an
+        #     unusable file_id, an over-long keyboard) the chat was left with NOTHING
+        #     and the fallback then tried to edit the deleted message -- the
+        #     "Message to edit not found" + "the design window flashes and dies"
+        #     symptom on opening a designed parent.
+        if show_photo and query.message is not None:
             try:
-                if query.message is not None and getattr(query.message, "photo", None):
-                    try:
-                        await query.message.edit_caption(
-                            caption=text, reply_markup=reply_markup
-                        )
-                        _remember_design_render(context, query.message, design)
-                        return
-                    except Exception as exc:
-                        msg = str(exc).lower()
-                        if "not modified" in msg or "message is not modified" in msg:
-                            _remember_design_render(context, query.message, design)
-                            return
-            except Exception:
-                pass
-            try:
-                if query.message is not None:
-                    try:
-                        await query.message.delete()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                chat_id = (
-                    getattr(query.message, "chat_id", None)
-                    or getattr(getattr(query, "message", None), "chat_id", None)
-                    or getattr(query, "chat_id", None)
+                await query.message.edit_media(
+                    media=InputMediaPhoto(media=design, caption=_banner_caption(text)),
+                    reply_markup=reply_markup,
                 )
+                _remember_design_render(context, query.message, design)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "Could not swap the banner in place (%s); sending it as a new message instead",
+                    exc,
+                )
+
+        # Fallback: send the replacement FIRST, delete the old message only after
+        # the replacement is safely in the chat. A failure here leaves the current
+        # view intact instead of blanking it.
+        chat_id = getattr(query.message, "chat_id", None) or getattr(query, "chat_id", None)
+        sent = None
+        try:
+            if show_photo:
                 sent = await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=design,
-                    caption=text,
+                    caption=_banner_caption(text),
                     reply_markup=reply_markup,
                 )
+            else:
+                sent = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=reply_markup,
+                )
+        except Exception:
+            logger.exception(
+                "Could not render the category view; keeping the current message as it is",
+            )
+            sent = None
+
+        if sent is not None:
+            if show_photo:
                 _remember_design_render(context, sent, design)
-                return
+            try:
+                await query.message.delete()
             except Exception:
                 pass
+            return
 
-        await safe_edit_message(
-            query,
-            text=text,
-            reply_markup=reply_markup,
-            action_key=getattr(query, "data", None),
-        )
+        # The replacement could not be sent, but the tapped message still exists:
+        # degrade it to text rather than leaving the user with no view at all.
+        try:
+            await safe_edit_message(
+                query,
+                text=text,
+                reply_markup=reply_markup,
+                action_key=getattr(query, "data", None),
+            )
+        except Exception:
+            pass
     except Exception:
+        logger.exception("Failed to render the category view with its design")
         try:
             await safe_edit_message(
                 query,
