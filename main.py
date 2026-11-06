@@ -158,6 +158,40 @@ async def _register_webhook(url: str) -> bool:
         return False
 
 
+async def _log_webhook_delivery_state():
+    """Record Telegram's view of this webhook right after registering it.
+
+    A cold instance wakes to whatever piled up while it was asleep. When that
+    backlog is large the first user action after the wake sits behind it, which
+    looks like "Telegram is not delivering my updates". These numbers make that
+    visible in the very log line that follows a wake.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{bot_token}/getWebhookInfo")
+        data = resp.json()
+        info = (data.get("result") or {}) if data.get("ok") else {}
+    except Exception as exc:
+        logger.debug("Could not read webhook delivery state: %s", exc)
+        return
+    pending = info.get("pending_update_count")
+    logger.info(
+        "Webhook delivery state | pending=%s | max_connections=%s | last_error=%s | last_error_at=%s",
+        pending,
+        info.get("max_connections"),
+        info.get("last_error_message"),
+        info.get("last_error_date"),
+    )
+    if isinstance(pending, int) and pending > 20:
+        logger.warning(
+            "%d updates were queued while this instance was asleep; they are "
+            "processed before anything new, so the first message after a wake "
+            "will feel slow until the backlog drains (WEBHOOK_MAX_CONNECTIONS=%s)",
+            pending,
+            os.getenv("WEBHOOK_MAX_CONNECTIONS", "default"),
+        )
+
+
 # ---------- DB ----------
 async def initialize_db():
     mongo_uri = os.getenv("MONGODB_URL")
@@ -335,6 +369,8 @@ async def _initialize_backends() -> None:
             webhook_ok = await _register_webhook(wh_url)
         except Exception:
             logger.exception("Failed to auto-register webhook on startup")
+        if webhook_ok:
+            await _log_webhook_delivery_state()
     else:
         logger.info(
             "Webhook URL could not be determined; "
