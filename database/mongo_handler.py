@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 # window skip the full collection scan entirely (the scan took ~8s in prod).
 UUID_INDEX_CACHE_TTL = int(os.getenv("UUID_INDEX_CACHE_TTL", "1800"))
 
+
 # ----------  errors  ----------
 class MongoConnectionError(Exception):
     pass
@@ -264,8 +265,7 @@ class MongoDB:
         except Exception:
             ok = False
             logger.exception(
-                "Failed to create unique index on categories.id "
-                "(duplicate category uuids likely exist in the data)",
+                "Failed to create unique index on categories.id (duplicate category uuids likely exist in the data)",
             )
         try:
             await cls._db["categories"].create_index(
@@ -305,7 +305,9 @@ class MongoDB:
             and (now - cls._uuid_index_cache_ts) < UUID_INDEX_CACHE_TTL
             and cls._uuid_index_cache_ok
         ):
-            logger.info("UUID indexes recently verified (cache hit, %.0fs old); skipping scan", now - cls._uuid_index_cache_ts)
+            logger.info(
+                "UUID indexes recently verified (cache hit, %.0fs old); skipping scan", now - cls._uuid_index_cache_ts
+            )
             # Still fire the create_index no-ops: free when indexes exist, and
             # self-heals if someone dropped the indexes manually.
             ok = await cls._create_uuid_indexes()

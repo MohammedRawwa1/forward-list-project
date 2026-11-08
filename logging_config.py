@@ -51,7 +51,6 @@ class TokenRedactionFilter(logging.Filter):
 
 
 class ColoredConsoleFormatter(logging.Formatter):
-
     _COLORS = {
         "DEBUG": "\033[36m",
         "INFO": "\033[32m",
@@ -81,7 +80,6 @@ class ColoredConsoleFormatter(logging.Formatter):
 
 
 class JsonFormatter(logging.Formatter):
-
     def format(self, record: logging.LogRecord) -> str:
         timestamp = self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S")
         payload: dict[str, Any] = {
@@ -130,7 +128,6 @@ _RESERVED_ATTRS = frozenset(
 
 
 class _NonBlockingQueueHandler(logging.handlers.QueueHandler):
-
     def enqueue(self, record):
         try:
             self.queue.put_nowait(record)

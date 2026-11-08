@@ -68,11 +68,7 @@ async def _delete_course_guarded(db, category: str, item: str):
         )
         return _NoopResult(), None
     holder_name = holder.get("name")
-    holder_filter = (
-        {"_id": holder.get("_id")}
-        if holder.get("_id") is not None
-        else {"name": holder_name}
-    )
+    holder_filter = {"_id": holder.get("_id")} if holder.get("_id") is not None else {"name": holder_name}
     res = await db["categories"].update_one(
         holder_filter,
         {"$pull": {"courses": {"name": item}}},
@@ -89,6 +85,7 @@ async def _after_course_delete(category: str = None, coach: str = None):
         await invalidate_course_caches(category=category, coach=coach)
     except Exception:
         logger.debug("invalidate_course_caches unavailable", exc_info=True)
+
 
 logger = logging.getLogger(__name__)
 BATCH_LIMIT = 500
@@ -344,9 +341,7 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
             except Exception:
                 holder_cat = None
             cat_filter = (
-                {"_id": holder_cat.get("_id")}
-                if holder_cat and holder_cat.get("_id") is not None
-                else {"name": cat}
+                {"_id": holder_cat.get("_id")} if holder_cat and holder_cat.get("_id") is not None else {"name": cat}
             )
         if item_id:
             res = await _delete_course_by_id(db, item_id)
@@ -409,11 +404,7 @@ async def handle_item_deletion(update: Update, context: CallbackContext):
             action_key=getattr(query, "data", None),
         )
         return
-    holder_filter = (
-        {"_id": holder.get("_id")}
-        if holder.get("_id") is not None
-        else {"name": holder.get("name")}
-    )
+    holder_filter = {"_id": holder.get("_id")} if holder.get("_id") is not None else {"name": holder.get("name")}
     res = await db["categories"].update_one(holder_filter, {"$pull": {"courses": {"name": item}}})
     if res.modified_count:
         await _after_course_delete(category=holder.get("name"))

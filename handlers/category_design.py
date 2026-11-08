@@ -38,6 +38,7 @@ def _remove_design_cb(name) -> str:
         {"type": "remove_design", "category": str(name)},
     )
 
+
 DESIGNS_COLLECTION = "category_designs"
 
 

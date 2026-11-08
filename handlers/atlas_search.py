@@ -155,7 +155,9 @@ def build_category_course_search_pipeline(
                             "text": {
                                 "query": query_text,
                                 "path": "courses.name",
-                                "fuzzy": {"maxEdits": 1, "prefixLength": _fuzzy_prefix_length(query_text)} if fuzzy else {},
+                                "fuzzy": {"maxEdits": 1, "prefixLength": _fuzzy_prefix_length(query_text)}
+                                if fuzzy
+                                else {},
                             },
                         },
                     ],
@@ -173,7 +175,9 @@ def build_category_course_search_pipeline(
                             "text": {
                                 "query": query_text,
                                 "path": "courses.name",
-                                "fuzzy": {"maxEdits": 1, "prefixLength": _fuzzy_prefix_length(query_text)} if fuzzy else {},
+                                "fuzzy": {"maxEdits": 1, "prefixLength": _fuzzy_prefix_length(query_text)}
+                                if fuzzy
+                                else {},
                             },
                         },
                     ],

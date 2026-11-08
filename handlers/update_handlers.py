@@ -61,6 +61,7 @@ DOC_PAGE_SIZE = 40
 # still fits Telegram's reply_markup limit; the callback always carries the id.
 MAX_LABEL_LEN = 60
 
+
 # ---------------  id detection  ---------------
 def _looks_like_uuid(token: str) -> bool:
     """True when a callback token looks like a course uuid (36 chars, hex+dashes)."""
@@ -155,12 +156,20 @@ async def _parent_list_keyboard(db, page: int):
     page = max(1, int(page or 1))
     start = (page - 1) * DOC_PAGE_SIZE
     parents = (
-        await db.categories.find(TOP_LEVEL_FILTER).sort("name", 1).skip(start).limit(DOC_PAGE_SIZE).to_list(length=DOC_PAGE_SIZE)
+        await db.categories.find(TOP_LEVEL_FILTER)
+        .sort("name", 1)
+        .skip(start)
+        .limit(DOC_PAGE_SIZE)
+        .to_list(length=DOC_PAGE_SIZE)
     )
     keyboard = []
     for p in parents:
         keyboard.append(
-            [InlineKeyboardButton(_label(p.get("name")), callback_data=_upd_parent_cb(p.get("name"), page, p.get("id")))],
+            [
+                InlineKeyboardButton(
+                    _label(p.get("name")), callback_data=_upd_parent_cb(p.get("name"), page, p.get("id"))
+                )
+            ],
         )
     total_pages = max(1, (total - 1) // DOC_PAGE_SIZE + 1) if total else 1
     nav = []
@@ -187,12 +196,20 @@ async def _doc_view_keyboard(db, context, page: int):
     total = await _get_total_count(db, "categories", {"parent": name}, ttl=15)
     start = (page - 1) * DOC_PAGE_SIZE
     children = (
-        await db.categories.find({"parent": name}).sort("name", 1).skip(start).limit(DOC_PAGE_SIZE).to_list(length=DOC_PAGE_SIZE)
+        await db.categories.find({"parent": name})
+        .sort("name", 1)
+        .skip(start)
+        .limit(DOC_PAGE_SIZE)
+        .to_list(length=DOC_PAGE_SIZE)
     )
     keyboard = []
     for c in children:
         keyboard.append(
-            [InlineKeyboardButton(_label(c.get("name")), callback_data=_upd_doc_cb(c.get("name"), c.get("path") or c.get("name"), 1))],
+            [
+                InlineKeyboardButton(
+                    _label(c.get("name")), callback_data=_upd_doc_cb(c.get("name"), c.get("path") or c.get("name"), 1)
+                )
+            ],
         )
     total_pages = max(1, (total - 1) // DOC_PAGE_SIZE + 1) if total else 1
     nav = []
@@ -287,8 +304,14 @@ def _dialog_text(draft) -> str:
 def _dialog_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✏️ Edit Name", callback_data="update_edit_name"), InlineKeyboardButton("🔗 Edit Link", callback_data="update_edit_link")],
-            [InlineKeyboardButton("✅ Okay", callback_data="update_ok"), InlineKeyboardButton("❌ Cancel", callback_data="update_cancel")],
+            [
+                InlineKeyboardButton("✏️ Edit Name", callback_data="update_edit_name"),
+                InlineKeyboardButton("🔗 Edit Link", callback_data="update_edit_link"),
+            ],
+            [
+                InlineKeyboardButton("✅ Okay", callback_data="update_ok"),
+                InlineKeyboardButton("❌ Cancel", callback_data="update_cancel"),
+            ],
         ],
     )
 
@@ -489,7 +512,9 @@ async def update_start(update: Update, context: CallbackContext):
 async def _guard(query) -> bool:
     user_id = getattr(getattr(query, "from_user", None), "id", None)
     if not is_owner(user_id):
-        await safe_edit_message(query, "⛔ Only the bot owner can run this command.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "⛔ Only the bot owner can run this command.", action_key=getattr(query, "data", None)
+        )
         return False
     return True
 
@@ -512,7 +537,9 @@ async def update_parent_page(update: Update, context: CallbackContext):
         return ConversationHandler.END
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None)
+        )
         return ConversationHandler.END
     try:
         page = int(query.data.split("::")[-1])
@@ -520,7 +547,9 @@ async def update_parent_page(update: Update, context: CallbackContext):
         page = 1
     text, markup = await _parent_list_keyboard(db, page)
     _browse(context)["stack"] = []
-    await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+    await safe_edit_message(
+        query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+    )
     return UPDATE_PARENT
 
 
@@ -577,7 +606,9 @@ async def update_doc_page(update: Update, context: CallbackContext):
         return ConversationHandler.END
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None)
+        )
         return ConversationHandler.END
     try:
         page = int(query.data.split("::")[-1])
@@ -586,9 +617,13 @@ async def update_doc_page(update: Update, context: CallbackContext):
     text, markup = await _doc_view_keyboard(db, context, page)
     if text is None:
         text, markup = await _parent_list_keyboard(db, 1)
-        await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+        await safe_edit_message(
+            query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+        )
         return UPDATE_PARENT
-    await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+    await safe_edit_message(
+        query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+    )
     return UPDATE_DOC
 
 
@@ -633,14 +668,20 @@ async def update_up(update: Update, context: CallbackContext):
         stack.pop()
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None)
+        )
         return ConversationHandler.END
     text, markup = await _doc_view_keyboard(db, context, 1)
     if text is None:
         text, markup = await _parent_list_keyboard(db, 1)
-        await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+        await safe_edit_message(
+            query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+        )
         return UPDATE_PARENT
-    await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+    await safe_edit_message(
+        query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+    )
     return UPDATE_DOC
 
 
@@ -681,13 +722,17 @@ async def update_course_page(update: Update, context: CallbackContext):
         page = 1
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None)
+        )
         return ConversationHandler.END
     text, markup = await _course_list_keyboard(db, context, page)
     if text is None:
         await safe_edit_message(query, "Open a category first.", action_key=getattr(query, "data", None))
         return UPDATE_DOC
-    await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+    await safe_edit_message(
+        query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+    )
     return UPDATE_COURSE
 
 
@@ -698,13 +743,17 @@ async def update_back_to_doc(update: Update, context: CallbackContext):
         return ConversationHandler.END
     db = await get_db()
     if db is None:
-        await safe_edit_message(query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "Error: Unable to connect to the database.", action_key=getattr(query, "data", None)
+        )
         return ConversationHandler.END
     text, markup = await _doc_view_keyboard(db, context, 1)
     if text is None:
         await safe_edit_message(query, "Session expired. Run /update again.", action_key=getattr(query, "data", None))
         return ConversationHandler.END
-    await safe_edit_message(query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown")
+    await safe_edit_message(
+        query, text, reply_markup=markup, action_key=getattr(query, "data", None), parse_mode="Markdown"
+    )
     return UPDATE_DOC
 
 
@@ -769,7 +818,9 @@ async def update_course_selected(update: Update, context: CallbackContext):
         "chat_id": getattr(getattr(query, "message", None), "chat_id", None),
         "message_id": getattr(getattr(query, "message", None), "message_id", None),
     }
-    await safe_edit_message(query, _dialog_text(draft), reply_markup=_dialog_markup(), action_key=raw, parse_mode="Markdown")
+    await safe_edit_message(
+        query, _dialog_text(draft), reply_markup=_dialog_markup(), action_key=raw, parse_mode="Markdown"
+    )
     return UPDATE_DIALOG
 
 
@@ -854,7 +905,9 @@ async def update_link_received(update: Update, context: CallbackContext):
         return ConversationHandler.END
     new_link = (update.message.text or "").strip()
     if not is_valid_url(new_link):
-        await update.message.reply_text("❗️ Invalid URL. It must start with http:// or https://. Send it again, or /cancel.")
+        await update.message.reply_text(
+            "❗️ Invalid URL. It must start with http:// or https://. Send it again, or /cancel."
+        )
         return UPDATE_LINK
     draft["link"] = new_link
     await _edit_dialog(context, _dialog_text(draft), _dialog_markup())
@@ -892,7 +945,11 @@ async def update_confirm(update: Update, context: CallbackContext):
     )
     if status in ("put", "patch"):
         await _invalidate(db, holder_name)
-        verb = "renamed and re-linked" if status == "put" else ("renamed" if draft.get("name") != draft.get("original_name") else "re-linked")
+        verb = (
+            "renamed and re-linked"
+            if status == "put"
+            else ("renamed" if draft.get("name") != draft.get("original_name") else "re-linked")
+        )
         msg = (
             "✅ *Course updated*\n\n"
             f"📝 {_md_code(draft.get('name'))}\n"
@@ -914,7 +971,9 @@ async def update_confirm(update: Update, context: CallbackContext):
             action_key=query.data,
         )
         return ConversationHandler.END
-    await safe_edit_message(query, "⚠️ Could not save the update. The course may have been moved or deleted.", action_key=query.data)
+    await safe_edit_message(
+        query, "⚠️ Could not save the update. The course may have been moved or deleted.", action_key=query.data
+    )
     return ConversationHandler.END
 
 
@@ -941,6 +1000,10 @@ async def update_stale_callback(update: Update, context: CallbackContext):
     await safe_answer(query)
     user_id = getattr(getattr(query, "from_user", None), "id", None)
     if not is_owner(user_id):
-        await safe_edit_message(query, "⛔ Only the bot owner can run this command.", action_key=getattr(query, "data", None))
+        await safe_edit_message(
+            query, "⛔ Only the bot owner can run this command.", action_key=getattr(query, "data", None)
+        )
         return
-    await safe_edit_message(query, "This update session expired. Run /update again.", action_key=getattr(query, "data", None))
+    await safe_edit_message(
+        query, "This update session expired. Run /update again.", action_key=getattr(query, "data", None)
+    )

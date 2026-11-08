@@ -216,8 +216,7 @@ def _origin_back_row(context, mode: str, category: str = None):
     try:
         ud = context.user_data
         has_origin = any(
-            k in ud
-            for k in ("search_origin_type", "search_origin_context", "search_origin_page", "search_category")
+            k in ud for k in ("search_origin_type", "search_origin_context", "search_origin_page", "search_category")
         )
         if not has_origin:
             return None
@@ -635,7 +634,9 @@ async def _build_course_search_results(db, query_text: str, page: int, context: 
     return title, keyboard, total
 
 
-async def _build_category_course_search_results(db, query_text: str, category: str, page: int, context: CallbackContext = None):
+async def _build_category_course_search_results(
+    db, query_text: str, category: str, page: int, context: CallbackContext = None
+):
     page_size = PAGE_SIZE
 
     child_cats_all, coach_courses, course_segment, truncated = await _collect_category_course_segments(
@@ -736,6 +737,7 @@ async def _build_category_course_search_results(db, query_text: str, category: s
     if truncated:
         title += " ⚠️ partial set — refine your query"
     return title, keyboard, total
+
 
 # ---------------  callback entry points  ---------------
 
@@ -992,7 +994,9 @@ async def _perform_category_course_search(update: Update, context: CallbackConte
             await update.message.reply_text("Error: Unable to connect to the database.")
             return
 
-        title, keyboard, _ = await _build_category_course_search_results(db, query_text, category, page=1, context=context)
+        title, keyboard, _ = await _build_category_course_search_results(
+            db, query_text, category, page=1, context=context
+        )
 
         if title is None or not keyboard:
             await update.message.reply_text(
@@ -1175,7 +1179,9 @@ async def search_category_courses_pagination_callback(update: Update, context: C
             )
             return
 
-        title, keyboard, total = await _build_category_course_search_results(db, query_text, category, page, context=context)
+        title, keyboard, total = await _build_category_course_search_results(
+            db, query_text, category, page, context=context
+        )
 
         if title is None or not keyboard:
             await safe_edit_message(
@@ -1255,7 +1261,9 @@ async def back_to_results_callback(update: Update, context: CallbackContext):
                     action_key=getattr(query, "data", None),
                 )
                 return
-            title, keyboard, _ = await _build_category_course_search_results(db, query_text, category, page, context=context)
+            title, keyboard, _ = await _build_category_course_search_results(
+                db, query_text, category, page, context=context
+            )
         else:
             title, keyboard, _ = await _build_course_search_results(db, query_text, page, context=context)
 

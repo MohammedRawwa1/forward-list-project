@@ -116,7 +116,9 @@ def main() -> int:
         notice("Nothing pending and no recent delivery error - not knocking, so the instance stays spun down.")
         return 0
 
-    reason = f"{pending} pending update(s)" if pending > 0 else f"delivery failed {int(error_age or 0)}s ago ({last_error})"
+    reason = (
+        f"{pending} pending update(s)" if pending > 0 else f"delivery failed {int(error_age or 0)}s ago ({last_error})"
+    )
     print(f"\nknocking on {base}/health/live because of {reason}")
 
     status = None

@@ -119,8 +119,7 @@ async def create_application():
             Application.builder().token(bot_token).rate_limiter(rate_limiter),
         ).build()
         logger.info(
-            "AIORateLimiter enabled (%.0f/s global, %.0f/%ss per-chat, max_retries=%d); "
-            "max_concurrent_updates=%d",
+            "AIORateLimiter enabled (%.0f/s global, %.0f/%ss per-chat, max_retries=%d); max_concurrent_updates=%d",
             overall_max_rate,
             group_max_rate,
             group_time_period,

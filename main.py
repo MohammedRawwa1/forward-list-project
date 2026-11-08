@@ -32,6 +32,7 @@ from logging_config import configure_uvicorn_loggers
 logger = logging.getLogger(__name__)
 
 application: Application = None
+_application_ready = False
 bot_token = os.getenv("BOT_TOKEN")
 
 # Reported by /status: the webhook this process registered, and whether MongoDB
@@ -241,7 +242,7 @@ _INFLIGHT_UPDATES: set = set()
 async def _dispatch_update(payload: dict) -> None:
     """Process one raw update payload, keeping its task referenced."""
     try:
-        if application is None:
+        if application is None or not _application_ready:
             return
         update = Update.de_json(payload, application.bot)
         if update is None:
@@ -281,7 +282,7 @@ async def _process_telegram_update(request: Request) -> dict:
     # So answer now and process in the background: waiting for the PTB
     # application here (or letting the handler run inline, as it used to) is
     # exactly what made the bot go silent after a spin-down.
-    if application is None:
+    if application is None or not _application_ready:
         if len(_PENDING_UPDATES) < _MAX_PENDING_UPDATES:
             _PENDING_UPDATES.append(payload)
         else:
@@ -303,7 +304,7 @@ async def _initialize_backends() -> None:
     least time to spare, so that work runs here and the server answers
     immediately.
     """
-    global application, _mongo_ready
+    global application, _application_ready, _mongo_ready
 
     await initialize_db()
     # Confirm the DB is actually reachable before wiring Telegram up, so the
@@ -394,6 +395,10 @@ async def _initialize_backends() -> None:
         "ok" if uuid_indexes_ok else "FAILED (see errors above)",
         "ok" if webhook_ok else "FAILED (updates will not arrive; see errors above)",
     )
+    # Do not dispatch webhook updates until the PTB app and all handlers are
+    # ready. In particular, Telegram may deliver the wake-up /start while the
+    # app exists but setup_handlers() has not finished yet.
+    _application_ready = True
     # Anything Telegram delivered while we were booting already received its
     # 200, so it has to be processed now.
     while _PENDING_UPDATES:
@@ -402,7 +407,7 @@ async def _initialize_backends() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global application
+    global application, _application_ready
 
     # ---------------------------- startup ----------------------------
     # Serve first: uvicorn answers no request until this generator yields, and
@@ -410,6 +415,8 @@ async def lifespan(_app: FastAPI):
     # that connection for up to ~1 minute while the container boots, so waiting
     # for Mongo (15s of retries), the PTB application and setWebhook here made
     # Telegram record a failed delivery - and failed Render's health check too.
+    application = None
+    _application_ready = False
     _INFLIGHT_UPDATES.add(asyncio.create_task(_initialize_backends()))
     loop = asyncio.get_running_loop()
 
@@ -481,7 +488,7 @@ async def health_live():
 
     Deliberately the cheapest route in the app: it is the one Render probes, and
     on a Free instance anything slower turns a cold start into a restart loop."""
-    return {"ok": True, "bot_ready": application is not None}
+    return {"ok": True, "bot_ready": _application_ready}
 
 
 @app.get("/health")
@@ -573,7 +580,7 @@ async def status(request: Request):
         {
             "ok": True,
             "uptime_seconds": round(time.time() - _STARTED_AT, 1),
-            "bot_ready": application is not None,
+            "bot_ready": _application_ready,
             "mongo_ready": _mongo_ready,
             "registered_by_this_process": _webhook_state,
             "update_dedup": update_dedup.snapshot(),

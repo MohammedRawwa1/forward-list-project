@@ -2375,7 +2375,6 @@ def build_courses_page(
     except Exception:
         pass
 
-
     try:
         if origin_type == "category":
             if not any((getattr(b, "text", "") == "🔙 Back") for row in keyboard for b in row):
@@ -2414,11 +2413,7 @@ def build_courses_page(
             removed = False
             for idx in range(len(keyboard) - 1, -1, -1):
                 row = keyboard[idx]
-                if (
-                    len(row) == 2
-                    and getattr(row[0], "url", None)
-                    and getattr(row[1], "text", "") == "ℹ️ Details"
-                ):
+                if len(row) == 2 and getattr(row[0], "url", None) and getattr(row[1], "text", "") == "ℹ️ Details":
                     del keyboard[idx]
                     removed = True
                     break
@@ -2433,12 +2428,7 @@ def build_courses_page(
     # courses the page ends up showing after its own size / button limits.
     try:
         if overall_total is not None and overall_total > 0:
-            rendered = sum(
-                1
-                for row in keyboard
-                for b in row
-                if getattr(b, "text", None) == "ℹ️ Details"
-            )
+            rendered = sum(1 for row in keyboard for b in row if getattr(b, "text", None) == "ℹ️ Details")
             text = f"{text} [{rendered}/{int(overall_total)}]"
     except Exception:
         pass
@@ -2489,7 +2479,6 @@ async def createcat_page(update_or_message, context: CallbackContext, *, page: i
             page = int(parts[1])
         except Exception:
             page = 1
-
 
     try:
         context.user_data["createcat_last_page"] = page
@@ -3219,9 +3208,7 @@ async def show_coach_in_category(update: Update, context: CallbackContext):
             design = await _resolve_design_for_category_name(db, category)
         except Exception:
             design = None
-        await _send_design_photo(
-            query, context, text, reply_markup, force_design=design
-        )
+        await _send_design_photo(query, context, text, reply_markup, force_design=design)
     except Exception:
         logger.exception("Error fetching coach courses in category")
         await safe_edit_message(
@@ -3347,9 +3334,7 @@ async def showtype_handler(update: Update, context: CallbackContext):
             design = await _resolve_design_for_category_name(db, category_name)
         except Exception:
             design = None
-        await _send_design_photo(
-            query, context, text, reply_markup, force_design=design
-        )
+        await _send_design_photo(query, context, text, reply_markup, force_design=design)
 
     except Exception:
         logger.exception("Error showing type courses")
@@ -3748,8 +3733,7 @@ async def _design_is_usable(context, design) -> bool:
     """
     if not isinstance(design, str) or not design.strip():
         logger.warning(
-            "Stored design for this category is empty; rendering the text view. "
-            "Re-upload it with /design_cat"
+            "Stored design for this category is empty; rendering the text view. Re-upload it with /design_cat"
         )
         return False
 
@@ -3834,14 +3818,10 @@ async def _send_design_photo(query, context, text, reply_markup, force_design: s
         #     edit. This is the stable path: no new message, no delete, no bounce.
         #     Identity is the rendered message, not the file_id (see
         #     _remember_design_render: a re-sent photo gets a fresh file_id).
-        already_showing = show_photo and _shows_design(
-            context, query, design, current_photo, current_unique
-        )
+        already_showing = show_photo and _shows_design(context, query, design, current_photo, current_unique)
         if already_showing:
             try:
-                await query.message.edit_caption(
-                    caption=_banner_caption(text), reply_markup=reply_markup
-                )
+                await query.message.edit_caption(caption=_banner_caption(text), reply_markup=reply_markup)
                 # Self-heal the record (e.g. after a restart lost user_data and
                 # the match came from a still-identical file_id).
                 _remember_design_render(context, query.message, design)
@@ -6130,9 +6110,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         design = await _resolve_design_for_category_name(db, category)
                     except Exception:
                         design = None
-                    await _send_design_photo(
-                        query, context, text, reply_markup, force_design=design
-                    )
+                    await _send_design_photo(query, context, text, reply_markup, force_design=design)
                 else:
                     await safe_edit_message(
                         query,
@@ -6302,9 +6280,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             design = await _resolve_design_for_category_name(db, category)
                         except Exception:
                             design = None
-                        await _send_design_photo(
-                            query, context, text, reply_markup, force_design=design
-                        )
+                        await _send_design_photo(query, context, text, reply_markup, force_design=design)
                         return
 
                     if kind == "coach":
@@ -6377,9 +6353,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                             design = await _resolve_design_for_category_name(db, coach_name)
                         except Exception:
                             design = None
-                        await _send_design_photo(
-                            query, context, text, reply_markup, force_design=design
-                        )
+                        await _send_design_photo(query, context, text, reply_markup, force_design=design)
                         return
                 else:
                     if len(parts) == 1:
@@ -6521,9 +6495,7 @@ async def courses_callback(update: Update, context: CallbackContext):
                         design = await _resolve_design_for_category_name(db, category)
                     except Exception:
                         design = None
-                    await _send_design_photo(
-                        query, context, text, reply_markup, force_design=design
-                    )
+                    await _send_design_photo(query, context, text, reply_markup, force_design=design)
                     return
             except Exception:
                 logger.exception("Error parsing courses callback")

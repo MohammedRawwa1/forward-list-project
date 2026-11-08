@@ -555,11 +555,7 @@ async def parent_selected(update: Update, context: CallbackContext):
         for child in page_children:
             display = f"{child.get('name')}"
             keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        display, callback_data=_addcoach_cb(child.get("name"), child.get("id"))
-                    )
-                ],
+                [InlineKeyboardButton(display, callback_data=_addcoach_cb(child.get("name"), child.get("id")))],
             )
         nav = []
         total_pages = (child_count - 1) // page_size + 1 if child_count else 1
@@ -582,12 +578,14 @@ async def parent_selected(update: Update, context: CallbackContext):
             elif page < last_page:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
+                        "⬅️ Previous",
+                        callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
+                        "🏠 Home",
+                        callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
                 nav.append(
@@ -605,12 +603,14 @@ async def parent_selected(update: Update, context: CallbackContext):
             elif page > 1:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
+                        "⬅️ Previous",
+                        callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
+                        "🏠 Home",
+                        callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
         if nav:
@@ -696,12 +696,14 @@ async def parent_selected(update: Update, context: CallbackContext):
             elif page < last_page:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
+                        "⬅️ Previous",
+                        callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
+                        "🏠 Home",
+                        callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
                 nav.append(
@@ -719,12 +721,14 @@ async def parent_selected(update: Update, context: CallbackContext):
             elif page > 1:
                 nav.append(
                     InlineKeyboardButton(
-                        "⬅️ Previous",                            callback_data=_addcoach_page_cb(parent, page - 1),
+                        "⬅️ Previous",
+                        callback_data=_addcoach_page_cb(parent, page - 1),
                     ),
                 )
                 nav.append(
                     InlineKeyboardButton(
-                        "🏠 Home",                            callback_data=_addcoach_page_cb(parent, 1),
+                        "🏠 Home",
+                        callback_data=_addcoach_page_cb(parent, 1),
                     ),
                 )
         if nav:
