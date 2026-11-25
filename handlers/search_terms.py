@@ -73,7 +73,6 @@ _WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 # Words of a multi-word query must stay in order, but may be separated by any
 # punctuation/whitespace ("advanced python" also matches "Advanced - Python").
 _SEPARATOR = r"[\s\W_]+"
-_PREFIX_GROUP = f"(?:{'|'.join(sorted(_PREFIXES, key=len, reverse=True))})?"
 
 
 def _fold_once(word: str) -> str:
@@ -126,6 +125,34 @@ def fold(token: str) -> str:
     return word
 
 
+def _variant_spellings(token: str) -> set[str]:
+    """Return exact spellings that fold to the same canonical token."""
+    stem = fold(token)
+    roots = {stem}
+    if stem and stem[-1] not in _VOWELS and stem[-1] not in _NO_UNDOUBLE:
+        roots.add(stem + stem[-1])
+
+    spellings = {token, stem}
+    for root in roots:
+        spellings.add(root + "e")
+        if root.endswith("i"):
+            spellings.update((root[:-1] + "y", root[:-1] + "ies", root[:-1] + "ied"))
+        for suffix, replacement in _REPLACEMENTS:
+            if replacement:
+                if root.endswith(replacement):
+                    spellings.add(root[: -len(replacement)] + suffix)
+            else:
+                spellings.add(root + suffix)
+    # Keep only candidates that the canonicalizer confirms as equivalent.
+    stem_spellings = {spelling for spelling in spellings if spelling and fold(spelling) == stem}
+    for spelling in tuple(stem_spellings):
+        for prefix in _PREFIXES:
+            candidate = prefix + spelling
+            if fold(candidate) == stem:
+                stem_spellings.add(candidate)
+    return stem_spellings
+
+
 def build_search_pattern(query_text: str) -> str:
     """Regex (case-insensitive ``$regex``) matching the query in any word form.
 
@@ -139,11 +166,6 @@ def build_search_pattern(query_text: str) -> str:
 
     parts = []
     for word in words:
-        stem = fold(word)
-        if stem and stem != word.lower() and len(stem) >= 3:
-            # trailing \w* lets the stem match its inflected surface form
-            # ("creat" -> "created"), so multi-word queries stay contiguous
-            parts.append(_PREFIX_GROUP + re.escape(stem) + r"\w*")
-        else:
-            parts.append(re.escape(word))
+        spellings = "|".join(re.escape(spelling) for spelling in sorted(_variant_spellings(word.lower())))
+        parts.append(r"\b(?:" + spellings + r")\b")
     return _SEPARATOR.join(parts)
