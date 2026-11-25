@@ -1,8 +1,8 @@
 import logging
 import os
-import re as re_module
 
 from handlers.base_handlers import _get_total_count
+from handlers.search_terms import build_search_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ def build_course_search_pipeline(
     index_name: str = "default",
     fuzzy: bool = True,
 ) -> dict:
-    pattern = re_module.escape(query_text)
+    pattern = build_search_pattern(query_text)
     search_stage = _make_text_search_stage(query_text, "courses.name", index_name, fuzzy)
     start = (page - 1) * page_size
 
@@ -135,7 +135,7 @@ def build_category_course_search_pipeline(
     fuzzy: bool = True,
     include_children: bool = True,
 ) -> dict:
-    pattern = re_module.escape(query_text)
+    pattern = build_search_pattern(query_text)
     start = (page - 1) * page_size
 
     if include_children:
@@ -238,7 +238,7 @@ def build_regex_category_search_pipeline(
     page_size: int = 50,
     parent: str = None,
 ) -> dict:
-    pattern = re_module.escape(query_text)
+    pattern = build_search_pattern(query_text)
 
     if parent:
         scope_filter = {"parent": parent}
@@ -262,7 +262,7 @@ def build_regex_course_search_pipeline(
     page: int = 1,
     page_size: int = 50,
 ) -> dict:
-    pattern = re_module.escape(query_text)
+    pattern = build_search_pattern(query_text)
 
     pipeline = [
         {"$unwind": "$courses"},
@@ -292,7 +292,7 @@ def build_regex_category_course_search_pipeline(
     page_size: int = 50,
     include_children: bool = True,
 ) -> dict:
-    pattern = re_module.escape(query_text)
+    pattern = build_search_pattern(query_text)
 
     if include_children:
         pipeline = [
@@ -340,7 +340,7 @@ def build_regex_coach_course_search_pipeline(
     page_size: int = 50,
     include_children: bool = True,
 ) -> dict:
-    pattern = re_module.escape(query_text)
+    pattern = build_search_pattern(query_text)
 
     if category:
         if include_children:
